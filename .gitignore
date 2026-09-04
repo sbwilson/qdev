@@ -1,0 +1,35 @@
+# Rust
+/target/
+**/*.rs.bk
+*.bk
+cargo-timing.html
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Root-level research folder
+/research/
+
+# BMad
+_bmad/custom/config.user.toml
+config.user.toml
+
+# Xcode / Swift
+build/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+xcuserdata/
+*.xccheckout
+*.moved-aside
+DerivedData/
+*.hmap
+*.ipa
+*.xcuserstate
+.build/

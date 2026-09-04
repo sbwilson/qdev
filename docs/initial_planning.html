@@ -1,0 +1,1529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>qdev — Product Architecture & Specification</title>
+  <style>
+    :root {
+      --bg-primary: #0b0f19;
+      --bg-secondary: #111827;
+      --bg-tertiary: #1f2937;
+      --bg-card: #162032;
+      --border-color: #374151;
+      --border-accent: #3b82f6;
+      --text-primary: #f3f4f6;
+      --text-secondary: #9ca3af;
+      --text-muted: #6b7280;
+      --accent-blue: #38bdf8;
+      --accent-indigo: #818cf8;
+      --accent-emerald: #34d399;
+      --accent-amber: #fbbf24;
+      --accent-rose: #f43f5e;
+      --code-bg: #0f172a;
+      --code-text: #e2e8f0;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+      --font-mono: ui-monospace, "SF Mono", "Fira Code", Monaco, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      line-height: 1.65;
+      padding: 0;
+      margin: 0;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 40px 24px 80px 24px;
+    }
+
+    header {
+      border-bottom: 1px solid var(--border-color);
+      padding-bottom: 32px;
+      margin-bottom: 40px;
+    }
+
+    .badge-row {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-radius: 9999px;
+      border: 1px solid;
+    }
+
+    .badge-blue { background: rgba(56, 189, 248, 0.1); border-color: var(--accent-blue); color: var(--accent-blue); }
+    .badge-emerald { background: rgba(52, 211, 153, 0.1); border-color: var(--accent-emerald); color: var(--accent-emerald); }
+    .badge-amber { background: rgba(251, 191, 36, 0.1); border-color: var(--accent-amber); color: var(--accent-amber); }
+    .badge-rose { background: rgba(244, 63, 94, 0.1); border-color: var(--accent-rose); color: var(--accent-rose); }
+
+    h1 {
+      font-size: 2.75rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      margin-bottom: 12px;
+      background: linear-gradient(135deg, #ffffff 0%, var(--accent-blue) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .subtitle {
+      font-size: 1.25rem;
+      color: var(--text-secondary);
+      max-width: 850px;
+    }
+
+    nav.toc {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 48px;
+    }
+
+    nav.toc h2 {
+      font-size: 1rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+    }
+
+    nav.toc ul {
+      list-style: none;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 10px 24px;
+    }
+
+    nav.toc a {
+      color: var(--text-primary);
+      text-decoration: none;
+      font-size: 0.95rem;
+      transition: color 0.15s ease;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    nav.toc a:hover {
+      color: var(--accent-blue);
+    }
+
+    nav.toc a::before {
+      content: "§";
+      color: var(--accent-blue);
+      font-weight: bold;
+    }
+
+    section {
+      margin-bottom: 56px;
+      scroll-margin-top: 32px;
+    }
+
+    h2 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 20px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    h3 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin: 28px 0 14px 0;
+      color: var(--accent-blue);
+    }
+
+    p {
+      margin-bottom: 16px;
+      color: var(--text-secondary);
+      font-size: 1.025rem;
+    }
+
+    strong {
+      color: var(--text-primary);
+    }
+
+    ul, ol {
+      margin-bottom: 20px;
+      padding-left: 24px;
+      color: var(--text-secondary);
+    }
+
+    li {
+      margin-bottom: 8px;
+    }
+
+    code {
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+      background: var(--code-bg);
+      color: var(--code-text);
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      padding: 20px;
+      overflow-x: auto;
+      margin-bottom: 24px;
+    }
+
+    pre code {
+      background: transparent;
+      padding: 0;
+      border: none;
+      font-size: 0.88rem;
+      line-height: 1.5;
+      display: block;
+    }
+
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 20px;
+      margin: 24px 0;
+    }
+
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      padding: 24px;
+    }
+
+    .card-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .callout {
+      border-left: 4px solid;
+      border-radius: 0 8px 8px 0;
+      padding: 18px 20px;
+      margin: 24px 0;
+      background: var(--bg-secondary);
+    }
+
+    .callout-info { border-color: var(--accent-blue); }
+    .callout-warning { border-color: var(--accent-amber); }
+    .callout-danger { border-color: var(--accent-rose); }
+    .callout-success { border-color: var(--accent-emerald); }
+
+    .callout-title {
+      font-weight: 700;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 24px 0;
+      background: var(--bg-secondary);
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border-color);
+    }
+
+    th, td {
+      padding: 14px 18px;
+      text-align: left;
+      border-bottom: 1px solid var(--border-color);
+      font-size: 0.95rem;
+    }
+
+    th {
+      background: var(--bg-tertiary);
+      font-weight: 600;
+      color: var(--text-primary);
+      text-transform: uppercase;
+      font-size: 0.75rem;
+      letter-spacing: 0.05em;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    tr:hover td {
+      background: rgba(255,255,255,0.02);
+    }
+
+    .step-list {
+      counter-reset: step-counter;
+      list-style: none;
+      padding-left: 0;
+    }
+
+    .step-item {
+      position: relative;
+      padding-left: 48px;
+      margin-bottom: 24px;
+    }
+
+    .step-item::before {
+      counter-increment: step-counter;
+      content: counter(step-counter);
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 32px;
+      height: 32px;
+      background: var(--accent-blue);
+      color: var(--bg-primary);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 0.9rem;
+    }
+
+    footer {
+      border-top: 1px solid var(--border-color);
+      padding-top: 32px;
+      margin-top: 64px;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+
+  <header>
+    <div class="badge-row">
+      <span class="badge badge-blue">Architecture Design</span>
+      <span class="badge badge-emerald">Language-Agnostic Tooling</span>
+      <span class="badge badge-amber">SaMD / IEC 62304</span>
+      <span class="badge badge-rose">v1.5 Specification</span>
+    </div>
+    <h1>qdev</h1>
+    <p class="subtitle">
+      A language-agnostic, relational workflow engine, gatekeeper, and context optimizer designed for high-integrity medical software development under the BMAD + Shape Up hybrid methodology.
+    </p>
+  </header>
+
+  <nav class="toc">
+    <h2>Architecture & Specification Index</h2>
+    <ul>
+      <li><a href="#problem-statement">1. Problem Statement: The Markdown Context Wall</a></li>
+      <li><a href="#prior-art">2. Prior Art & Landscape Analysis</a></li>
+      <li><a href="#methodology">3. The Core Synthesis: BMAD Tree + Shape Up</a></li>
+      <li><a href="#end-to-end-lifecycle">4. The End-to-End Product Development Lifecycle</a></li>
+      <li><a href="#cli-grammar">5. CLI Grammar & Structured Output Architecture</a></li>
+      <li><a href="#default-cli">6. The Default qdev Command Experience ("What To Do Next")</a></li>
+      <li><a href="#code-hygiene">7. Multi-Entity Citations & Code Hygiene Filter</a></li>
+      <li><a href="#artifacts-catalog">8. Relational Documentation Artifacts Catalog</a></li>
+      <li><a href="#ownership-governance">9. Multi-Owner Teams & Cross-Team Governance</a></li>
+      <li><a href="#orthogonal-releases">10. Orthogonal Sprints & SemVer Releases</a></li>
+      <li><a href="#grammar-datamodel">11. Indexing Grammar & Data Model (Module-Agnostic)</a></li>
+      <li><a href="#storage-architecture">12. Storage Architecture: SQLite + Auto-Hydration</a></li>
+      <li><a href="#phase-skills">13. The Three-Phase Lifecycle & Model Tiering</a></li>
+      <li><a href="#gate-engine">14. The Generic Ratchet & Gate Engine</a></li>
+      <li><a href="#iec-compliance">15. IEC 62304 Medical Device Architecture & Compliance</a></li>
+      <li><a href="#git-preflight">16. Git Integration & Preflight Synchronization</a></li>
+      <li><a href="#configuration">17. Dual Configuration Specification (qdev.toml & .qdev.local.toml)</a></li>
+      <li><a href="#installation-integration">18. Installation, Bootstrapping & Environment Integration</a></li>
+      <li><a href="#roadmap-scope">19. Version 1 MVP Implementation Scope</a></li>
+      <li><a href="#implementation-plan">20. Step-by-Step Implementation Roadmap (v1 Execution Plan)</a></li>
+      <li><a href="#architectural-review">21. In-Depth Architectural Review & Flagged Areas</a></li>
+    </ul>
+  </nav>
+
+  <!-- SECTION 1 -->
+  <section id="problem-statement">
+    <h2>1. Problem Statement: The Markdown Context Wall</h2>
+    <p>
+      During the multi-sprint development of <strong>Qubric</strong>—a native, offline-first medical bronchoscopy platform incorporating video ingest, metrology/SLAM, and a shared core via Crux—the project adopted the BMAD method to govern planning and code generation.
+    </p>
+    <p>
+      As Sprint 5 expanded to 15 epics and over 160 stories, the markdown-driven approach encountered severe operational failure modes:
+    </p>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-title" style="color: var(--accent-rose);">❌ Context Sprawl & Token Exhaustion</div>
+        <p>
+          Critical files expanded unchecked. <code>AGENTS.md</code> ballooned from 386 to 6,144 words in ten days because story context duplicated the architecture spine. Agents loaded 20,000+ tokens of markdown just to extract three acceptance criteria.
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="card-title" style="color: var(--accent-amber);">❌ Syntax Drift & Automation Blindness</div>
+        <p>
+          Flat files drifted across multiple human and agent formats. <code>deferred-work.md</code> accumulated 216 checkboxes, 259 bullet items, and freeform text simultaneously, blinding automated drainage scripts (<code>bmad-loop sweep</code>).
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="card-title" style="color: var(--accent-blue);">❌ Line-Anchor Rotting</div>
+        <p>
+          Source code, CI scripts, and specs cited line numbers in markdown files (e.g. <code>deferred-work.md:2340-2368</code>). As earlier lines were modified, 17 of 21 anchors rotted silently, pointing to completely unrelated entries.
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="card-title" style="color: var(--accent-indigo);">❌ Silent YAML Comment Dropping</div>
+        <p>
+          BMAD’s python script (<code>sprint_plan.py</code>) silently erased header comments and annotations inside <code>sprint-status.yaml</code> upon re-serialization, forcing manual recovery and hand-editing.
+        </p>
+      </div>
+    </div>
+
+    <div class="callout callout-info">
+      <div class="callout-title">The Fundamental Architectural Insight</div>
+      <p>
+        Software requirements, epics, stories, architectural decisions (ADRs), deferred technical debt, and test verification gates form a <strong>strongly typed directed relational graph</strong>. Storing a relational graph in dozens of flat markdown files inevitably causes consistency breakdown and token waste. Relational entities belong in a relational database.
+      </p>
+    </div>
+  </section>
+
+  <!-- SECTION 2 -->
+  <section id="prior-art">
+    <h2>2. Prior Art & Landscape Analysis</h2>
+    <p>
+      A thorough survey of the ecosystem reveals four distinct categories of tools addressing agent coordination, none of which fully solve the problem for high-integrity medical software:
+    </p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Category</th>
+          <th>Representative Tools</th>
+          <th>Capabilities</th>
+          <th>Gaps for Qubric</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Agent Task Graphs</strong></td>
+          <td><code>swiftj/synapse</code>, <code>Beads (bd)</code>, <code>tacks</code>, <code>taskman</code></td>
+          <td>Local-first SQLite or Dolt DAGs; machine-readable JSON; agent-focused task dependency tracking.</td>
+          <td>Too low-level. Lack hierarchical understanding of PRDs, Epics, Sprints, ADR bindings, and regulatory traceability.</td>
+        </tr>
+        <tr>
+          <td><strong>Versioned SQL</strong></td>
+          <td><code>Dolt</code></td>
+          <td>MySQL-compatible database with Git semantics (branch, diff, merge, snapshot).</td>
+          <td>Excellent storage substrate, but requires external CGO runtime and daemon; not a full development methodology tool.</td>
+        </tr>
+        <tr>
+          <td><strong>Requirements-as-Code</strong></td>
+          <td><code>StrictDoc</code>, <code>Sphinx-Needs</code>, <code>Mantra</code></td>
+          <td>Structured technical specifications; bidirectional traceability matrices; IEC 62304 compliance.</td>
+          <td>Focused on static documentation and audits; lacks interactive agentic planning, model tiering, and execution gating.</td>
+        </tr>
+        <tr>
+          <td><strong>AI Spec Toolkits</strong></td>
+          <td><code>GitHub Spec Kit</code>, <code>ChatPRD</code></td>
+          <td>Linear prompts: Constitution → Specify → Plan → Tasks.</td>
+          <td>Too flat. Fails to model multi-epic enterprise hierarchies, module boundaries, and complex systems refactors.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>
+      <strong>Conclusion:</strong> <code>qdev</code> is created to fill this gap: providing an offline-first, single-binary Rust engine that couples deep hierarchical planning with relational integrity, Shape Up boundary enforcement, and regulatory-grade verification gates.
+    </p>
+  </section>
+
+  <!-- SECTION 3 -->
+  <section id="methodology">
+    <h2>3. The Core Synthesis: BMAD Tree + Shape Up</h2>
+    <p>
+      Qubric adopts a hybrid approach that combines the strengths of BMAD's hierarchical decomposition with Basecamp's Shape Up boundary constraints.
+    </p>
+
+    <div class="card-grid">
+      <div class="card" style="border-top: 4px solid var(--accent-blue);">
+        <div class="card-title">BMAD Hierarchical Tree (Positive Structure)</div>
+        <p><strong>Tells the AI where it is:</strong></p>
+        <ul>
+          <li><strong>PRD:</strong> High-level problem definition, market/clinical rationale, target release.</li>
+          <li><strong>Epics:</strong> Architectural domains, phases, and core capabilities.</li>
+          <li><strong>Stories:</strong> Atomic units of work carrying functional intent and acceptance criteria.</li>
+          <li><strong>ADRs:</strong> Binding architectural decisions outliving individual stories.</li>
+        </ul>
+      </div>
+
+      <div class="card" style="border-top: 4px solid var(--accent-rose);">
+        <div class="card-title">Shape Up Guardrails (Negative Boundaries)</div>
+        <p><strong>Tells the AI where it is forbidden to go:</strong></p>
+        <ul>
+          <li><strong>Appetite:</strong> Budget and complexity clamp (<code>tiny</code>, <code>small</code>, <code>medium</code>, <code>deep</code>).</li>
+          <li><strong>Target Modules:</strong> Subsystem and file boundary clamp (e.g. <code>["bridge", "foundation"]</code> or <code>["Packages/RustBridge"]</code>).</li>
+          <li><strong>Rabbit Holes:</strong> Known architectural and technical traps to actively avoid.</li>
+          <li><strong>No-Gos:</strong> Explicit out-of-scope capabilities forbidden in this story.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout callout-warning">
+      <div class="callout-title">Why Negative Constraints Stop Hallucinations</div>
+      <p>
+        LLMs are predisposed to over-engineer when given open-ended requirements. When prompted only with positive acceptance criteria, agents often import forbidden libraries (e.g. <code>tokio</code> in Qubric's Rust core), refactor adjacent subsystems, or build speculative features. Explicitly injecting <strong>Rabbit Holes</strong> and <strong>No-Gos</strong> into the developer prompt suppresses scope creep and reduces wasted tokens.
+      </p>
+    </div>
+  </section>
+
+  <!-- SECTION 4 -->
+  <section id="end-to-end-lifecycle">
+    <h2>4. The End-to-End Product Development Lifecycle</h2>
+    <p>
+      <code>qdev</code> models the full lifecycle of complex software development, establishing a disciplined progression from initial ideation down to atomic commits and sprint transitions.
+    </p>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-title">Stage 1: Initialization</div>
+        <p><code>qdev init</code> configures <code>qdev.toml</code> and <code>.qdev.local.toml</code>, registers team identities and developers, initializes the local gitignored SQLite cache, and installs Git preflight hooks.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Stage 2: Structured Ideation & Architecture</div>
+        <p>Guided synthesis of PRDs, Architecture Spines, UX models, and Risk registers. Replaces multi-agent role-playing theater with <strong>Structured Multi-Perspective Synthesis</strong>.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Stage 3: Decomposition & Concurrency Planning</div>
+        <p>Refines architecture into Sprints, Epics, and Stories. Analyzes the dependency DAG to identify <strong>Parallel Execution Tracks</strong> (e.g., UI shell vs. core engine).</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Stage 4: Story Execution Loop</div>
+        <p>The per-story iteration: <code>specify</code> (author spec with boundaries) → <code>develop</code> (TDD + scratchpad + hygiene filter) → <code>review</code> (adversarial audit + evidence stamp).</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Stage 5: End-of-Epic Review</div>
+        <p><code>qdev review epic &lt;id&gt;</code> audits all delivered stories against the epic milestone, ensures no unclassified debt remains, and verifies epic-level gates.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Stage 6: End-of-Sprint Review</div>
+        <p><code>qdev review sprint &lt;id&gt;</code> executes full regression suites, audits Known Residual Anomalies, freezes velocity metrics, and outputs compliance traceability reports.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Stage 7: Sprint Transition & Baseline Freeze</div>
+        <p><code>qdev sprint close &lt;id&gt; --status done|paused|abandoned</code> snapshots the release baseline and atomically rolls over open debt or incomplete stories into the next sprint.</p>
+      </div>
+    </div>
+
+    <h3>Eliminating Persona Theater (De-Noising Multi-Agent Sessions)</h3>
+    <p>
+      A common frustration with frameworks like BMAD is "persona role-play bloat"—where multiple LLM personas (e.g., Product Manager Mary, Architect Winston, UX Sally) exchange thousands of tokens in simulated polite banter ("Hi Mary! Thanks for the great PRD...").
+    </p>
+    <div class="callout callout-info">
+      <div class="callout-title">Structured Multi-Perspective Synthesis</div>
+      <p>
+        <code>qdev</code> retains the analytical value of multiple viewpoints (Product, Architecture, Clinical/UX, Risk) without conversational role-play. Instead of conversational agents chatting back and forth, <code>qdev</code> prompts a single high-reasoning model with a **Multi-Perspective Synthesis Schema**:
+      </p>
+      <pre><code># Multi-Perspective Synthesis:
+[Product & Clinical Value]: Concise statement of intent and clinical workflow impact.
+[Architectural Constraints]: Invariants, module boundaries, C-ABI signatures, FFI implications.
+[Safety & Risk Profile]: ISO 14971 hazards, dual-limb controls, failure injection modes.
+[Implementation Directives]: Acceptance criteria, Shape Up Rabbit Holes, and No-Gos.</code></pre>
+      <p>
+        This yields identical or superior analytical depth while saving up to 80% of prompt tokens and eliminating conversational noise.
+      </p>
+    </div>
+  </section>
+
+  <!-- SECTION 5 -->
+  <section id="cli-grammar">
+    <h2>5. CLI Grammar & Structured Output Architecture</h2>
+    <p>
+      <code>qdev</code> adopts a strictly standardized command line grammar modeled after modern UNIX and distributed system tools:
+    </p>
+
+    <div class="callout callout-info">
+      <div class="callout-title">Universal Command Syntax</div>
+      <pre><code>qdev &lt;verb&gt; &lt;noun&gt; [flags/parameters] [-- &lt;input&gt;]</code></pre>
+    </div>
+
+    <h3>Command Syntax Examples</h3>
+    <ul>
+      <li><code>qdev get story S5E2S4 --json</code> — Retrieves structured JSON representation of a story.</li>
+      <li><code>qdev create story S5E2 --title "CoreResponse Buffer" --appetite small</code> — Creates a new story.</li>
+      <li><code>qdev update story S5E2S4 --status in-progress</code> — Transitions story status.</li>
+      <li><code>qdev gate run c-abi-round-trip --format json</code> — Executes a verification gate and emits structured results.</li>
+      <li><code>qdev scratch append S5E2S4 -- "Used AtomicBool instead of Mutex on frame drop latch."</code> — Appends to the story scratchpad.</li>
+      <li><code>qdev dw add --story S5E2S4 --module bridge --title "Refactor CBridge buffer layout"</code> — Registers deferred technical debt.</li>
+    </ul>
+
+    <h3>Universal Structured Output (JSON Support)</h3>
+    <p>
+      Every command in <code>qdev</code> accepts a global <code>--json</code> or <code>--format json</code> flag. This allows downstream tools, shell scripts, CI pipelines, and LLM tool interpreters to consume deterministic JSON payloads:
+    </p>
+
+    <pre><code>$ qdev get story S5E2S4 --json
+{
+  "id": "S5E2S4",
+  "epic_id": "S5E2",
+  "seq": 4,
+  "title": "CoreResponse Buffer Layout",
+  "status": "ready",
+  "appetite": "small",
+  "owners": ["simon", "team:core-platform"],
+  "target_modules": ["bridge", "foundation"],
+  "rabbit_holes": ["Do not add status field", "len == 0 does not mean empty result"],
+  "no_gos": ["Do not implement Swift decoding", "Do not touch frame buffers"],
+  "gates": ["c-abi-round-trip", "worker-pool-roster"],
+  "version": 1
+}</code></pre>
+  </section>
+
+  <!-- SECTION 6 -->
+  <section id="default-cli">
+    <h2>6. The Default qdev Command Experience ("What To Do Next")</h2>
+    <p>
+      Running <code>qdev</code> with no arguments in the terminal (or calling the <code>/qdev</code> root skill in an AI chat session) acts as the interactive project pulse. It tests the environment, reports key stats, and computes the deterministic **"What To Do Next"** guidance.
+    </p>
+
+    <pre><code>$ qdev
+================================================================================
+  qdev v1.0 — Qubric Development Engine & Gatekeeper
+================================================================================
+● Environment:
+  - Working Tree: CLEAN (on develop @ 8f1b2c4)
+  - Remote Sync: UP TO DATE with origin/develop
+  - SQLite Cache: HEALTHY (synced 18ms ago, 184 entities)
+
+● Active Sprint: Sprint 5 (The Rust Core Port) [Target Release: 0.1.0]
+  - Owner: core-platform (Active User: simon)
+  - Stories: 42 Completed / 12 In-Progress / 108 Backlog (26% velocity)
+  - Open Deferred Work (DW): 8 items (0 Unacceptable risks)
+  - Gates: 14/14 PASSING (Ratchets at baseline)
+
+● What To Do Next:
+  → Story S5E2S4 ("CoreResponse Buffer Layout") is UNBLOCKED and READY.
+  → Action: Run `/qdev-develop S5E2S4` to begin implementation.
+================================================================================</code></pre>
+
+    <div class="callout callout-success">
+      <div class="callout-title">Dual Access: CLI + LLM Skills</div>
+      <p>
+        Every command in <code>qdev</code> is executable in two formats:
+      </p>
+      <ul>
+        <li><strong>CLI Binary:</strong> <code>qdev status</code>, <code>qdev gate run &lt;id&gt;</code>, <code>qdev dw list</code> (for terminal use, shell scripts, and CI/CD pipelines).</li>
+        <li><strong>LLM Skills:</strong> <code>/qdev</code>, <code>/qdev-develop &lt;id&gt;</code>, <code>/qdev-review &lt;id&gt;</code> (for interactive execution within Claude Code, Cursor, or Gemini, returning rich formatted Markdown and context).</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- SECTION 7 -->
+  <section id="code-hygiene">
+    <h2>7. Multi-Entity Citations & Code Hygiene Filter</h2>
+    <p>
+      A pervasive pathology when pair-programming with advanced LLMs (such as Opus 5) is that models frequently inject <strong>forensic development memoirs</strong> directly into source code comments.
+    </p>
+
+    <h3>The Anti-Pattern: Forensic Memoir Pollution</h3>
+    <pre><code>// ❌ ANTI-PATTERN: FORENSIC ESSAY COMMENT IN PRODUCTION CODE
+// ⭐ **STORY 2.10 — THE FIRST `import RustBridge` IN THE RUNNING APP.**
+//
+// `DiscoveryPaneView` (the TCA pane) is replaced here by the Rust-driven
+// one. The reducer itself is untouched: `DatabaseFeature`'s
+// `Scope(state: \.discoveryPane, …)` still runs, `DiscoveryPaneFeatureTests`
+// still passes, and the exit below goes back through the reducer's own
+// `Delegate` arms — so the navigation an operator gets is byte for byte
+// the navigation the reducer already produced. `AW-NFR-16` requires the
+// evidence at a commit PRECEDING the deletion, which is 2.11's.
+RustDiscoveryPaneMount(...)</code></pre>
+
+    <h3>The Solution: Multi-Entity Compact Citations</h3>
+    <p>
+      <code>qdev</code> standardizes concise inline citations referencing any entity in the system. The <code>/qdev-develop</code> prompt explicitly instructs the LLM:
+    </p>
+    <div class="callout callout-info">
+      <div class="callout-title">Prompt Directive for Developer Agent</div>
+      <p>
+        <em>"CRITICAL: Write clean, standard code comments. Reference architectural decisions, stories, and rulings using compact bracket tags: <code>// [DEC-XXX] ...</code>, <code>// [S...E...S...] ...</code>, <code>// [AD-XX] ...</code>. NEVER generate narrative historical memoirs, story summaries, or review round commentary in code."</em>
+      </p>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Entity Type</th>
+          <th>Compact Inline Citation Example</th>
+          <th>Where Full Context Lives</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Story Reference</strong></td>
+          <td><code>// [S5E2S10] Replaced TCA pane with Rust-driven mount (ref AD-43)</code></td>
+          <td>Story spec: <code>docs/specs/sprint-5/S5E2S10.md</code></td>
+        </tr>
+        <tr>
+          <td><strong>Decision Reference</strong></td>
+          <td><code>// [DEC-293] Show the extended attributes table here per Simon's ruling</code></td>
+          <td>SQLite <code>decisions</code> table / Story scratchpad</td>
+        </tr>
+        <tr>
+          <td><strong>ADR Reference</strong></td>
+          <td><code>// [AD-43] Worker pool bounded join; no async sleep permitted</code></td>
+          <td>Architecture Spine / ADR registry</td>
+        </tr>
+        <tr>
+          <td><strong>Hazard Control</strong></td>
+          <td><code>// [HAZ-014] Safety PIP engagement threshold latch</code></td>
+          <td><code>HAZARD-MATRIX.md</code> / Risk register</td>
+        </tr>
+        <tr>
+          <td><strong>Deferred Work</strong></td>
+          <td><code>// [DW-421] Temporary zero-copy buffer bypass</code></td>
+          <td>SQLite <code>deferred_work</code> table</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-title">1. Distillation to Compact Citations</div>
+        <p>Historical narrative is stripped from source files. Code comments are compressed into clean docstrings with compact story/decision tags.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">2. Relocation to Story Scratchpad</div>
+        <p>The forensic reasoning (review rounds, deleted banners, trade-offs) is automatically relocated into the story's <strong>scratchpad</strong> or <strong>decision ledger</strong>.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECTION 8 -->
+  <section id="artifacts-catalog">
+    <h2>8. Relational Documentation Artifacts Catalog</h2>
+    <p>
+      To eliminate markdown sprawl while preserving deep technical context, <code>qdev</code> identifies, indexes, and relationally stores eight core documentation artifacts produced during development:
+    </p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Artifact Type</th>
+          <th>Lifecycle Stage</th>
+          <th>Content Captured & Stored in SQLite</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Product Brief / PRFAQ</strong></td>
+          <td>Ideation (Stage 2)</td>
+          <td>Working Backwards customer/clinical problem statement, customer FAQ, internal developer FAQ.</td>
+        </tr>
+        <tr>
+          <td><strong>Architecture Invariant Spine</strong></td>
+          <td>Architecture (Stage 2)</td>
+          <td>The lean list of workspace-wide non-negotiables (no async runtimes, ring boundary directions, FFI bounds).</td>
+        </tr>
+        <tr>
+          <td><strong>Architectural Decisions (ADRs)</strong></td>
+          <td>Architecture & Design</td>
+          <td>Permanent decision records: context, alternatives rejected, chosen approach, binding invariants.</td>
+        </tr>
+        <tr>
+          <td><strong>Sprint Change Proposals</strong></td>
+          <td>Course Correction (Mid-Sprint)</td>
+          <td>Formalized pivot proposals (adopted from BMAD <code>bmad-correct-course</code>): trigger, issue summary, impact analysis on stories/epics, artifact conflict resolutions.</td>
+        </tr>
+        <tr>
+          <td><strong>UX Interaction Specifications</strong></td>
+          <td>Design & Specification</td>
+          <td>State machines for viewports, safety HUD layouts, Safety PIP fallbacks, degraded UI surfaces.</td>
+        </tr>
+        <tr>
+          <td><strong>Hazard Analysis & Risk Controls</strong></td>
+          <td>Regulatory / Safety</td>
+          <td>ISO 14971 hazard IDs, hazardous situations, software causes, dual-limb risk control verifications.</td>
+        </tr>
+        <tr>
+          <td><strong>End-of-Epic Retrospective Dossiers</strong></td>
+          <td>Epic Review (Stage 5)</td>
+          <td>Delivered capabilities, action items, standing technical debt assignments (e.g. creating tooling epics).</td>
+        </tr>
+        <tr>
+          <td><strong>Release Baselines & Traceability Matrices</strong></td>
+          <td>Sprint Close (Stage 7)</td>
+          <td>The locked Requirements Traceability Matrix (RTM), SOUP SBOM, and Known Residual Anomalies report.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- SECTION 9 -->
+  <section id="ownership-governance">
+    <h2>9. Multi-Owner Teams & Cross-Team Governance</h2>
+    <p>
+      In complex systems, multiple specialized teams or roles work concurrently. <code>qdev</code> introduces an **Ownership and Team Governance Model** supporting multiple owners (persons or teams) to prevent accidental cross-boundary interference.
+    </p>
+
+    <h3>Multi-Owner Representation</h3>
+    <p>
+      Owners of a Sprint, Epic, or Story can be defined as one or more persons, a team, or a combination:
+    </p>
+    <pre><code># Inside Story or Epic Frontmatter
+owners:
+  - "simon"
+  - "amelia"
+  - "team:core-platform"</code></pre>
+
+    <h3>The Cross-Team Governance Guard</h3>
+    <p>
+      If a developer or AI agent operating under one team attempts to claim or modify an entity owned exclusively by another team:
+    </p>
+
+    <div class="callout callout-warning">
+      <div class="callout-title">Cross-Team Governance Alert (Prompt Interlock)</div>
+      <pre><code>⚠️  CROSS-TEAM GOVERNANCE INTERLOCK:
+  Target Entity: Epic S5E2 ("The Crux Shell")
+  Entity Owners: ["simon", "team:core-platform"]
+  Current User:  sally (Team: ui-shell)
+
+Modifying this architectural core entity crosses defined team boundaries.
+Select action:
+  [1] Proceed with Cross-Team Override (Logs justification in Decision Ledger)
+  [2] Reassign Entity Ownership to include current user/team
+  [3] Abandon modification</code></pre>
+      <p>
+        If option 1 is selected, <code>qdev</code> requires an explicit justification and permanently logs a <code>cross_team_override</code> record in the <code>decisions</code> table for auditability.
+      </p>
+    </div>
+  </section>
+
+  <!-- SECTION 10 -->
+  <section id="orthogonal-releases">
+    <h2>10. Orthogonal Sprints & SemVer Releases</h2>
+    <p>
+      In <code>qdev</code>, <strong>Functional Specifications</strong> and <strong>Temporal Execution Sprints</strong> are orthogonal.
+    </p>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-title">The Functional Space (System Specification)</div>
+        <p>The continuous, evolving tree of product capabilities: PRDs, Epics, Stories, and ADRs. Stories represent architectural features that persist across time.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">The Temporal Space (Sprints & Baselines)</div>
+        <p>Execution intervals (e.g., Sprint 1, Sprint 2, ..., Sprint 5). A sprint schedules, implements, and verifies stories. Completed sprints are frozen as immutable snapshots.</p>
+      </div>
+    </div>
+
+    <h3>Mapping SemVer Releases to PRDs and Sprints</h3>
+    <ul>
+      <li><strong>PRD v0.1.0 (Initial Platform):</strong> Covers Sprints 1 through 27 → <strong>Release v0.1.0 Baseline</strong>.</li>
+      <li><strong>PRD v0.2.0 (SfS Metrology Program):</strong> Covers Sprints 28 through 53 → <strong>Release v0.2.0 Baseline</strong>.</li>
+      <li><strong>PRD v0.1.1 (Emergency Patch Track):</strong> Derived from v0.1.0; executed in <strong>Sprint 54</strong> to patch a critical issue without pulling in in-flight v0.2.0 work.</li>
+    </ul>
+
+    <h3>External URI Referencing</h3>
+    <pre><code># Inside PRD or Story Frontmatter
+external_uris:
+  jira: "https://hospital-health.atlassian.net/browse/QB-1042"
+  regulatory_dossier: "https://vault.internal/records/DHF-0042"
+  prior_art_rfc: "https://github.com/rust-lang/rfcs/pull/1234"</code></pre>
+  </section>
+
+  <!-- SECTION 11 -->
+  <section id="grammar-datamodel">
+    <h2>11. Indexing Grammar & Data Model (Module-Agnostic)</h2>
+
+    <h3>The <code>S3E1S4</code> Indexing Grammar</h3>
+    <ul>
+      <li><strong>Story:</strong> <code>S{sprint}E{epic}S{story}</code> (e.g. <code>S3E1S4</code>, or sub-stories <code>S3E1S4a</code>).</li>
+      <li><strong>Epic:</strong> <code>S{sprint}E{epic}</code> (e.g. <code>S3E1</code>).</li>
+      <li><strong>PRD:</strong> <code>S{sprint}-PRD</code> (e.g. <code>S5-PRD</code>).</li>
+      <li><strong>ADR:</strong> <code>AD-{number}</code> (e.g. <code>AD-43</code>, globally monotonic across the workspace).</li>
+      <li><strong>Deferred Work:</strong> <code>DW-{number}</code> (e.g. <code>DW-421</code>, globally monotonic).</li>
+      <li><strong>Decision:</strong> <code>DEC-{number}</code> (e.g. <code>DEC-104</code>, logged per story).</li>
+    </ul>
+
+    <h3>Entity Relations (The Graph Engine)</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Relationship</th>
+          <th>Source → Target</th>
+          <th>Semantic Meaning</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>depends_on</code></td>
+          <td>Story → Story</td>
+          <td>Execution DAG: Target must be in <code>done</code> status before source can start.</td>
+        </tr>
+        <tr>
+          <td><code>extends</code></td>
+          <td>Story → Story</td>
+          <td>Iterative enhancement: Source refines or adds degraded modes to target.</td>
+        </tr>
+        <tr>
+          <td><code>supersedes</code></td>
+          <td>Story → Story / Epic</td>
+          <td>Deprecation: Source replaces target. Target is retired and blocked from active work.</td>
+        </tr>
+        <tr>
+          <td><code>traces_to</code></td>
+          <td>Story → PRD / Requirement</td>
+          <td>IEC 62304 traceability link from functional requirement to code.</td>
+        </tr>
+        <tr>
+          <td><code>closes_dw</code></td>
+          <td>Story → Deferred Work</td>
+          <td>Discharges a technical debt item upon verified story closure.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>SQLite Relational Schema</h3>
+    <pre><code>-- Core Releases & Sprints
+CREATE TABLE releases (
+    version TEXT PRIMARY KEY,        -- e.g. '0.1.0'
+    target_date TEXT,
+    base_version TEXT REFERENCES releases(version),
+    status TEXT CHECK(status IN ('planning', 'active', 'frozen', 'shipped'))
+);
+
+CREATE TABLE sprints (
+    id INTEGER PRIMARY KEY,          -- e.g. 5
+    release_version TEXT REFERENCES releases(version),
+    title TEXT NOT NULL,
+    owners TEXT NOT NULL,            -- JSON array: ["simon", "team:core-platform"]
+    status TEXT CHECK(status IN ('planning', 'active', 'completed', 'paused', 'abandoned')),
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP
+);
+
+-- Epics and Stories
+CREATE TABLE epics (
+    id TEXT PRIMARY KEY,             -- e.g. 'S5E2'
+    sprint_id INTEGER REFERENCES sprints(id),
+    title TEXT NOT NULL,
+    owners TEXT NOT NULL,            -- JSON array of owners/teams
+    phase INTEGER,
+    status TEXT DEFAULT 'planning'
+);
+
+CREATE TABLE stories (
+    id TEXT PRIMARY KEY,             -- e.g. 'S5E2S4'
+    epic_id TEXT REFERENCES epics(id),
+    seq INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    owners TEXT NOT NULL,            -- JSON array: ["simon", "amelia"]
+    status TEXT CHECK(status IN ('backlog', 'ready', 'in-progress', 'review', 'done', 'escalated')),
+    appetite TEXT CHECK(appetite IN ('tiny', 'small', 'medium', 'deep')),
+    safety_class TEXT CHECK(safety_class IN ('ClassA', 'ClassB', 'ClassC')),
+    target_modules TEXT,             -- JSON array: ["bridge", "foundation"] or ["RustBridge"]
+    rabbit_holes TEXT,               -- Pitfalls to avoid
+    no_gos TEXT,                     -- Strictly out of scope
+    spec_path TEXT NOT NULL,
+    version INTEGER DEFAULT 1
+);
+
+-- Semantic Relationships
+CREATE TABLE entity_relations (
+    source_id TEXT NOT NULL,
+    relation_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    notes TEXT,
+    PRIMARY KEY (source_id, relation_type, target_id)
+);
+
+-- Decision Ledger
+CREATE TABLE decisions (
+    id TEXT PRIMARY KEY,             -- e.g. 'DEC-104'
+    story_id TEXT REFERENCES stories(id),
+    decision_type TEXT CHECK(decision_type IN ('human_ruling', 'agent_assumption', 'cross_team_override')),
+    topic TEXT NOT NULL,
+    context TEXT NOT NULL,
+    ruling TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Deferred Work & Anomaly Register (IEC 62304 Clause 9)
+CREATE TABLE deferred_work (
+    id TEXT PRIMARY KEY,             -- e.g. 'DW-421'
+    origin_story_id TEXT REFERENCES stories(id),
+    target_module TEXT NOT NULL,     -- Language-agnostic module / subsystem identifier
+    title TEXT NOT NULL,
+    status TEXT CHECK(status IN ('open', 'done', 'wont_fix')),
+    safety_risk TEXT CHECK(safety_risk IN ('negligible', 'acceptable_with_mitigation', 'unacceptable')) DEFAULT 'negligible',
+    clinical_rationale TEXT,         -- Required risk justification under ISO 14971
+    gate TEXT,
+    resolution TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- SOUP Inventory (IEC 62304 §5.3.3)
+CREATE TABLE soup_dependencies (
+    id TEXT PRIMARY KEY,             -- e.g. 'rusqlite-0.31.0'
+    dependency_name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    license TEXT,
+    cve_status TEXT DEFAULT 'clean',
+    evaluated_for_release TEXT REFERENCES releases(version)
+);
+
+-- Executable Gates & Audit Runs
+CREATE TABLE gates (
+    id TEXT PRIMARY KEY,             -- e.g. 'c-abi-round-trip'
+    gate_type TEXT CHECK(gate_type IN ('command', 'ratchet', 'red_fixture', 'hazard_limb', 'phi_leak', 'soup_audit', 'hygiene')),
+    command TEXT NOT NULL,
+    depends_on TEXT                  -- JSON array of gate IDs
+);
+
+CREATE TABLE gate_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    story_id TEXT REFERENCES stories(id),
+    gate_id TEXT REFERENCES gates(id),
+    commit_sha TEXT NOT NULL,
+    exit_code INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    summary TEXT,
+    ran_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);</code></pre>
+  </section>
+
+  <!-- SECTION 12 -->
+  <section id="storage-architecture">
+    <h2>12. Storage Architecture: SQLite + Auto-Hydration</h2>
+    <p>
+      <code>qdev</code> uses a <strong>Hydrated Projection Model</strong>. Markdown files with YAML frontmatter act as the canonical Git source of truth, while an auto-hydrated SQLite database acts as the high-speed local query cache.
+    </p>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-title">Disk Storage (Git Source of Truth)</div>
+        <ul>
+          <li>Single-entity markdown files with YAML frontmatter under <code>docs/specs/sprint-{N}/</code>.</li>
+          <li>Discrete deferred work files under <code>docs/state/dw/</code>.</li>
+          <li>Committed to Git; produces clean, human-readable PR diffs.</li>
+          <li>Zero binary merge conflicts.</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Local SQLite Cache (.qubric/qdev.db)</div>
+        <ul>
+          <li><strong>Gitignored</strong> local cache file.</li>
+          <li>Abstracted behind a Rust <code>Store</code> trait (allowing future Postgres backends).</li>
+          <li>Auto-hydrated on startup in ~25ms via file <code>mtime</code> and content hashes.</li>
+          <li>Can be deleted at any time and regenerated without loss of data.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECTION 13 -->
+  <section id="phase-skills">
+    <h2>13. The Three-Phase Lifecycle & Model Tiering</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Phase Skill</th>
+          <th>Target Model</th>
+          <th>Core Responsibility</th>
+          <th>Context Ingested</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong><code>/qdev-create-story</code></strong></td>
+          <td>High Reasoning (Sonnet / Gemini Thinking)</td>
+          <td>Decomposes Epic into next sequential story; queries related ADRs; defines Acceptance Criteria, Rabbit Holes, and No-Gos; initializes scratchpad.</td>
+          <td>Epic goals, relevant ADRs, sibling story titles. (~800 tokens)</td>
+        </tr>
+        <tr>
+          <td><strong><code>/qdev-develop</code></strong></td>
+          <td>Fast Coding (Sonnet / Flash / Cursor)</td>
+          <td>Implements code using TDD; maintains intermediate scratchpad; runs internal exit gates (No-Go checks, module boundaries, code hygiene filter).</td>
+          <td>Story spec, scratchpad, binding module invariants. (~400 tokens)</td>
+        </tr>
+        <tr>
+          <td><strong><code>/qdev-review</code></strong></td>
+          <td>Adversarial Audit (Opus / Pro)</td>
+          <td>Audits git diff against acceptance criteria; verifies that No-Gos, Rabbit Holes, and comment hygiene were respected; verifies all gates; stamps evidence.</td>
+          <td>Story spec, git diff, scratchpad summary, gate receipts. (~1,200 tokens)</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- SECTION 14 -->
+  <section id="gate-engine">
+    <h2>14. The Generic Ratchet & Gate Engine</h2>
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-title" style="color: var(--accent-emerald);">On Pass (Token Savings: ~95%)</div>
+        <p>Instead of dumping 400 lines of Cargo build output:</p>
+        <pre><code>[PASS] gate:c-abi-round-trip | 18 tests passed | sha: 8f1b2c | duration: 1.2s</code></pre>
+      </div>
+
+      <div class="card">
+        <div class="card-title" style="color: var(--accent-rose);">On Failure (Noise Stripping)</div>
+        <p>Strips compiler warnings and extracts only the failing assertion:</p>
+        <pre><code>[FAIL] gate:c-abi-round-trip (exit 101)
+crates/bridge/tests/c_abi_round_trip.rs:142
+assertion failed: `(left == right)`
+  left: `CoreResponse::EffectsUnavailable`,
+ right: `CoreResponse::EventNotUnderstood`</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECTION 15 -->
+  <section id="iec-compliance">
+    <h2>15. IEC 62304 Medical Device Architecture & Compliance</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Standard Requirement</th>
+          <th>Clause</th>
+          <th>Automated Mechanism in <code>qdev</code></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>SOUP & Vulnerability Audits</strong></td>
+          <td>§5.3.3, §5.3.4</td>
+          <td><code>qdev soup audit</code> runs dependency checks; exports release SBOM.</td>
+        </tr>
+        <tr>
+          <td><strong>Known Residual Anomalies</strong></td>
+          <td>§5.8.7, Cl. 9</td>
+          <td>ISO 14971 risk tagging on <code>DW-*</code>; auto-generated Anomaly Report on release baseline.</td>
+        </tr>
+        <tr>
+          <td><strong>Architectural Segregation</strong></td>
+          <td>§5.3.5</td>
+          <td>Automated gate enforcing downward-only ring dependency between modules.</td>
+        </tr>
+        <tr>
+          <td><strong>Verification Independence</strong></td>
+          <td>§5.5.3, §5.7.3</td>
+          <td>Strict phase separation (<code>develop</code> vs <code>review</code>); logged reviewer evidence receipts.</td>
+        </tr>
+        <tr>
+          <td><strong>Change Impact Analysis</strong></td>
+          <td>§5.7.4, Cl. 6.2.3</td>
+          <td>Graph traversal determining affected stories, modules, and mandatory regression tests.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- SECTION 16 -->
+  <section id="git-preflight">
+    <h2>16. Git Integration & Preflight Synchronization</h2>
+    <div class="callout callout-danger">
+      <div class="callout-title">The Git Preflight Guard</div>
+      <p>
+        Before allowing <code>/qdev-develop</code> or <code>/qdev-create-story</code> to begin, <code>qdev</code> checks Git status against the configured remote:
+      </p>
+      <ul>
+        <li>If uncommitted changes exist outside the active story scope: <strong>Refuses execution</strong>.</li>
+        <li>If the local working branch is behind <code>origin/main</code>: <strong>Refuses execution</strong> and prints:
+          <br><code>⚠️ Error: Local branch is behind origin/develop by 3 commits. Run 'git pull' before starting S5E2S4 to prevent merge collisions.</code>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- SECTION 17 -->
+  <section id="configuration">
+    <h2>17. Dual Configuration Specification (qdev.toml & .qdev.local.toml)</h2>
+    <p>
+      To cleanly separate team-shared project policies from individual developer identities, <code>qdev</code> splits its configuration into two files:
+    </p>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-title">1. Project-Wide: qdev.toml (Committed to Git)</div>
+        <p>Defines project policies, module boundaries, registered teams, gates, regulatory standards, and Git rules:</p>
+        <pre><code># qdev.toml — Project-Wide Configuration
+[project]
+name = "Qubric"
+default_active_sprint = 5
+id_prefix = "S5"
+
+[teams]
+core-platform = ["simon", "amelia"]
+ui-shell = ["sally"]
+clinical-metrology = ["murat"]
+repo-tooling = ["simon"]
+
+[git]
+origin_remote = "origin"
+main_branch = "develop"
+branching_mode = "story-branch"
+branch_template = "feature/{story_id}-{slug}"
+enforce_clean_working_tree = true
+require_remote_sync = true
+
+[storage]
+specs_dir = "docs/specs"
+evidence_dir = "docs/state/evidence"
+deferred_work_dir = "docs/state/dw"
+sqlite_cache = ".qubric/qdev.db"
+
+[regulatory]
+iec62304_class = "ClassB"
+require_residual_anomaly_evaluation = true
+enforce_verification_independence = true
+
+[soup]
+audit_command = "cargo audit"
+deny_command = "cargo deny check"
+sbom_format = "cyclonedx-json"
+
+[modules]
+workspace_members = ["platform", "foundation", "features", "engine", "bridge", "qb", "RustBridge"]
+
+[hygiene]
+enforce_comment_diet = true
+max_inline_comment_lines = 6
+forbid_tokens = ["STORY ", "Review round", "Wave "]
+citation_format = "// [{entity_id}] {summary}"
+
+# Registered Verification Gates
+[[gates]]
+id = "fmt"
+command = "cargo fmt --all --check"
+
+[[gates]]
+id = "lint"
+command = "cargo clippy --workspace --all-targets -- -D warnings"
+depends_on = ["fmt"]
+
+[[gates]]
+id = "c-abi-round-trip"
+command = "cargo test -p bridge --test c_abi_round_trip"
+depends_on = ["lint"]</code></pre>
+      </div>
+
+      <div class="card">
+        <div class="card-title">2. Per-User Local: .qdev.local.toml (Gitignored)</div>
+        <p>Holds the local developer's identity, active roles, team memberships, and personal preferences:</p>
+        <pre><code># .qdev.local.toml — User Local Overrides (.gitignore)
+[identity]
+name = "Simon"
+developer_id = "simon"
+teams = ["core-platform", "repo-tooling"]
+active_role = "Lead Architect"
+
+[preferences]
+color_output = true
+default_format = "text"          # text | json
+editor = "cursor"
+
+[local_gates]
+skip_expensive_gates_by_default = false</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECTION 18 -->
+  <section id="installation-integration">
+    <h2>18. Installation, Bootstrapping & Environment Integration</h2>
+    <p>
+      <code>qdev</code> is engineered to install in seconds, require zero external runtime daemons, and integrate automatically with modern AI IDEs and CLI tools.
+    </p>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-title">1. Binary Compilation & Installation</div>
+        <p>Built using standard Rust toolchains directly from source or workspace:</p>
+        <pre><code># Build and install to ~/.cargo/bin
+cargo install --path tools/qdev --locked
+
+# Or via repository bootstrap script
+./scripts/install-qdev.sh</code></pre>
+        <p>The compiled binary is completely self-contained with embedded SQLite (<code>rusqlite</code> bundled), requiring no external database servers or C libraries.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">2. Project Bootstrapping (qdev init)</div>
+        <p>Initializes a project workspace in any repository:</p>
+        <pre><code>$ qdev init
+✔ Created qdev.toml (project-wide configuration)
+✔ Created .qdev.local.toml (personal identity: simon)
+✔ Added .qubric/qdev.db and .qdev.local.toml to .gitignore
+✔ Created docs/specs/ and docs/state/ directories
+✔ Initialized SQLite cache schema (version 1)</code></pre>
+      </div>
+    </div>
+
+    <h3>3. AI Skill & MCP Server Deployment (qdev install)</h3>
+    <p>
+      A developer should not have to manually copy prompt files across AI editors. <code>qdev</code> automates its own registration into the AI environment:
+    </p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Target Environment</th>
+          <th>Installation Command</th>
+          <th>What It Automatically Registers</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Claude Code / Desktop</strong></td>
+          <td><code>qdev install skills --claude</code></td>
+          <td>Writes <code>/qdev-*</code> skills into <code>.claude/skills/</code> and registers the <code>qdev</code> MCP server in <code>claude_desktop_config.json</code>.</td>
+        </tr>
+        <tr>
+          <td><strong>Cursor / VS Code</strong></td>
+          <td><code>qdev install skills --cursor</code></td>
+          <td>Generates <code>.cursor/rules/qdev.mdc</code> and registers the <code>qdev</code> stdio MCP server in <code>.cursor/mcp.json</code>.</td>
+        </tr>
+        <tr>
+          <td><strong>Antigravity / Gemini</strong></td>
+          <td><code>qdev install skills --agents</code></td>
+          <td>Installs skill bundles into <code>.agents/skills/qdev-*</code> with verified frontmatter manifests.</td>
+        </tr>
+        <tr>
+          <td><strong>Git Preflight Hooks</strong></td>
+          <td><code>qdev install hooks</code></td>
+          <td>Installs <code>.git/hooks/pre-commit</code> (runs <code>qdev hygiene --check</code>) and <code>.git/hooks/pre-push</code> (runs <code>qdev preflight</code>).</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>4. Diagnostics & Self-Healing (qdev doctor)</h3>
+    <p>
+      Running <code>qdev doctor</code> audits the host environment: verifies Git remote status, checks SQLite schema migrations, validates skill definitions, and ensures all configured verification gate executables exist in <code>$PATH</code>:
+    </p>
+    <pre><code>$ qdev doctor
+[✓] Rust Toolchain: rustc 1.85.0
+[✓] Git Status: tracking origin/develop (clean working tree)
+[✓] SQLite Cache: .qubric/qdev.db (valid schema v1, 184 entities indexed)
+[✓] AI Skills: 5 skills registered in .agents/skills/ and .claude/skills/
+[✓] MCP Server: stdio transport verified
+[✓] Verification Gates: 14 gate commands found in PATH
+All systems nominal. Ready for development.</code></pre>
+  </section>
+
+  <!-- SECTION 19 -->
+  <section id="roadmap-scope">
+    <h2>19. Version 1 MVP Implementation Scope</h2>
+    <div class="card-grid">
+      <div class="card" style="border-left: 4px solid var(--accent-emerald);">
+        <div class="card-title">In Scope for v1 (The Core Engine)</div>
+        <ul>
+          <li>Single-binary Rust CLI: <code>qdev</code> in <code>tools/qdev</code> with root status & "what to do next" guidance.</li>
+          <li>Full support for <code>qdev &lt;verb&gt; &lt;noun&gt; [flags] [-- &lt;input&gt;]</code> grammar and global <code>--json</code>.</li>
+          <li>Dual configuration engine: <code>qdev.toml</code> + <code>.qdev.local.toml</code>.</li>
+          <li>Automated environment integration: <code>qdev install skills</code>, <code>qdev install mcp</code>, <code>qdev install hooks</code>.</li>
+          <li>Self-diagnostic health audit command: <code>qdev doctor</code>.</li>
+          <li>Multi-owner support (persons + teams) with Cross-Team Governance interlocks.</li>
+          <li>Language-agnostic module system replacing hardcoded crate assumptions.</li>
+          <li>Embedded SQLite engine with auto-hydration from markdown frontmatter.</li>
+          <li>Full <code>S3E1S4</code> grammar parser and entity relationship join table.</li>
+          <li>The 3 core slash-command skills (<code>/qdev-create-story</code>, <code>/qdev-develop</code>, <code>/qdev-review</code>).</li>
+          <li>Multi-Entity compact citation system (<code>[DEC-xxx]</code>, <code>[S...E...S...]</code>, <code>[AD-xx]</code>, <code>[HAZ-xx]</code>, <code>[DW-xxx]</code>).</li>
+          <li>Code Hygiene & Comment Distillation engine with auto-relocation to scratchpads.</li>
+          <li>Structured Multi-Perspective Synthesis (de-noised ideation & planning).</li>
+          <li>Relational Documentation Artifacts Catalog indexing 8 core development document types.</li>
+          <li>End-of-Epic and End-of-Sprint review and transition commands.</li>
+          <li>Gate execution engine with stdout compression and exit code parsing.</li>
+          <li>Red-fixture, Dual-limb hazard, and PHI leak gate verifiers.</li>
+          <li>SOUP audit gate integration and SBOM export.</li>
+          <li>Automated Regression Impact Analysis CLI (<code>qdev impact &lt;story_id&gt;</code>).</li>
+          <li>ISO 14971 risk fields in Deferred Work and Residual Anomaly report export.</li>
+          <li>Git preflight guard (dirty check, remote sync check).</li>
+          <li>Per-story scratchpad management (<code>qdev scratch append/read</code>).</li>
+          <li>Decision ledger (<code>qdev decision log</code>).</li>
+          <li>Discrete Deferred Work CLI (<code>qdev dw add/list/close</code>).</li>
+        </ul>
+      </div>
+
+      <div class="card" style="border-left: 4px solid var(--accent-amber);">
+        <div class="card-title">Deferred to v2 (Future Capabilities)</div>
+        <ul>
+          <li>Embedded Axum web server and browser dashboard (<code>qdev serve</code>).</li>
+          <li>Formal PDF regulatory submission dossier generator (v1 outputs JSON/Markdown).</li>
+          <li>Hosted / Networked PostgreSQL backend integration.</li>
+          <li>Bidirectional Jira / Linear cloud synchronization.</li>
+          <li>Automated visual graph rendering of the story dependency DAG.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECTION 20 -->
+  <section id="implementation-plan">
+    <h2>20. Step-by-Step Implementation Roadmap (v1 Execution Plan)</h2>
+    <p>
+      To deliver the <code>qdev</code> v1 core systematically without disrupting active Qubric development, the implementation is organized into seven sequential, self-verifying milestones:
+    </p>
+
+    <ol class="step-list">
+      <li class="step-item">
+        <strong>Phase 1: CLI Scaffolding, Installation & Configuration Engine</strong>
+        <p>
+          Create <code>tools/qdev</code> in the repository. Implement the <code>clap</code> v4 CLI supporting <code>qdev &lt;verb&gt; &lt;noun&gt;</code> grammar and global <code>--json</code>. Implement <code>qdev init</code> and the configuration merger for <code>qdev.toml</code> (committed) and <code>.qdev.local.toml</code> (local user overrides). Provide <code>scripts/install-qdev.sh</code>.
+        </p>
+        <p><em>Deliverable:</em> <code>qdev --version</code> and <code>qdev config show --json</code> functional.</p>
+      </li>
+
+      <li class="step-item">
+        <strong>Phase 2: Storage Abstraction & SQLite Auto-Hydration Engine</strong>
+        <p>
+          Define the Rust <code>Store</code> trait. Implement the <code>rusqlite</code> embedded storage engine. Implement the file-scanner checking <code>mtime</code> and SHA-256 hashes of Markdown files in <code>docs/</code> against <code>_sync_state</code>. Implement bidirectional frontmatter serialization.
+        </p>
+        <p><em>Deliverable:</em> <code>qdev sync</code> parses test specs into <code>.qubric/qdev.db</code> in &lt; 30ms.</p>
+      </li>
+
+      <li class="step-item">
+        <strong>Phase 3: Entity Grammar & Relational Graph Operations</strong>
+        <p>
+          Implement the <code>S3E1S4</code> grammar parser. Support multi-owner definitions (persons and teams) and the semantic relationship DAG (<code>depends_on</code>, <code>extends</code>, <code>supersedes</code>, <code>traces_to</code>, <code>closes_dw</code>). Implement discrete Deferred Work (<code>DW-*</code>) and Decision Ledger (<code>DEC-*</code>) operations.
+        </p>
+        <p><em>Deliverable:</em> <code>qdev get story S5E2S4 --json</code> and <code>qdev dw list --module bridge</code> functional.</p>
+      </li>
+
+      <li class="step-item">
+        <strong>Phase 4: Git Preflight & Cross-Team Governance Guard</strong>
+        <p>
+          Implement the Git working-tree inspector (verifying clean tree and sync status against <code>origin/develop</code>). Implement the Cross-Team Governance interlock prompting for justification when modifying entities owned by external teams. Implement <code>qdev install hooks</code>.
+        </p>
+        <p><em>Deliverable:</em> <code>qdev preflight</code> refuses execution if local branch is behind remote.</p>
+      </li>
+
+      <li class="step-item">
+        <strong>Phase 5: Code Hygiene & Comment Distillation Filter</strong>
+        <p>
+          Build the comment linter and distillation parser (<code>qdev hygiene --check</code>). Enforce compact multi-entity citations (<code>[DEC-xxx]</code>, <code>[S...E...S...]</code>, <code>[AD-xx]</code>). Implement automated relocation of forensic essay comments into story scratchpads.
+        </p>
+        <p><em>Deliverable:</em> <code>qdev hygiene --check</code> catches forensic memoir comments in diffs.</p>
+      </li>
+
+      <li class="step-item">
+        <strong>Phase 6: Generic Gate & Ratchet Runner</strong>
+        <p>
+          Implement the process execution wrapper with stdout/stderr noise stripping (~95% token savings). Implement the three core SaMD gate types (Red-Fixture runner, Dual-Limb Hazard verifier, PHI leak scanner) and SOUP dependency auditor. Implement <code>qdev impact &lt;id&gt;</code> blast-radius calculation.
+        </p>
+        <p><em>Deliverable:</em> <code>qdev gate run c-abi-round-trip --json</code> executes and generates <code>.evidence.json</code>.</p>
+      </li>
+
+      <li class="step-item">
+        <strong>Phase 7: LLM Skills, MCP Registration & Root Pulse Integration</strong>
+        <p>
+          Implement the root <code>qdev</code> status command ("What To Do Next" calculation) and <code>qdev doctor</code>. Implement <code>qdev install skills</code> and <code>qdev install mcp</code>. Author the three core slash-command skills: <code>/qdev-create-story</code>, <code>/qdev-develop</code>, and <code>/qdev-review</code>. Migrate existing Sprint 5 entities into the new schema.
+        </p>
+        <p><em>Deliverable:</em> Full end-to-end story execution using <code>/qdev-*</code> in active development.</p>
+      </li>
+    </ol>
+  </section>
+
+  <!-- SECTION 21 -->
+  <section id="architectural-review">
+    <h2>21. In-Depth Architectural Review & Flagged Areas</h2>
+    <p>
+      An adversarial architectural review of this specification identified four subtle edge cases that the implementation must explicitly address:
+    </p>
+
+    <div class="card-grid">
+      <div class="card" style="border-top: 4px solid var(--accent-amber);">
+        <div class="card-title">1. Multi-Sprint Concurrency (Active + Patch Sprints)</div>
+        <p>
+          <strong>Issue:</strong> In <code>qdev.toml</code>, having a single <code>active_sprint = 5</code> fails when an emergency security patch is being developed in parallel under Sprint 54.
+        </p>
+        <p>
+          <strong>Resolution:</strong> The schema must support multiple sprints in <code>status = 'active'</code>. Commands accept an optional <code>--sprint &lt;id&gt;</code> parameter, falling back to <code>default_active_sprint</code> from configuration if omitted.
+        </p>
+      </div>
+
+      <div class="card" style="border-top: 4px solid var(--accent-rose);">
+        <div class="card-title">2. Markdown Frontmatter Preservation & Round-Tripping</div>
+        <p>
+          <strong>Issue:</strong> Generic YAML dumpers (like PyYAML) strip blank lines and inline comments within the frontmatter block when re-serializing files.
+        </p>
+        <p>
+          <strong>Resolution:</strong> Use a formatting-preserving parser/emitter in Rust (e.g., <code>toml_edit</code> or clean line-based YAML frontmatter patching) so that manual annotations inside frontmatter survive edits.
+        </p>
+      </div>
+
+      <div class="card" style="border-top: 4px solid var(--accent-blue);">
+        <div class="card-title">3. Multi-Agent Worktree Collisions</div>
+        <p>
+          <strong>Issue:</strong> If multiple autonomous agents (e.g. Subagent A and Subagent B) work on different stories concurrently, they cannot share the same checked-out working directory without git index collisions.
+        </p>
+        <p>
+          <strong>Resolution:</strong> When operating in agentic multi-track mode, <code>qdev</code> should automatically leverage <strong>Git Worktrees</strong> (<code>git worktree add</code>) to isolate execution branches into separate working directories.
+        </p>
+      </div>
+
+      <div class="card" style="border-top: 4px solid var(--accent-indigo);">
+        <div class="card-title">4. Environment Variable Inheritance in Gate Execution</div>
+        <p>
+          <strong>Issue:</strong> Shell and cargo test commands executed by the Gate Runner inside <code>qdev</code> might fail if critical environment variables (such as <code>CARGO_TARGET_DIR</code>, <code>DEVELOPER_DIR</code>, or tool paths) are not propagated.
+        </p>
+        <p>
+          <strong>Resolution:</strong> The <code>qdev</code> gate execution engine must explicitly inherit the parent shell's environment while injecting configured project variables from <code>[environment]</code> blocks in <code>qdev.toml</code>.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div>
+      <strong>Qubric Platform Engineering</strong> — Confirmed Architecture Baseline
+    </div>
+    <div>
+      Document stored at <code>docs/qdev.html</code> • Version 1.5 (Installation & Bootstrapping Augmented) • September 2026
+    </div>
+  </footer>
+
+</div>
+
+</body>
+</html>
