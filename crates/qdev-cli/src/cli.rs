@@ -28,6 +28,20 @@ pub struct Cli {
 pub enum Commands {
     /// Show pulse and status
     Status,
+    /// Inspect or manage configuration
+    Config(ConfigArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: ConfigCommands,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum ConfigCommands {
+    /// Show effective merged configuration
+    Show,
 }
 
 /// Helper to check whether `--json` was passed in raw command-line arguments.

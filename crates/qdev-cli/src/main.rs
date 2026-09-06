@@ -9,7 +9,7 @@ use clap::Parser;
 use qdev_core::{ExitCode, Interactivity, JsonEnvelope, JsonErrorEnvelope, QdevError};
 use serde::Serialize;
 
-use cli::{is_json_requested, Cli, Commands};
+use cli::{is_json_requested, Cli, Commands, ConfigCommands};
 use output::OutputEmitter;
 
 #[derive(Serialize)]
@@ -86,7 +86,11 @@ fn run(raw_args: &[String]) -> ExitCode {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             });
             if let Err(e) = output.emit_envelope(&envelope) {
-                eprintln!("Failed to emit version envelope: {}", e);
+                let err = QdevError::infrastructure_failure(
+                    "io_error",
+                    format!("Failed to emit version envelope: {}", e),
+                );
+                let _ = output.emit_error(&err);
                 return ExitCode::InfrastructureFailure;
             }
         } else {
@@ -101,6 +105,27 @@ fn run(raw_args: &[String]) -> ExitCode {
     let interactivity =
         Interactivity::resolve(cli.non_interactive, env_var.as_deref(), is_stdin_tty);
 
+    // Boot-time configuration loading per spec-1-2
+    let current_dir = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            let qdev_err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to determine current working directory: {}", e),
+            );
+            let _ = output.emit_error(&qdev_err);
+            return ExitCode::InfrastructureFailure;
+        }
+    };
+
+    let annotated_config = match qdev_core::load_config(&current_dir) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
     // Dispatch commands
     match cli.command {
         None | Some(Commands::Status) => {
@@ -108,7 +133,11 @@ fn run(raw_args: &[String]) -> ExitCode {
             if cli.json {
                 let envelope = JsonEnvelope::new(status);
                 if let Err(e) = output.emit_envelope(&envelope) {
-                    eprintln!("Failed to emit status envelope: {}", e);
+                    let err = QdevError::infrastructure_failure(
+                        "io_error",
+                        format!("Failed to emit status envelope: {}", e),
+                    );
+                    let _ = output.emit_error(&err);
                     return ExitCode::InfrastructureFailure;
                 }
             } else {
@@ -116,5 +145,31 @@ fn run(raw_args: &[String]) -> ExitCode {
             }
             ExitCode::Success
         }
+        Some(Commands::Config(config_args)) => match config_args.command {
+            ConfigCommands::Show => {
+                if cli.json {
+                    let envelope = JsonEnvelope::new(annotated_config);
+                    if let Err(e) = output.emit_envelope(&envelope) {
+                        let err = QdevError::infrastructure_failure(
+                            "io_error",
+                            format!("Failed to emit config envelope: {}", e),
+                        );
+                        let _ = output.emit_error(&err);
+                        return ExitCode::InfrastructureFailure;
+                    }
+                } else {
+                    let report = annotated_config.to_text_report();
+                    if let Err(e) = output.emit_text(&report) {
+                        let err = QdevError::infrastructure_failure(
+                            "io_error",
+                            format!("Failed to emit config report: {}", e),
+                        );
+                        let _ = output.emit_error(&err);
+                        return ExitCode::InfrastructureFailure;
+                    }
+                }
+                ExitCode::Success
+            }
+        },
     }
 }

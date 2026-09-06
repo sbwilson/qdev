@@ -1,7 +1,14 @@
+pub mod config;
 pub mod envelope;
 pub mod errors;
 pub mod interactivity;
 
+pub use config::{
+    load_config, merge_configs, resolve_git_email, validate_config_table, AnnotatedConfig,
+    AnnotatedValue, CommitMessagesConfig, Config, ConfigSource, EnvironmentConfig, GateConfig,
+    GitConfig, HygieneConfig, IdentityConfig, ModelsConfig, ModuleConfig, PreferencesConfig,
+    ProjectConfig, RegulatoryConfig, SoupConfig, StorageConfig, TeamsConfig,
+};
 pub use envelope::{ErrorPayload, JsonEnvelope, JsonErrorEnvelope, SCHEMA_VERSION};
 pub use errors::{ExitCode, QdevError};
 pub use interactivity::Interactivity;

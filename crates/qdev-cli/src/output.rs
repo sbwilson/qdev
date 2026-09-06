@@ -22,6 +22,11 @@ impl OutputEmitter {
         Self::write_stdout(&json_str)
     }
 
+    /// Emits formatted text to STDOUT.
+    pub fn emit_text(&self, text: &str) -> io::Result<()> {
+        Self::write_stdout(text)
+    }
+
     /// Emits an error per AD-13:
     /// - In JSON mode: emits JsonErrorEnvelope to STDOUT.
     /// - In text mode: emits formatted error to STDERR.
