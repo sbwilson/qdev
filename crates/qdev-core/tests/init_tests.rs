@@ -24,15 +24,23 @@ fn test_init_fresh_workspace_scaffolding() {
     assert!(!result.cache_migrated);
     assert!(result.gitignore_updated);
     assert!(result.created_files.contains(&"qdev.toml".to_string()));
-    assert!(result.created_files.contains(&".qdev.local.toml".to_string()));
+    assert!(result
+        .created_files
+        .contains(&".qdev.local.toml".to_string()));
     assert!(result.created_files.contains(&".gitignore".to_string()));
-    assert!(result.created_files.contains(&".qdev/cache/cache.sqlite".to_string()));
+    assert!(result
+        .created_files
+        .contains(&".qdev/cache/cache.sqlite".to_string()));
 
     // Verify scaffolded config is strictly valid per load_config
-    let loaded_config = qdev_core::load_config(&root).expect("Scaffolded config must load and pass validation");
+    let loaded_config =
+        qdev_core::load_config(&root).expect("Scaffolded config must load and pass validation");
     assert_eq!(loaded_config.config.project.name, "Qubric");
     assert_eq!(loaded_config.config.identity.developer_id, "simon");
-    assert_eq!(loaded_config.config.identity.teams, vec!["core-platform".to_string()]);
+    assert_eq!(
+        loaded_config.config.identity.teams,
+        vec!["core-platform".to_string()]
+    );
 
     // Verify all standard directories exist
     for &dir in STANDARD_DIRECTORIES {
@@ -167,7 +175,9 @@ fn test_never_overwrite_existing_configs() {
 
     // Configs should not be in created_files
     assert!(!result.created_files.contains(&"qdev.toml".to_string()));
-    assert!(!result.created_files.contains(&".qdev.local.toml".to_string()));
+    assert!(!result
+        .created_files
+        .contains(&".qdev.local.toml".to_string()));
 
     // Content should remain untouched
     let qdev_content = fs::read_to_string(root.join("qdev.toml")).unwrap();
@@ -230,7 +240,10 @@ fn test_cache_migration_succeeds_with_confirmation_and_drops_old_tables() {
     let cache_file = cache_dir.join("cache.sqlite");
     {
         let conn = rusqlite::Connection::open(&cache_file).unwrap();
-        conn.execute_batch("PRAGMA user_version = 0; CREATE TABLE legacy_outdated (id INTEGER PRIMARY KEY);").unwrap();
+        conn.execute_batch(
+            "PRAGMA user_version = 0; CREATE TABLE legacy_outdated (id INTEGER PRIMARY KEY);",
+        )
+        .unwrap();
     }
 
     let options = InitOptions {
@@ -371,7 +384,11 @@ fn test_multiple_teams() {
         root: root.clone(),
         name: "MultiTeam".to_string(),
         developer: "alice".to_string(),
-        teams: vec!["frontend".to_string(), "backend".to_string(), "frontend".to_string()], // duplicated team
+        teams: vec![
+            "frontend".to_string(),
+            "backend".to_string(),
+            "frontend".to_string(),
+        ], // duplicated team
         allow_migration: false,
     };
 
@@ -451,7 +468,8 @@ fn test_cache_migration_drops_views_triggers_and_escaped_tables() {
         allow_migration: true,
     };
 
-    let result = init(&options).expect("Migration should drop triggers, views, and escaped tables cleanly");
+    let result =
+        init(&options).expect("Migration should drop triggers, views, and escaped tables cleanly");
     assert_eq!(result.cache_schema_version, 1);
     assert!(result.cache_migrated);
 
@@ -472,12 +490,20 @@ fn test_cache_migration_drops_views_triggers_and_escaped_tables() {
     assert_eq!(legacy_tables, 0);
 
     let legacy_views: u32 = conn
-        .query_row("SELECT count(*) FROM sqlite_master WHERE type='view';", [], |row| row.get(0))
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='view';",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(legacy_views, 0);
 
     let legacy_triggers: u32 = conn
-        .query_row("SELECT count(*) FROM sqlite_master WHERE type='trigger';", [], |row| row.get(0))
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='trigger';",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(legacy_triggers, 0);
 }

@@ -164,13 +164,15 @@ fn default_languages() -> Vec<String> {
     ]
 }
 
+pub const DEFAULT_CITATION_PATTERN: &str = r"\[(E[1-9][0-9]*(S[1-9][0-9]*)?|AD-[1-9][0-9]*|FR-[1-9][0-9]*|NFR-[1-9][0-9]*|HAZ-[1-9][0-9]*|PRD-[1-9][0-9]*|DW-[0-9a-f]{4,}|DEC-[0-9a-f]{4,}|E[1-9][0-9]*(S[1-9][0-9]*)?/(NG|RH)-[1-9][0-9]*)\]";
+
 impl Default for HygieneConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             max_inline_comment_lines: default_max_inline_comment_lines(),
             forbid_patterns: Vec::new(),
-            citation_pattern: None,
+            citation_pattern: Some(DEFAULT_CITATION_PATTERN.to_string()),
             languages: default_languages(),
         }
     }

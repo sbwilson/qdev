@@ -9,12 +9,18 @@ use clap::Parser;
 use qdev_core::{ExitCode, Interactivity, JsonEnvelope, JsonErrorEnvelope, QdevError};
 use serde::Serialize;
 
-use cli::{is_json_requested, Cli, Commands, ConfigCommands};
+use cli::{is_json_requested, Cli, Commands, ConfigCommands, CreateCommands};
 use output::OutputEmitter;
 
 #[derive(Serialize)]
 struct VersionPayload {
     version: String,
+}
+
+#[derive(Serialize)]
+struct CreateStoryPayload {
+    id: String,
+    path: String,
 }
 
 fn main() -> StdExitCode {
@@ -102,7 +108,9 @@ fn run(raw_args: &[String]) -> ExitCode {
     // Resolve interactivity per AD-12
     let env_var = std::env::var("QDEV_NONINTERACTIVE").ok();
     let is_stdin_tty = std::io::stdin().is_terminal()
-        || std::env::var("_QDEV_MOCK_TTY").map(|v| v == "1").unwrap_or(false);
+        || std::env::var("_QDEV_MOCK_TTY")
+            .map(|v| v == "1")
+            .unwrap_or(false);
     let interactivity =
         Interactivity::resolve(cli.non_interactive, env_var.as_deref(), is_stdin_tty);
 
@@ -177,6 +185,11 @@ fn run(raw_args: &[String]) -> ExitCode {
                 ExitCode::Success
             }
         },
+        Some(Commands::Create(ref create_args)) => match create_args.command {
+            CreateCommands::Story(ref story_args) => {
+                handle_create_story(story_args, &annotated_config, &cli, &output, &current_dir)
+            }
+        },
         Some(Commands::Init(_)) => unreachable!(),
     }
 }
@@ -192,7 +205,12 @@ fn handle_init(
 
     let (name, developer, teams, allow_migration) = if interactivity.is_non_interactive() {
         // Non-interactive mode: strict flag requirements
-        let name = match init_args.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let name = match init_args
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             Some(n) => n.to_string(),
             None => {
                 let err = QdevError::policy_refusal(
@@ -207,7 +225,12 @@ fn handle_init(
             }
         };
 
-        let developer = match init_args.developer.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let developer = match init_args
+            .developer
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             Some(d) => d.to_string(),
             None => {
                 let err = QdevError::policy_refusal(
@@ -274,26 +297,42 @@ fn handle_init(
         (name, developer, teams, allow_migration)
     } else {
         // Interactive mode: TTY prompt wizard
-        let name = if let Some(n) = init_args.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let name = if let Some(n) = init_args
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             n.to_string()
         } else {
             match prompt_input("Project name: ") {
                 Ok(n) if !n.is_empty() => n,
                 Ok(_) => {
-                    let err = QdevError::policy_refusal("needs_confirmation", "Project name cannot be empty")
-                        .with_details(serde_json::json!({ "flag": "--name" }));
+                    let err = QdevError::policy_refusal(
+                        "needs_confirmation",
+                        "Project name cannot be empty",
+                    )
+                    .with_details(serde_json::json!({ "flag": "--name" }));
                     let _ = output.emit_error(&err);
                     return ExitCode::PolicyRefusal;
                 }
                 Err(e) => {
-                    let err = QdevError::infrastructure_failure("io_error", format!("Failed to read project name: {}", e));
+                    let err = QdevError::infrastructure_failure(
+                        "io_error",
+                        format!("Failed to read project name: {}", e),
+                    );
                     let _ = output.emit_error(&err);
                     return ExitCode::InfrastructureFailure;
                 }
             }
         };
 
-        let developer = if let Some(d) = init_args.developer.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let developer = if let Some(d) = init_args
+            .developer
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             d.to_string()
         } else {
             let git_email = qdev_core::resolve_git_email(Some(&root));
@@ -306,13 +345,19 @@ fn handle_init(
                 Ok(d) if !d.is_empty() => d,
                 Ok(_) if git_email.is_some() => git_email.unwrap(),
                 Ok(_) => {
-                    let err = QdevError::policy_refusal("needs_confirmation", "Developer ID cannot be empty")
-                        .with_details(serde_json::json!({ "flag": "--developer" }));
+                    let err = QdevError::policy_refusal(
+                        "needs_confirmation",
+                        "Developer ID cannot be empty",
+                    )
+                    .with_details(serde_json::json!({ "flag": "--developer" }));
                     let _ = output.emit_error(&err);
                     return ExitCode::PolicyRefusal;
                 }
                 Err(e) => {
-                    let err = QdevError::infrastructure_failure("io_error", format!("Failed to read developer ID: {}", e));
+                    let err = QdevError::infrastructure_failure(
+                        "io_error",
+                        format!("Failed to read developer ID: {}", e),
+                    );
                     let _ = output.emit_error(&err);
                     return ExitCode::InfrastructureFailure;
                 }
@@ -338,14 +383,20 @@ fn handle_init(
                         .map(str::to_string)
                         .collect();
                     if teams.is_empty() {
-                        let err = QdevError::policy_refusal("needs_confirmation", "At least one team must be specified")
-                            .with_details(serde_json::json!({ "flag": "--team" }));
+                        let err = QdevError::policy_refusal(
+                            "needs_confirmation",
+                            "At least one team must be specified",
+                        )
+                        .with_details(serde_json::json!({ "flag": "--team" }));
                         let _ = output.emit_error(&err);
                         return ExitCode::PolicyRefusal;
                     }
                 }
                 Err(e) => {
-                    let err = QdevError::infrastructure_failure("io_error", format!("Failed to read teams: {}", e));
+                    let err = QdevError::infrastructure_failure(
+                        "io_error",
+                        format!("Failed to read teams: {}", e),
+                    );
                     let _ = output.emit_error(&err);
                     return ExitCode::InfrastructureFailure;
                 }
@@ -364,7 +415,10 @@ fn handle_init(
                         current_version, target_version
                     );
                     match prompt_input(&prompt) {
-                        Ok(resp) if resp.eq_ignore_ascii_case("y") || resp.eq_ignore_ascii_case("yes") => {
+                        Ok(resp)
+                            if resp.eq_ignore_ascii_case("y")
+                                || resp.eq_ignore_ascii_case("yes") =>
+                        {
                             allow_migration = true;
                         }
                         Ok(_) => {
@@ -452,4 +506,154 @@ fn prompt_input(prompt: &str) -> std::io::Result<String> {
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     Ok(input.trim().to_string())
+}
+
+fn handle_create_story(
+    story_args: &cli::CreateStoryArgs,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+) -> ExitCode {
+    let epic_arg = story_args.epic.trim();
+
+    let parsed = match epic_arg.parse::<qdev_core::Identifier>() {
+        Ok(id) => id,
+        Err(e) => {
+            let err = QdevError::from(e);
+            let _ = output.emit_error(&err);
+            return err.exit_code();
+        }
+    };
+
+    let epic_num = match parsed {
+        qdev_core::Identifier::Epic { number } => number,
+        _ => {
+            let err = QdevError::usage_error(format!(
+                "Argument must be an Epic ID (e.g. E12), got '{}'",
+                epic_arg
+            ));
+            let _ = output.emit_error(&err);
+            return ExitCode::UsageError;
+        }
+    };
+
+    let root = qdev_core::find_workspace_root(current_dir);
+    let story_id = match qdev_core::allocate_next_story_id(&root, epic_num) {
+        Ok(id) => id,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let rel_path = format!("docs/specs/stories/{}.md", story_id);
+    let abs_path = root.join(&rel_path);
+
+    if let Some(parent) = abs_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to create directory '{}': {}", parent.display(), e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    }
+
+    let author = if !annotated_config.config.identity.developer_id.is_empty() {
+        annotated_config.config.identity.developer_id.clone()
+    } else {
+        qdev_core::resolve_git_email(Some(&root)).unwrap_or_else(|| "developer".to_string())
+    };
+
+    let title = story_args.title.as_deref().unwrap_or("");
+    let title_json = serde_json::to_string(title).unwrap_or_default();
+
+    let mut frontmatter = format!(
+        "---\nid: {}\ntitle: {}\nstatus: draft\n",
+        story_id, title_json
+    );
+
+    if let Some(ref appetite) = story_args.appetite {
+        frontmatter.push_str(&format!("appetite: {}\n", appetite));
+    }
+
+    if let Some(ref safety) = story_args.safety_class {
+        frontmatter.push_str(&format!("safety_class: {}\n", safety));
+    }
+
+    if !story_args.module.is_empty() {
+        let modules_json =
+            serde_json::to_string(&story_args.module).unwrap_or_else(|_| "[]".to_string());
+        frontmatter.push_str(&format!("target_modules: {}\n", modules_json));
+    }
+
+    if !story_args.owner.is_empty() {
+        let owners_json =
+            serde_json::to_string(&story_args.owner).unwrap_or_else(|_| "[]".to_string());
+        frontmatter.push_str(&format!("owners: {}\n", owners_json));
+    }
+
+    frontmatter.push_str(&format!(
+        "version: 1\ncreated_by:\n  type: human\n  id: {}\nupdated_by:\n  type: human\n  id: {}\n---\n\n## Acceptance Criteria\n",
+        author, author
+    ));
+
+    use std::io::Write;
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&abs_path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let err = QdevError::conflict(
+                "file_exists",
+                format!("Story file already exists: {}", abs_path.display()),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::Conflict;
+        }
+        Err(e) => {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!(
+                    "Failed to create story file '{}': {}",
+                    abs_path.display(),
+                    e
+                ),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    };
+
+    if let Err(e) = file.write_all(frontmatter.as_bytes()) {
+        let err = QdevError::infrastructure_failure(
+            "io_error",
+            format!("Failed to write story file '{}': {}", abs_path.display(), e),
+        );
+        let _ = output.emit_error(&err);
+        return ExitCode::InfrastructureFailure;
+    }
+
+    if cli.json {
+        let envelope = JsonEnvelope::new(CreateStoryPayload {
+            id: story_id.to_string(),
+            path: rel_path,
+        });
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit story envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else {
+        println!("Created story {} at {}", story_id, rel_path);
+    }
+
+    ExitCode::Success
 }

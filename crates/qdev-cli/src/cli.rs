@@ -32,6 +32,46 @@ pub enum Commands {
     Config(ConfigArgs),
     /// Scaffold config, directories, cache, and gitignore
     Init(InitArgs),
+    /// Create planning and execution entities
+    Create(CreateArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct CreateArgs {
+    #[command(subcommand)]
+    pub command: CreateCommands,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum CreateCommands {
+    /// Create a new story
+    Story(CreateStoryArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct CreateStoryArgs {
+    /// Epic identifier (e.g. E12)
+    pub epic: String,
+
+    /// Story title
+    #[arg(short = 't', long = "title")]
+    pub title: Option<String>,
+
+    /// Story appetite (tiny, small, medium, deep)
+    #[arg(short = 'a', long = "appetite")]
+    pub appetite: Option<String>,
+
+    /// Target module(s)
+    #[arg(short = 'm', long = "module")]
+    pub module: Vec<String>,
+
+    /// Story owner(s)
+    #[arg(short = 'o', long = "owner")]
+    pub owner: Vec<String>,
+
+    /// Safety class (ClassA, ClassB, ClassC)
+    #[arg(long = "safety-class")]
+    pub safety_class: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]

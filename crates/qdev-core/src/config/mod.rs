@@ -9,7 +9,7 @@ pub use source::{AnnotatedConfig, AnnotatedValue, ConfigSource};
 pub use types::{
     CommitMessagesConfig, Config, EnvironmentConfig, GateConfig, GitConfig, HygieneConfig,
     IdentityConfig, ModelsConfig, ModuleConfig, PreferencesConfig, ProjectConfig, RegulatoryConfig,
-    SoupConfig, StorageConfig, TeamsConfig,
+    SoupConfig, StorageConfig, TeamsConfig, DEFAULT_CITATION_PATTERN,
 };
 
 use crate::errors::QdevError;

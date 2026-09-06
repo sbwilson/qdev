@@ -1,6 +1,7 @@
 pub mod config;
 pub mod envelope;
 pub mod errors;
+pub mod id;
 pub mod init;
 pub mod interactivity;
 
@@ -9,9 +10,15 @@ pub use config::{
     AnnotatedConfig, AnnotatedValue, CommitMessagesConfig, Config, ConfigSource, EnvironmentConfig,
     GateConfig, GitConfig, HygieneConfig, IdentityConfig, ModelsConfig, ModuleConfig,
     PreferencesConfig, ProjectConfig, RegulatoryConfig, SoupConfig, StorageConfig, TeamsConfig,
+    DEFAULT_CITATION_PATTERN,
 };
 pub use envelope::{ErrorPayload, JsonEnvelope, JsonErrorEnvelope, SCHEMA_VERSION};
 pub use errors::{ExitCode, QdevError};
+pub use id::{
+    allocate_decision_id, allocate_decision_id_with_rng, allocate_deferred_work_id,
+    allocate_deferred_work_id_with_rng, allocate_next_story_id, ConstraintKind, ConstraintOwner,
+    IdParseError, Identifier, IdentifierKind,
+};
 pub use init::{
     check_cache_status, init, CacheStatus, InitOptions, InitResult, CACHE_SCHEMA_VERSION,
     GITIGNORE_ENTRIES, STANDARD_DIRECTORIES,

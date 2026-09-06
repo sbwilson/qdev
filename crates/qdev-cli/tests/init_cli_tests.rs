@@ -1,8 +1,8 @@
-use std::fs;
-use std::process::Command as StdCommand;
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
+use std::fs;
+use std::process::Command as StdCommand;
 use tempfile::TempDir;
 
 use qdev_core::{rusqlite, STANDARD_DIRECTORIES};
@@ -37,7 +37,8 @@ fn test_non_interactive_success() {
     assert!(stdout_str.contains("✔ .qdev.local.toml (gitignored)"));
     assert!(stdout_str.contains("✔ .qdev/cache/ (gitignored), .qdev/gates/"));
     assert!(stdout_str.contains("✔ docs/specs/{prd,requirements,epics,stories,adrs,hazards}"));
-    assert!(stdout_str.contains("✔ docs/state/{sprints,releases,dw,decisions,scratch,evidence,baselines,soup}"));
+    assert!(stdout_str
+        .contains("✔ docs/state/{sprints,releases,dw,decisions,scratch,evidence,baselines,soup}"));
     assert!(stdout_str.contains("✔ cache schema v1"));
 
     // Verify created files and directories
@@ -75,7 +76,8 @@ fn test_non_interactive_success() {
         .success()
         .code(0);
     let output_cfg = assert_cfg.get_output();
-    let val_cfg: Value = serde_json::from_str(std::str::from_utf8(&output_cfg.stdout).unwrap()).unwrap();
+    let val_cfg: Value =
+        serde_json::from_str(std::str::from_utf8(&output_cfg.stdout).unwrap()).unwrap();
     assert_eq!(val_cfg["schema_version"], "1");
     assert_eq!(val_cfg["config"]["project"]["name"], "Demo");
     assert_eq!(val_cfg["config"]["identity"]["developer_id"], "alice");
@@ -173,7 +175,10 @@ fn test_non_interactive_missing_developer() {
     let val: Value = serde_json::from_str(stdout_str).expect("Valid JSON on stdout");
     assert_eq!(val["schema_version"], "1");
     assert_eq!(val["error"]["code"], "needs_confirmation");
-    assert!(val["error"]["message"].as_str().unwrap().contains("--developer"));
+    assert!(val["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--developer"));
     assert_eq!(val["error"]["details"]["flag"], "--developer");
 }
 
@@ -315,7 +320,10 @@ fn test_non_interactive_json_output() {
     assert_eq!(val["cache_schema_version"], 1);
     assert_eq!(val["cache_migrated"], false);
     assert_eq!(val["gitignore_updated"], true);
-    assert!(val["created_files"].as_array().unwrap().contains(&Value::String("qdev.toml".to_string())));
+    assert!(val["created_files"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("qdev.toml".to_string())));
 }
 
 #[test]
@@ -590,7 +598,9 @@ fn test_interactive_wizard_git_email_fallback() {
         .assert()
         .success()
         .code(0)
-        .stderr(predicate::str::contains("Developer ID [gituser@example.com]:"));
+        .stderr(predicate::str::contains(
+            "Developer ID [gituser@example.com]:",
+        ));
 
     let local_content = fs::read_to_string(root.join(".qdev.local.toml")).unwrap();
     assert!(local_content.contains("developer_id = \"gituser@example.com\""));

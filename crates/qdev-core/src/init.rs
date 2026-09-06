@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 
 use crate::errors::QdevError;
 
@@ -26,11 +26,7 @@ pub const STANDARD_DIRECTORIES: &[&str] = &[
     "docs/state/soup",
 ];
 
-pub const GITIGNORE_ENTRIES: &[&str] = &[
-    ".qdev/cache/",
-    ".qdev/leases/",
-    ".qdev.local.toml",
-];
+pub const GITIGNORE_ENTRIES: &[&str] = &[".qdev/cache/", ".qdev/leases/", ".qdev.local.toml"];
 
 /// Options passed into the core `init` function.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,8 +42,13 @@ pub struct InitOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheStatus {
     NotInitialized,
-    NeedsMigration { current_version: u32, target_version: u32 },
-    UpToDate { version: u32 },
+    NeedsMigration {
+        current_version: u32,
+        target_version: u32,
+    },
+    UpToDate {
+        version: u32,
+    },
 }
 
 /// Result returned by the core `init` routine.
@@ -72,16 +73,21 @@ pub fn check_cache_status(root: &Path) -> Result<CacheStatus, QdevError> {
     let conn = rusqlite::Connection::open(&cache_db_path).map_err(|e| {
         QdevError::infrastructure_failure(
             "sqlite_error",
-            format!("Failed to open existing cache database at {}: {}", cache_db_path.display(), e),
+            format!(
+                "Failed to open existing cache database at {}: {}",
+                cache_db_path.display(),
+                e
+            ),
         )
     })?;
 
-    conn.pragma_update(None, "busy_timeout", 5000).map_err(|e| {
-        QdevError::infrastructure_failure(
-            "sqlite_error",
-            format!("Failed to set busy_timeout=5000 on cache database: {}", e),
-        )
-    })?;
+    conn.pragma_update(None, "busy_timeout", 5000)
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to set busy_timeout=5000 on cache database: {}", e),
+            )
+        })?;
 
     let user_version: u32 = conn
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
@@ -140,8 +146,10 @@ pub fn init(options: &InitOptions) -> Result<InitResult, QdevError> {
         }
     }
     if deduped_teams.is_empty() {
-        return Err(QdevError::usage_error("At least one team must be specified")
-            .with_details(serde_json::json!({ "field": "teams" })));
+        return Err(
+            QdevError::usage_error("At least one team must be specified")
+                .with_details(serde_json::json!({ "field": "teams" })),
+        );
     }
 
     // Validate cache status upfront before modifying filesystem
@@ -223,8 +231,7 @@ pub fn init(options: &InitOptions) -> Result<InitResult, QdevError> {
 
         let content = format!(
             "[identity]\ndeveloper_id = {:?}\nteams = {}\n",
-            developer,
-            teams_json
+            developer, teams_json
         );
 
         fs::write(&local_toml_path, &content).map_err(|e| {
@@ -251,7 +258,8 @@ pub fn init(options: &InitOptions) -> Result<InitResult, QdevError> {
         created_files.push(".qdev/cache/cache.sqlite".to_string());
     }
 
-    let already_initialized = qdev_toml_existed && local_toml_existed && cache_db_existed && !cache_migrated;
+    let already_initialized =
+        qdev_toml_existed && local_toml_existed && cache_db_existed && !cache_migrated;
 
     Ok(InitResult {
         root: root.to_string_lossy().to_string(),
@@ -281,10 +289,7 @@ fn update_gitignore(gitignore_path: &Path) -> Result<bool, QdevError> {
     }
 
     let existing = fs::read_to_string(gitignore_path).map_err(|e| {
-        QdevError::infrastructure_failure(
-            "io_error",
-            format!("Failed to read .gitignore: {}", e),
-        )
+        QdevError::infrastructure_failure("io_error", format!("Failed to read .gitignore: {}", e))
     })?;
 
     let existing_lines: Vec<&str> = existing.lines().map(|l| l.trim()).collect();
@@ -296,9 +301,9 @@ fn update_gitignore(gitignore_path: &Path) -> Result<bool, QdevError> {
 
     for &required in GITIGNORE_ENTRIES {
         let req_norm = normalize_pattern(required);
-        let found = existing_lines.iter().any(|line| {
-            normalize_pattern(line) == req_norm
-        });
+        let found = existing_lines
+            .iter()
+            .any(|line| normalize_pattern(line) == req_norm);
         if !found {
             missing_entries.push(required);
         }
@@ -318,10 +323,7 @@ fn update_gitignore(gitignore_path: &Path) -> Result<bool, QdevError> {
     }
 
     fs::write(gitignore_path, new_content).map_err(|e| {
-        QdevError::infrastructure_failure(
-            "io_error",
-            format!("Failed to update .gitignore: {}", e),
-        )
+        QdevError::infrastructure_failure("io_error", format!("Failed to update .gitignore: {}", e))
     })?;
 
     Ok(true)
@@ -337,7 +339,11 @@ fn initialize_cache(
         fs::create_dir_all(parent).map_err(|e| {
             QdevError::infrastructure_failure(
                 "io_error",
-                format!("Failed to create cache directory {}: {}", parent.display(), e),
+                format!(
+                    "Failed to create cache directory {}: {}",
+                    parent.display(),
+                    e
+                ),
             )
         })?;
     }
@@ -350,19 +356,21 @@ fn initialize_cache(
     })?;
 
     // Per AD-4: WAL mode and 5000ms busy timeout
-    conn.pragma_update(None, "journal_mode", "WAL").map_err(|e| {
-        QdevError::infrastructure_failure(
-            "sqlite_error",
-            format!("Failed to set journal_mode=WAL: {}", e),
-        )
-    })?;
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to set journal_mode=WAL: {}", e),
+            )
+        })?;
 
-    conn.pragma_update(None, "busy_timeout", 5000).map_err(|e| {
-        QdevError::infrastructure_failure(
-            "sqlite_error",
-            format!("Failed to set busy_timeout=5000: {}", e),
-        )
-    })?;
+    conn.pragma_update(None, "busy_timeout", 5000)
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to set busy_timeout=5000: {}", e),
+            )
+        })?;
 
     let user_version: u32 = conn
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
@@ -477,7 +485,9 @@ fn initialize_cache(
 fn drop_all_user_tables(conn: &rusqlite::Connection) -> Result<(), QdevError> {
     // 1. Drop triggers
     let mut stmt = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name NOT LIKE 'sqlite_%';")
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name NOT LIKE 'sqlite_%';",
+        )
         .map_err(|e| {
             QdevError::infrastructure_failure(
                 "sqlite_error",
@@ -556,12 +566,13 @@ fn drop_all_user_tables(conn: &rusqlite::Connection) -> Result<(), QdevError> {
         .filter_map(|r| r.ok())
         .collect();
 
-    conn.execute_batch("PRAGMA foreign_keys = OFF;").map_err(|e| {
-        QdevError::infrastructure_failure(
-            "sqlite_error",
-            format!("Failed to disable foreign keys: {}", e),
-        )
-    })?;
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to disable foreign keys: {}", e),
+            )
+        })?;
 
     for table in table_names {
         let escaped = table.replace('"', "\"\"");
@@ -574,16 +585,16 @@ fn drop_all_user_tables(conn: &rusqlite::Connection) -> Result<(), QdevError> {
             })?;
     }
 
-    conn.execute_batch("PRAGMA foreign_keys = ON;").map_err(|e| {
-        QdevError::infrastructure_failure(
-            "sqlite_error",
-            format!("Failed to re-enable foreign keys: {}", e),
-        )
-    })?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to re-enable foreign keys: {}", e),
+            )
+        })?;
 
     Ok(())
 }
-
 
 fn create_schema_v1(conn: &rusqlite::Connection) -> Result<(), QdevError> {
     let ddl = r#"
