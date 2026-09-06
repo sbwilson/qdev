@@ -30,6 +30,27 @@ pub enum Commands {
     Status,
     /// Inspect or manage configuration
     Config(ConfigArgs),
+    /// Scaffold config, directories, cache, and gitignore
+    Init(InitArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct InitArgs {
+    /// Project name
+    #[arg(short = 'n', long = "name")]
+    pub name: Option<String>,
+
+    /// Developer identifier
+    #[arg(short = 'd', long = "developer")]
+    pub developer: Option<String>,
+
+    /// Team name(s)
+    #[arg(short = 't', long = "team", value_name = "TEAM")]
+    pub team: Vec<String>,
+
+    /// Automatically confirm migrations or prompts
+    #[arg(short = 'y', long = "yes")]
+    pub yes: bool,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]

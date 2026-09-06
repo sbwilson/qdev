@@ -1,17 +1,23 @@
 pub mod config;
 pub mod envelope;
 pub mod errors;
+pub mod init;
 pub mod interactivity;
 
 pub use config::{
-    load_config, merge_configs, resolve_git_email, validate_config_table, AnnotatedConfig,
-    AnnotatedValue, CommitMessagesConfig, Config, ConfigSource, EnvironmentConfig, GateConfig,
-    GitConfig, HygieneConfig, IdentityConfig, ModelsConfig, ModuleConfig, PreferencesConfig,
-    ProjectConfig, RegulatoryConfig, SoupConfig, StorageConfig, TeamsConfig,
+    find_workspace_root, load_config, merge_configs, resolve_git_email, validate_config_table,
+    AnnotatedConfig, AnnotatedValue, CommitMessagesConfig, Config, ConfigSource, EnvironmentConfig,
+    GateConfig, GitConfig, HygieneConfig, IdentityConfig, ModelsConfig, ModuleConfig,
+    PreferencesConfig, ProjectConfig, RegulatoryConfig, SoupConfig, StorageConfig, TeamsConfig,
 };
 pub use envelope::{ErrorPayload, JsonEnvelope, JsonErrorEnvelope, SCHEMA_VERSION};
 pub use errors::{ExitCode, QdevError};
+pub use init::{
+    check_cache_status, init, CacheStatus, InitOptions, InitResult, CACHE_SCHEMA_VERSION,
+    GITIGNORE_ENTRIES, STANDARD_DIRECTORIES,
+};
 pub use interactivity::Interactivity;
+pub use rusqlite;
 
 use serde::{Deserialize, Serialize};
 

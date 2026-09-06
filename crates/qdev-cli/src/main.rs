@@ -101,7 +101,8 @@ fn run(raw_args: &[String]) -> ExitCode {
 
     // Resolve interactivity per AD-12
     let env_var = std::env::var("QDEV_NONINTERACTIVE").ok();
-    let is_stdin_tty = std::io::stdin().is_terminal();
+    let is_stdin_tty = std::io::stdin().is_terminal()
+        || std::env::var("_QDEV_MOCK_TTY").map(|v| v == "1").unwrap_or(false);
     let interactivity =
         Interactivity::resolve(cli.non_interactive, env_var.as_deref(), is_stdin_tty);
 
@@ -117,6 +118,11 @@ fn run(raw_args: &[String]) -> ExitCode {
             return ExitCode::InfrastructureFailure;
         }
     };
+
+    // Dispatch init command before loading config so bootstrapping works in uninitialized directories
+    if let Some(Commands::Init(ref init_args)) = cli.command {
+        return handle_init(init_args, interactivity, &cli, &output, &current_dir);
+    }
 
     let annotated_config = match qdev_core::load_config(&current_dir) {
         Ok(cfg) => cfg,
@@ -171,5 +177,279 @@ fn run(raw_args: &[String]) -> ExitCode {
                 ExitCode::Success
             }
         },
+        Some(Commands::Init(_)) => unreachable!(),
     }
+}
+
+fn handle_init(
+    init_args: &cli::InitArgs,
+    interactivity: Interactivity,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+) -> ExitCode {
+    let root = qdev_core::find_workspace_root(current_dir);
+
+    let (name, developer, teams, allow_migration) = if interactivity.is_non_interactive() {
+        // Non-interactive mode: strict flag requirements
+        let name = match init_args.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(n) => n.to_string(),
+            None => {
+                let err = QdevError::policy_refusal(
+                    "needs_confirmation",
+                    "Missing required flag '--name' in non-interactive mode",
+                )
+                .with_details(serde_json::json!({
+                    "flag": "--name"
+                }));
+                let _ = output.emit_error(&err);
+                return ExitCode::PolicyRefusal;
+            }
+        };
+
+        let developer = match init_args.developer.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(d) => d.to_string(),
+            None => {
+                let err = QdevError::policy_refusal(
+                    "needs_confirmation",
+                    "Missing required flag '--developer' in non-interactive mode",
+                )
+                .with_details(serde_json::json!({
+                    "flag": "--developer"
+                }));
+                let _ = output.emit_error(&err);
+                return ExitCode::PolicyRefusal;
+            }
+        };
+
+        let teams: Vec<String> = init_args
+            .team
+            .iter()
+            .flat_map(|t| t.split(','))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+
+        if teams.is_empty() {
+            let err = QdevError::policy_refusal(
+                "needs_confirmation",
+                "Missing required flag '--team' in non-interactive mode",
+            )
+            .with_details(serde_json::json!({
+                "flag": "--team"
+            }));
+            let _ = output.emit_error(&err);
+            return ExitCode::PolicyRefusal;
+        }
+
+        let allow_migration = init_args.yes;
+        match qdev_core::check_cache_status(&root) {
+            Ok(qdev_core::CacheStatus::NeedsMigration {
+                current_version,
+                target_version,
+            }) if !allow_migration => {
+                let err = QdevError::policy_refusal(
+                    "needs_confirmation",
+                    format!(
+                        "Cache schema migration from v{} to v{} requires confirmation or --yes",
+                        current_version, target_version
+                    ),
+                )
+                .with_details(serde_json::json!({
+                    "current_version": current_version,
+                    "target_version": target_version,
+                    "flag": "--yes",
+                }));
+                let _ = output.emit_error(&err);
+                return ExitCode::PolicyRefusal;
+            }
+            Err(e) => {
+                let _ = output.emit_error(&e);
+                return e.exit_code();
+            }
+            _ => {}
+        }
+
+        (name, developer, teams, allow_migration)
+    } else {
+        // Interactive mode: TTY prompt wizard
+        let name = if let Some(n) = init_args.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            n.to_string()
+        } else {
+            match prompt_input("Project name: ") {
+                Ok(n) if !n.is_empty() => n,
+                Ok(_) => {
+                    let err = QdevError::policy_refusal("needs_confirmation", "Project name cannot be empty")
+                        .with_details(serde_json::json!({ "flag": "--name" }));
+                    let _ = output.emit_error(&err);
+                    return ExitCode::PolicyRefusal;
+                }
+                Err(e) => {
+                    let err = QdevError::infrastructure_failure("io_error", format!("Failed to read project name: {}", e));
+                    let _ = output.emit_error(&err);
+                    return ExitCode::InfrastructureFailure;
+                }
+            }
+        };
+
+        let developer = if let Some(d) = init_args.developer.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            d.to_string()
+        } else {
+            let git_email = qdev_core::resolve_git_email(Some(&root));
+            let prompt = if let Some(ref email) = git_email {
+                format!("Developer ID [{}]: ", email)
+            } else {
+                "Developer ID: ".to_string()
+            };
+            match prompt_input(&prompt) {
+                Ok(d) if !d.is_empty() => d,
+                Ok(_) if git_email.is_some() => git_email.unwrap(),
+                Ok(_) => {
+                    let err = QdevError::policy_refusal("needs_confirmation", "Developer ID cannot be empty")
+                        .with_details(serde_json::json!({ "flag": "--developer" }));
+                    let _ = output.emit_error(&err);
+                    return ExitCode::PolicyRefusal;
+                }
+                Err(e) => {
+                    let err = QdevError::infrastructure_failure("io_error", format!("Failed to read developer ID: {}", e));
+                    let _ = output.emit_error(&err);
+                    return ExitCode::InfrastructureFailure;
+                }
+            }
+        };
+
+        let mut teams: Vec<String> = init_args
+            .team
+            .iter()
+            .flat_map(|t| t.split(','))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+
+        if teams.is_empty() {
+            match prompt_input("Team(s) (comma-separated): ") {
+                Ok(t) => {
+                    teams = t
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                    if teams.is_empty() {
+                        let err = QdevError::policy_refusal("needs_confirmation", "At least one team must be specified")
+                            .with_details(serde_json::json!({ "flag": "--team" }));
+                        let _ = output.emit_error(&err);
+                        return ExitCode::PolicyRefusal;
+                    }
+                }
+                Err(e) => {
+                    let err = QdevError::infrastructure_failure("io_error", format!("Failed to read teams: {}", e));
+                    let _ = output.emit_error(&err);
+                    return ExitCode::InfrastructureFailure;
+                }
+            }
+        }
+
+        let mut allow_migration = init_args.yes;
+        if !allow_migration {
+            match qdev_core::check_cache_status(&root) {
+                Ok(qdev_core::CacheStatus::NeedsMigration {
+                    current_version,
+                    target_version,
+                }) => {
+                    let prompt = format!(
+                        "Migrate cache schema from v{} to v{}? [y/N]: ",
+                        current_version, target_version
+                    );
+                    match prompt_input(&prompt) {
+                        Ok(resp) if resp.eq_ignore_ascii_case("y") || resp.eq_ignore_ascii_case("yes") => {
+                            allow_migration = true;
+                        }
+                        Ok(_) => {
+                            let err = QdevError::policy_refusal(
+                                "needs_confirmation",
+                                "Cache schema migration requires confirmation or --yes",
+                            )
+                            .with_details(serde_json::json!({
+                                "current_version": current_version,
+                                "target_version": target_version,
+                                "flag": "--yes",
+                            }));
+                            let _ = output.emit_error(&err);
+                            return ExitCode::PolicyRefusal;
+                        }
+                        Err(e) => {
+                            let err = QdevError::infrastructure_failure(
+                                "io_error",
+                                format!("Failed to read migration confirmation: {}", e),
+                            );
+                            let _ = output.emit_error(&err);
+                            return ExitCode::InfrastructureFailure;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = output.emit_error(&e);
+                    return e.exit_code();
+                }
+                _ => {}
+            }
+        }
+
+        (name, developer, teams, allow_migration)
+    };
+
+    let options = qdev_core::InitOptions {
+        root,
+        name,
+        developer,
+        teams,
+        allow_migration,
+    };
+
+    let result = match qdev_core::init(&options) {
+        Ok(res) => res,
+        Err(err) => {
+            let _ = output.emit_error(&err);
+            return err.exit_code();
+        }
+    };
+
+    if cli.json {
+        let envelope = JsonEnvelope::new(result);
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit init envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else {
+        println!("✔ qdev.toml");
+        println!("✔ .qdev.local.toml (gitignored)");
+        println!("✔ .qdev/cache/ (gitignored), .qdev/gates/");
+        println!("✔ docs/specs/{{prd,requirements,epics,stories,adrs,hazards}}");
+        println!("✔ docs/state/{{sprints,releases,dw,decisions,scratch,evidence,baselines,soup}}");
+        if result.cache_migrated {
+            println!("✔ cache schema migrated to v1");
+        } else if result.already_initialized {
+            println!("✔ cache schema v1 up to date");
+        } else {
+            println!("✔ cache schema v1");
+        }
+    }
+
+    ExitCode::Success
+}
+
+fn prompt_input(prompt: &str) -> std::io::Result<String> {
+    use std::io::{self, Write};
+    eprint!("{}", prompt);
+    io::stderr().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
 }
