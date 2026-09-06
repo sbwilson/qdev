@@ -1,0 +1,6 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/qdev-core",
+    "crates/qdev-cli",
+]
