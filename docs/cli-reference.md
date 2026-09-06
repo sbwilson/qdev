@@ -1,253 +1,373 @@
 # qdev CLI Reference & Configuration Guide
 
-> Command-line grammar, universal JSON output, interactive status experience, configuration specifications, and environment bootstrapping.
+> Command grammar, JSON envelope and exit codes, the default pulse command, configuration files, and environment integration.
 
 ## Table of Contents
 
-- [CLI Grammar & Structured Output Architecture](#cli-grammar)
-- [The Default qdev Command Experience ("What To Do Next")](#default-cli)
-- [Dual Configuration Specification (qdev.toml & .qdev.local.toml)](#configuration)
-- [Installation, Bootstrapping & Environment Integration](#installation-integration)
+- [Command Grammar](#cli-grammar)
+- [Command Catalog](#catalog)
+- [JSON Envelope, Errors & Exit Codes](#json)
+- [Non-Interactive Mode](#non-interactive)
+- [The Default Command ("What To Do Next")](#default-cli)
+- [Configuration](#configuration)
+- [Installation & Environment Integration](#installation-integration)
 
 ---
 
 <a id="cli-grammar"></a>
 
-## 5. CLI Grammar & Structured Output Architecture
+## 1. Command Grammar
 
-`qdev` adopts a strictly standardized command line grammar modeled after modern UNIX and distributed system tools:
+```
+qdev <verb> <noun> <id> [flags]            generic entity operations
+qdev <noun> <verb> [args] [flags]          domain operations scoped to a noun
+qdev <command> [flags]                     workspace-level commands
+```
 
-> [!NOTE]
-> **Universal Command Syntax**
->
-> ```bash
-> qdev <verb> <noun> [flags/parameters] [-- <input>]
-> ```
+- **Generic verbs** `get`, `list`, `create`, `update`, `delete` prefix the noun: `qdev get story E12S4`.
+- **Domain operations** are subcommands of their noun: `qdev gate run c-abi-round-trip`, `qdev scratch append E12S4`, `qdev sprint close 5`.
+- **Workspace commands** stand alone: `qdev init`, `qdev doctor`, `qdev validate`, `qdev next`, `qdev context`.
+- Free text is passed after `--` or via `--file`/stdin.
 
-### Command Syntax Examples
+Universal reference resolution: any command that takes an ID accepts any entity ID (`E12S4`, `AD-43`, `FR-102`, `DW-7f3a`, `E12S4/NG-1`).
 
-- `qdev get story S5E2S4 --json` — Retrieves structured JSON representation of a story.
-- `qdev create story S5E2 --title "CoreResponse Buffer" --appetite small` — Creates a new story.
-- `qdev update story S5E2S4 --status in-progress` — Transitions story status.
-- `qdev gate run c-abi-round-trip --format json` — Executes a verification gate and emits structured results.
-- `qdev scratch append S5E2S4 -- "Used AtomicBool instead of Mutex on frame drop latch."` — Appends to the story scratchpad.
-- `qdev dw add --story S5E2S4 --module bridge --title "Refactor CBridge buffer layout"` — Registers deferred technical debt.
+---
 
-### Universal Structured Output (JSON Support)
+<a id="catalog"></a>
 
-Every command in `qdev` accepts a global `--json` or `--format json` flag. This allows downstream tools, shell scripts, CI pipelines, and LLM tool interpreters to consume deterministic JSON payloads:
+## 2. Command Catalog
 
-```bash
-$ qdev get story S5E2S4 --json
+### Workspace
+
+| Command | Purpose |
+| --- | --- |
+| `qdev` | Pulse: environment, active sprints, what to do next |
+| `qdev init [--non-interactive --name --developer --team ...]` | Scaffold config, directories, cache, hooks |
+| `qdev doctor [--fix]` | Environment, cache, gates, skills, MCP, hooks |
+| `qdev validate [--fix-ids]` | Dangling relations, cycles, ID collisions, schema, orphan DW, missing rationale |
+| `qdev sync [--rebuild]` | Force hydration or rebuild the cache |
+| `qdev schema <payload>` | Print JSON Schema for a payload (`story`, `context`, `gate_run`, `error`, ...) |
+| `qdev config show` | Effective merged configuration |
+| `qdev next [--sprint N] [--owner me]` | Deterministically select the next unblocked story |
+| `qdev context <id> --phase P [--budget N] [--stats]` | Token-budgeted projection for an agent phase |
+| `qdev graph [--dot] [--epic E12]` | Dependency DAG |
+| `qdev impact <id>` | Affected stories, modules, requirements, and gates to re-run |
+
+### Entities
+
+| Command | Purpose |
+| --- | --- |
+| `qdev get <kind> <id> [--expand relations,constraints,scratch]` | One entity; isolated by default |
+| `qdev list <kind> [--epic --status --owner --sprint --module]` | Filtered list |
+| `qdev create story E12 --title ... --appetite small --module bridge` | Allocates the next ID |
+| `qdev create epic|adr|requirement|hazard|prd ...` | Same pattern |
+| `qdev update <kind> <id> --field value [--if-version N]` | Field-level mutation |
+| `qdev update <kind> <id> --section "Acceptance Criteria" --file ac.md` | Body section replacement |
+| `qdev constraint add E12S4 --kind no_go -- "Do not touch frame buffers"` | Allocates `E12S4/NG-n` |
+| `qdev relate E12S4 depends_on E12S3` / `qdev unrelate ...` | Manage relations |
+
+### Workflow
+
+| Command | Purpose |
+| --- | --- |
+| `qdev claim story E12S4` / `qdev release [E12S4]` | Take or release a lease; prints `QDEV_SESSION` |
+| `qdev transition story E12S4 <state> [--justification ...]` | State change; backward requires justification |
+| `qdev scratch append E12S4 [--kind note|decision|tradeoff] -- "..."` | Append ledger entry |
+| `qdev scratch read E12S4 [--summary]` | Read ledger |
+| `qdev decision log --subject E12S4 --type human_ruling --topic ... --ruling ...` | Record a decision |
+| `qdev dw add --story E12S4 --module bridge --risk negligible --title ...` | Register deferred work |
+| `qdev dw list [--module --risk --status]` / `qdev dw close DW-7f3a --resolution ...` | Manage deferred work |
+| `qdev chore start "fix readme typo" --paths README.md docs/**` / `qdev chore commit` | Fast-track with path allowlist |
+| `qdev sprint open 6 --title ... --release 0.1.0` | Create sprint |
+| `qdev sprint assign 6 E12S4 ...` | Assign stories |
+| `qdev sprint close 5 --status completed --carry-over 6` | Baseline and carry open work forward |
+| `qdev review epic E12` / `qdev review sprint 5` | Reports: stories, DW, gates, traceability, anomalies |
+
+### Gates, hygiene, Git
+
+| Command | Purpose |
+| --- | --- |
+| `qdev gate run <id> [--story E12S4]` / `qdev gate run --all|--for-transition review` | Execute with evidence |
+| `qdev gate list` / `qdev gate baseline <id> --set` | Inspect; set ratchet baseline |
+| `qdev hygiene check [--diff] [--paths ...]` | Comment lint, report only |
+| `qdev preflight [--story E12S4]` | Clean tree within scope, integration branch freshness |
+| `qdev soup audit [--release 0.1.0]` / `qdev soup sbom` | Wrap configured audit and SBOM commands |
+| `qdev hook <name>` | Entry point invoked by Git hook shims |
+
+### Integration
+
+| Command | Purpose |
+| --- | --- |
+| `qdev install skills --claude|--cursor|--agents` | Generate and write skills |
+| `qdev install mcp --claude|--cursor` | Register the MCP server |
+| `qdev install hooks` | Write hook shims |
+| `qdev mcp serve` | Stdio MCP server exposing core operations |
+
+---
+
+<a id="json"></a>
+
+## 3. JSON Envelope, Errors & Exit Codes
+
+Every command accepts `--json`. Success payloads are the data object plus `schema_version`:
+
+```json
 {
-  "id": "S5E2S4",
-  "epic_id": "S5E2",
-  "seq": 4,
+  "schema_version": "1",
+  "id": "E12S4",
+  "epic_id": "E12",
   "title": "CoreResponse Buffer Layout",
   "status": "ready",
+  "blocked": false,
   "appetite": "small",
   "owners": ["simon", "team:core-platform"],
   "target_modules": ["bridge", "foundation"],
-  "rabbit_holes": ["Do not add status field", "len == 0 does not mean empty result"],
-  "no_gos": ["Do not implement Swift decoding", "Do not touch frame buffers"],
-  "gates": ["c-abi-round-trip", "worker-pool-roster"],
-  "version": 1
+  "constraints": [
+    {"id": "E12S4/NG-1", "kind": "no_go", "text": "Do not implement Swift decoding"},
+    {"id": "E12/RH-2", "kind": "rabbit_hole", "text": "len == 0 does not mean empty result", "inherited_from": "E12"}
+  ],
+  "relations": {"depends_on": ["E12S3"], "traces_to": ["FR-102"], "governed_by": ["AD-43"]},
+  "gates": ["c-abi-round-trip"],
+  "version": 3
 }
+```
+
+Errors go to stdout in JSON mode, stderr in text mode:
+
+```json
+{
+  "schema_version": "1",
+  "error": {
+    "code": "constraint_violation",
+    "message": "Change touches crates/video/ which is outside target_modules",
+    "details": {"constraint_id": "E12S4/NG-2", "text": "Do not touch frame buffers", "paths": ["crates/video/frame.rs"]}
+  }
+}
+```
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 | Logical failure: gate failed, validation findings, hygiene violations |
+| 2 | Usage error |
+| 3 | Refused by policy: preflight, lease, governance, missing justification |
+| 4 | Infrastructure failure: timeout, missing tool, cache corruption |
+| 5 | Conflict: version mismatch, lease held by another holder, lock timeout |
+
+Schema changes follow semver on `schema_version`; additive fields do not bump the major.
+
+---
+
+<a id="non-interactive"></a>
+
+## 4. Non-Interactive Mode
+
+Per **AD-12**, with `--non-interactive`, `QDEV_NONINTERACTIVE=1`, or a non-TTY stdin, qdev never prompts. A command that would have prompted exits 3 with an error naming the flag:
+
+```json
+{"error": {"code": "needs_confirmation", "message": "Cross-team override requires --override --justification", "details": {"entity": "E12", "owners": ["team:core-platform"], "user": "sally"}}}
 ```
 
 ---
 
 <a id="default-cli"></a>
 
-## 6. The Default qdev Command Experience ("What To Do Next")
+## 5. The Default Command ("What To Do Next")
 
-Running `qdev` with no arguments in the terminal (or calling the `/qdev` root skill in an AI chat session) acts as the interactive project pulse. It tests the environment, reports key stats, and computes the deterministic **"What To Do Next"** guidance.
-
-```bash
+```
 $ qdev
-================================================================================
-  qdev v1.0 — Qubric Development Engine & Gatekeeper
-================================================================================
-● Environment:
-  - Working Tree: CLEAN (on develop @ 8f1b2c4)
-  - Remote Sync: UP TO DATE with origin/develop
-  - SQLite Cache: HEALTHY (synced 18ms ago, 184 entities)
+qdev 1.0 — Development Engine & Gatekeeper
+Environment
+  Working tree   clean (feature/E12S4-buffer @ 8f1b2c4)
+  Integration    develop is up to date with origin/develop
+  Cache          healthy (synced 18 ms ago, 184 entities, 0 findings)
+  Lease          E12S4 held by simon since 09:41 (this worktree)
 
-● Active Sprint: Sprint 5 (The Rust Core Port) [Target Release: 0.1.0]
-  - Owner: core-platform (Active User: simon)
-  - Stories: 42 Completed / 12 In-Progress / 108 Backlog (26% velocity)
-  - Open Deferred Work (DW): 8 items (0 Unacceptable risks)
-  - Gates: 14/14 PASSING (Ratchets at baseline)
+Sprint 5 — The Rust Core Port  [release 0.1.0]
+  Stories        42 done / 12 in progress / 3 blocked / 108 backlog
+  Deferred work  8 open (0 unacceptable)
+  Gates          14/14 passing, ratchets at baseline
 
-● What To Do Next:
-  → Story S5E2S4 ("CoreResponse Buffer Layout") is UNBLOCKED and READY.
-  → Action: Run `/qdev-develop S5E2S4` to begin implementation.
-================================================================================
+Next
+  E12S4 "CoreResponse Buffer Layout" is ready and unblocked.
+  Run: /qdev-develop E12S4   (or: qdev context E12S4 --phase develop)
 ```
 
-> [!TIP]
-> **Dual Access: CLI + LLM Skills**
->
-> Every command in `qdev` is executable in two formats:
->
-> - **CLI Binary:** `qdev status`, `qdev gate run <id>`, `qdev dw list` (for terminal use, shell scripts, and CI/CD pipelines).
-> - **LLM Skills:** `/qdev`, `/qdev-develop <id>`, `/qdev-review <id>` (for interactive execution within Claude Code, Cursor, or Gemini, returning rich formatted Markdown and context).
+`qdev next --json` returns the same selection for orchestrators. Ordering: stories in active sprints → not blocked → not leased → owner matches current user or team → epic phase → story seq. Ties are broken by ID, so the result is deterministic.
 
 ---
 
 <a id="configuration"></a>
 
-## 17. Dual Configuration Specification (qdev.toml & .qdev.local.toml)
+## 6. Configuration
 
-To cleanly separate team-shared project policies from individual developer identities, `qdev` splits its configuration into two files:
-
-### 1. Project-Wide: qdev.toml (Committed to Git)
-
-Defines project policies, module boundaries, registered teams, gates, regulatory standards, and Git rules:
+### `qdev.toml` (committed)
 
 ```toml
-# qdev.toml — Project-Wide Configuration
 [project]
 name = "Qubric"
-default_active_sprint = 5
-id_prefix = "S5"
+default_sprint = 5                       # fallback when --sprint is omitted
 
 [teams]
 core-platform = ["simon", "amelia"]
 ui-shell = ["sally"]
-clinical-metrology = ["murat"]
-repo-tooling = ["simon"]
 
 [git]
-origin_remote = "origin"
-main_branch = "develop"
-branching_mode = "story-branch"
+remote = "origin"
+integration_branch = "develop"
+branching_mode = "story-branch"          # story-branch | trunk
 branch_template = "feature/{story_id}-{slug}"
-enforce_clean_working_tree = true
-require_remote_sync = true
+require_clean_tree_in_scope = true
+max_integration_staleness_commits = 20   # story branch merge-base freshness
 
 [storage]
 specs_dir = "docs/specs"
-evidence_dir = "docs/state/evidence"
-deferred_work_dir = "docs/state/dw"
-sqlite_cache = ".qubric/qdev.db"
+state_dir = "docs/state"
+cache_dir = ".qdev/cache"
+
+[[modules]]
+id = "foundation"
+paths = ["crates/foundation/**"]
+layer = 0
+
+[[modules]]
+id = "bridge"
+paths = ["crates/bridge/**"]
+layer = 2
+may_depend_on = ["foundation", "engine"]
+
+[[modules]]
+id = "RustBridge"
+paths = ["Packages/RustBridge/**"]
+layer = 3
+may_depend_on = ["bridge"]
+
+[hygiene]
+enabled = true
+max_inline_comment_lines = 6
+forbid_patterns = ["(?i)^\\s*(//|#)\\s*(STORY|Review round|Wave)\\b"]
+citation_pattern = "\\[(E\\d+S\\d+|AD-\\d+|DW-[0-9a-f]+|DEC-[0-9a-f]+|HAZ-\\d+|E\\d+(S\\d+)?/(NG|RH)-\\d+)\\]"
+languages = ["rust", "swift", "python"]  # comment syntaxes to parse
 
 [regulatory]
 iec62304_class = "ClassB"
-require_residual_anomaly_evaluation = true
-enforce_verification_independence = true
+require_rationale_for = ["acceptable_with_mitigation", "unacceptable"]
 
 [soup]
-audit_command = "cargo audit"
+audit_command = "cargo audit --json"
 deny_command = "cargo deny check"
-sbom_format = "cyclonedx-json"
+sbom_command = "cargo cyclonedx --format json"
 
-[modules]
-workspace_members = ["platform", "foundation", "features", "engine", "bridge", "qb", "RustBridge"]
+[models]                                  # advisory; consumed by skills
+specify = "reasoning"
+develop = "fast-coding"
+review = "strongest"
 
-[hygiene]
-enforce_comment_diet = true
-max_inline_comment_lines = 6
-forbid_tokens = ["STORY ", "Review round", "Wave "]
-citation_format = "// [{entity_id}] {summary}"
+[commit_messages]
+enabled = false                           # opt-in prepare-commit-msg
+format = "conventional"
 
-# Registered Verification Gates
+[environment]
+CARGO_TARGET_DIR = "target/qdev"
+
 [[gates]]
 id = "fmt"
 command = "cargo fmt --all --check"
+timeout_ms = 60000
 
 [[gates]]
 id = "lint"
 command = "cargo clippy --workspace --all-targets -- -D warnings"
 depends_on = ["fmt"]
+output_adapter = "cargo"
+timeout_ms = 600000
 
 [[gates]]
 id = "c-abi-round-trip"
-command = "cargo test -p bridge --test c_abi_round_trip"
+command = ".qdev/gates/c-abi-round-trip.sh"
 depends_on = ["lint"]
+on_transition = ["review"]
+verifies = ["FR-102"]
+timeout_ms = 300000
+
+[[gates]]
+id = "warning-count"
+kind = "ratchet"
+command = ".qdev/gates/warning-count.sh"
+metric = "warnings"
+direction = "must_not_increase"
 ```
 
-### 2. Per-User Local: .qdev.local.toml (Gitignored)
-
-Holds the local developer's identity, active roles, team memberships, and personal preferences:
+### `.qdev.local.toml` (gitignored)
 
 ```toml
-# .qdev.local.toml — User Local Overrides (.gitignore)
 [identity]
-name = "Simon"
 developer_id = "simon"
-teams = ["core-platform", "repo-tooling"]
-active_role = "Lead Architect"
+teams = ["core-platform"]
 
 [preferences]
-color_output = true
-default_format = "text"          # text | json
+color = true
+default_format = "text"
 editor = "cursor"
 
-[local_gates]
-skip_expensive_gates_by_default = false
+[gates]
+skip = ["warning-count"]                  # local skips are recorded in evidence as skipped
 ```
+
+Local values override project values key by key. Absence of the local file is not an error; identity falls back to `git config user.email`.
 
 ---
 
 <a id="installation-integration"></a>
 
-## 18. Installation, Bootstrapping & Environment Integration
-
-`qdev` is engineered to install in seconds, require zero external runtime daemons, and integrate automatically with modern AI IDEs and CLI tools.
-
-### 1. Binary Compilation & Installation
-
-Built using standard Rust toolchains directly from source or workspace:
+## 7. Installation & Environment Integration
 
 ```bash
-# Build and install to ~/.cargo/bin
 cargo install --path tools/qdev --locked
-
-# Or via repository bootstrap script
-./scripts/install-qdev.sh
 ```
 
-The compiled binary is completely self-contained with embedded SQLite (`rusqlite` bundled), requiring no external database servers or C libraries.
+The binary is self-contained with bundled SQLite. No external runtime is required.
 
-### 2. Project Bootstrapping (qdev init)
+### `qdev init`
 
-Initializes a project workspace in any repository:
-
-```bash
-$ qdev init
-✔ Created qdev.toml (project-wide configuration)
-✔ Created .qdev.local.toml (personal identity: simon)
-✔ Added .qubric/qdev.db and .qdev.local.toml to .gitignore
-✔ Created docs/specs/ and docs/state/ directories
-✔ Initialized SQLite cache schema (version 1)
+```
+$ qdev init --non-interactive --name Qubric --developer simon --team core-platform
+✔ qdev.toml
+✔ .qdev.local.toml (gitignored)
+✔ .qdev/cache/ (gitignored), .qdev/gates/
+✔ docs/specs/{prd,requirements,epics,stories,adrs,hazards}
+✔ docs/state/{sprints,releases,dw,decisions,scratch,evidence,baselines,soup}
+✔ cache schema v1
 ```
 
-### 3. AI Skill & MCP Server Deployment (qdev install)
+Re-running `init` in an initialised workspace checks the cache schema version and migrates with confirmation (or `--yes`).
 
-A developer should not have to manually copy prompt files across AI editors. `qdev` automates its own registration into the AI environment:
+### `qdev install`
 
-| Target Environment | Installation Command | What It Automatically Registers |
+| Target | Command | Writes |
 | --- | --- | --- |
-| **Claude Code / Desktop** | `qdev install skills --claude` | Writes `/qdev-*` skills into `.claude/skills/` and registers the `qdev` MCP server in `claude_desktop_config.json`. |
-| **Cursor / VS Code** | `qdev install skills --cursor` | Generates `.cursor/rules/qdev.mdc` and registers the `qdev` stdio MCP server in `.cursor/mcp.json`. |
-| **Antigravity / Gemini** | `qdev install skills --agents` | Installs skill bundles into `.agents/skills/qdev-*` with verified frontmatter manifests. |
-| **Git Preflight Hooks** | `qdev install hooks` | Installs `.git/hooks/pre-commit` (runs `qdev hygiene --check`) and `.git/hooks/pre-push` (runs `qdev preflight`). |
+| Claude Code | `qdev install skills --claude` | `.claude/skills/qdev-*/SKILL.md` |
+| Cursor | `qdev install skills --cursor` | `.cursor/rules/qdev.mdc` |
+| Agent directories | `qdev install skills --agents` | `.agents/skills/qdev-*` |
+| MCP | `qdev install mcp --claude|--cursor` | Stdio server entry pointing at `qdev mcp serve` |
+| Git hooks | `qdev install hooks` | Shims for `pre-commit`, `pre-push`, `prepare-commit-msg` that call `qdev hook <name>` |
 
-### 4. Diagnostics & Self-Healing (qdev doctor)
+Skills are generated from the same command catalog as the CLI, so they cannot drift from the binary.
 
-Running `qdev doctor` audits the host environment: verifies Git remote status, checks SQLite schema migrations, validates skill definitions, and ensures all configured verification gate executables exist in `$PATH`:
+### `qdev mcp serve`
 
-```bash
-$ qdev doctor
-[✓] Rust Toolchain: rustc 1.85.0
-[✓] Git Status: tracking origin/develop (clean working tree)
-[✓] SQLite Cache: .qubric/qdev.db (valid schema v1, 184 entities indexed)
-[✓] AI Skills: 5 skills registered in .agents/skills/ and .claude/skills/
-[✓] MCP Server: stdio transport verified
-[✓] Verification Gates: 14 gate commands found in PATH
-All systems nominal. Ready for development.
+Stdio MCP server exposing: `get_entity`, `list_entities`, `context`, `next`, `claim`, `transition`, `scratch_append`, `scratch_read`, `dw_add`, `decision_log`, `gate_run`, `validate`. Each tool returns the same JSON payload as the CLI.
+
+### `qdev doctor`
+
 ```
-
----
-
+$ qdev doctor
+[✓] Git: develop tracks origin/develop; clean tree
+[✓] Cache: .qdev/cache/cache.sqlite schema v1, 184 entities, 0 validation findings
+[✓] Modules: 7 declared, all path globs match at least one file
+[✓] Gates: 14 configured, all executables found, 1 skipped locally
+[✓] Hooks: 3 shims installed and current
+[✓] Skills: 4 installed for Claude Code, up to date with binary 1.0.0
+[✓] MCP: registered in .claude settings
+[!] Leases: E12S7 held by amelia in /work/qubric-b, 3 days old
+```

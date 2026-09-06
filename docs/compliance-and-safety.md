@@ -1,116 +1,210 @@
-# qdev Quality, Verification Gates & IEC 62304 Compliance
+# qdev Quality, Verification Gates & Compliance Support
 
-> SaMD verification architecture, ISO 14971 risk tracking, code hygiene filters, preflight Git synchronizations, and zero-noise gate execution.
+> Code hygiene, the gate engine and result contract, ratchets, evidence bundles, Git preflight, and how qdev's outputs support IEC 62304 and ISO 14971 processes.
 
 ## Table of Contents
 
-- [Multi-Entity Citations & Code Hygiene Filter](#code-hygiene)
-- [The Generic Ratchet & Gate Engine](#gate-engine)
-- [IEC 62304 Medical Device Architecture & Compliance](#iec-compliance)
-- [Git Integration & Preflight Synchronization](#git-preflight)
+- [Compact Citations & Code Hygiene](#code-hygiene)
+- [The Gate Engine](#gate-engine)
+- [Ratchets & Baselines](#ratchets)
+- [Evidence Bundles](#evidence)
+- [Compliance Support Mapping](#iec-compliance)
+- [Git Preflight & Hooks](#git-preflight)
 
 ---
 
 <a id="code-hygiene"></a>
 
-## 7. Multi-Entity Citations & Code Hygiene Filter
+## 1. Compact Citations & Code Hygiene
 
-A pervasive pathology when pair-programming with advanced LLMs (such as Opus 5) is that models frequently inject **forensic development memoirs** directly into source code comments.
-
-### The Anti-Pattern: Forensic Memoir Pollution
+LLMs frequently inject forensic development memoirs into source comments:
 
 ```rust
-// ❌ ANTI-PATTERN: FORENSIC ESSAY COMMENT IN PRODUCTION CODE
+// ❌ ANTI-PATTERN
 // ⭐ **STORY 2.10 — THE FIRST `import RustBridge` IN THE RUNNING APP.**
-//
 // `DiscoveryPaneView` (the TCA pane) is replaced here by the Rust-driven
-// one. The reducer itself is untouched: `DatabaseFeature`'s
-// `Scope(state: \.discoveryPane, …)` still runs, `DiscoveryPaneFeatureTests`
-// still passes, and the exit below goes back through the reducer's own
-// `Delegate` arms — so the navigation an operator gets is byte for byte
-// the navigation the reducer already produced. `AW-NFR-16` requires the
+// one. The reducer itself is untouched ... `AW-NFR-16` requires the
 // evidence at a commit PRECEDING the deletion, which is 2.11's.
-RustDiscoveryPaneMount(...)
 ```
 
-### The Solution: Multi-Entity Compact Citations
+### Compact citations
 
-`qdev` standardizes concise inline citations referencing any entity in the system. The `/qdev-develop` prompt explicitly instructs the LLM:
-
-> [!NOTE]
-> **Prompt Directive for Developer Agent**
->
-> *"CRITICAL: Write clean, standard code comments. Reference architectural decisions, stories, and rulings using compact bracket tags: `// [DEC-XXX] ...`, `// [S...E...S...] ...`, `// [AD-XX] ...`. NEVER generate narrative historical memoirs, story summaries, or review round commentary in code."*
-
-| Entity Type | Compact Inline Citation Example | Where Full Context Lives |
+| Entity | Citation | Full context lives in |
 | --- | --- | --- |
-| **Story Reference** | `// [S5E2S10] Replaced TCA pane with Rust-driven mount (ref AD-43)` | Story spec: `docs/specs/sprint-5/S5E2S10.md` |
-| **Decision Reference** | `// [DEC-293] Show the extended attributes table here per Simon's ruling` | SQLite `decisions` table / Story scratchpad |
-| **ADR Reference** | `// [AD-43] Worker pool bounded join; no async sleep permitted` | Architecture Spine / ADR registry |
-| **Hazard Control** | `// [HAZ-014] Safety PIP engagement threshold latch` | `HAZARD-MATRIX.md` / Risk register |
-| **Deferred Work** | `// [DW-421] Temporary zero-copy buffer bypass` | SQLite `deferred_work` table |
+| Story | `// [E12S10] Rust-driven mount replaces TCA pane (see AD-43)` | `docs/specs/stories/E12S10.md` |
+| Decision | `// [DEC-2b91] Extended attributes table shown here per ruling` | `docs/state/decisions/` |
+| ADR | `// [AD-43] Bounded join; no async sleep` | `docs/specs/adrs/` |
+| Hazard | `// [HAZ-14] Safety PIP engagement latch` | `docs/specs/hazards/` |
+| Deferred work | `// [DW-7f3a] Temporary zero-copy bypass` | `docs/state/dw/` |
+| Constraint | `// [E12S4/NG-2] Frame buffers intentionally untouched` | Story frontmatter |
 
-### 1. Distillation to Compact Citations
+The comment prefix follows the language (`//`, `///`, `#`, `/* */`, `"""`). The bracket token is what the linter and impact analysis match.
 
-Historical narrative is stripped from source files. Code comments are compressed into clean docstrings with compact story/decision tags.
+### The hygiene linter (`qdev hygiene check`)
 
-### 2. Relocation to Story Scratchpad
+v1 is **lint and report only**. The linter:
 
-The forensic reasoning (review rounds, deleted banners, trade-offs) is automatically relocated into the story's **scratchpad** or **decision ledger**.
+1. Extracts comments per configured language using a language-aware tokenizer (not raw regex over source).
+2. Flags comment blocks exceeding `max_inline_comment_lines`, matches against `forbid_patterns`, and narrative markers (review rounds, wave numbers, story banners).
+3. Reports `file:line`, the rule ID, and the offending excerpt in JSON and text. Exit 1 on findings.
+4. Runs on the diff by default (`--diff`) and on paths on request.
+
+The agent performs the rewrite and moves reasoning into the scratchpad with `qdev scratch append`. Automated `--fix` with diff preview is deferred to v2 because distinguishing a memoir from legitimate design documentation is a judgment call.
+
+The `develop` projection includes this directive verbatim:
+
+> Write standard code comments. Cite entities with compact bracket tags such as `[E12S4]`, `[AD-43]`, `[DEC-2b91]`. Never write narrative history, story summaries, or review commentary in code; put reasoning in the scratchpad with `qdev scratch append`.
 
 ---
 
 <a id="gate-engine"></a>
 
-## 14. The Generic Ratchet & Gate Engine
+## 2. The Gate Engine
 
-### On Pass (Token Savings: ~95%)
+Per **AD-5**, gates are external executables. The engine provides execution, timeouts, taxonomy, and summarisation.
 
-Instead of dumping 400 lines of Cargo build output:
+### Execution
 
-```text
-[PASS] gate:c-abi-round-trip | 18 tests passed | sha: 8f1b2c | duration: 1.2s
+- Inherits the parent environment, then applies `[environment]` from config.
+- Sets `QDEV_STORY`, `QDEV_GATE`, `QDEV_COMMIT`, `QDEV_RESULT_FILE`, `QDEV_MODULE_PATHS` (JSON).
+- Enforces `timeout_ms` per gate with platform-native termination (process group on Unix, job object on Windows).
+- Captures stdout and stderr into bounded ring buffers (default 1 MB each).
+- Runs `depends_on` gates first; `gate run --all` topologically orders them.
+
+### Result contract
+
+A gate may write JSON to stdout or to `$QDEV_RESULT_FILE`:
+
+```json
+{
+  "status": "fail",
+  "summary": "1 of 18 tests failed",
+  "failures": [
+    {"location": "crates/bridge/tests/c_abi_round_trip.rs:142",
+     "message": "assertion failed: left == right\n  left: EffectsUnavailable\n right: EventNotUnderstood"}
+  ],
+  "metric": null,
+  "constraint_ids": []
+}
 ```
 
-### On Failure (Noise Stripping)
+If no result document is present, qdev uses the exit code and the last 40 lines of stderr. If `output_adapter` names a shipped adapter (`cargo`, `xcodebuild`, `pytest`, `generic-tap`), the adapter extracts failures from raw output. Adapters are optional conveniences, never required.
 
-Strips compiler warnings and extracts only the failing assertion:
+### Failure taxonomy
 
-```text
-[FAIL] gate:c-abi-round-trip (exit 101)
-crates/bridge/tests/c_abi_round_trip.rs:142
-assertion failed: `(left == right)`
-  left: `CoreResponse::EffectsUnavailable`,
- right: `CoreResponse::EventNotUnderstood`
+| Status | Meaning | Agent instruction in payload |
+| --- | --- | --- |
+| `pass` | Exit 0 or result `pass` | Continue |
+| `fail` | Non-zero exit, result `fail`, or ratchet regression | Fix the cited failures |
+| `infra` | Timeout, missing executable, signal, non-JSON result when JSON was declared | **Stop and alert the human.** Do not retry or modify code |
+
+### Receipts
+
 ```
+[PASS] c-abi-round-trip | 18 tests | 8f1b2c4 | 1.2 s | evidence docs/state/evidence/E12S4/8f1b2c4-c-abi-round-trip.json
+[FAIL] c-abi-round-trip (exit 101) | crates/bridge/tests/c_abi_round_trip.rs:142 | assertion failed: left == right
+[INFRA] c-abi-round-trip | timeout after 300 s | last stderr: "waiting for device..." | halt and alert
+```
+
+### Attributed rejections
+
+When a gate or review fails because of a constraint, the payload carries `constraint_id` and the constraint text, so the agent never guesses:
+
+```json
+{"status": "fail", "constraint_ids": ["E12S4/NG-2"],
+ "failures": [{"location": "crates/video/frame.rs", "message": "Path outside target_modules; violates E12S4/NG-2: Do not touch frame buffers"}]}
+```
+
+Boundary and constraint checks are built-in gates (`qdev-scope`, `qdev-hygiene`, `qdev-deps`) that exist because they need qdev's own data, not project knowledge.
+
+---
+
+<a id="ratchets"></a>
+
+## 3. Ratchets & Baselines
+
+A ratchet is a gate with `kind = "ratchet"` that reports a numeric `metric`. The engine compares it against the baseline for the current integration branch stored under `docs/state/baselines/<branch>/<gate>.json`.
+
+- `direction = must_not_increase | must_not_decrease`.
+- A regression is a `fail` with the delta in the summary.
+- `qdev gate baseline <id> --set` records the current value with author and commit; baselines are committed and reviewable.
+- Sprint close records the baseline values in the release snapshot.
+
+---
+
+<a id="evidence"></a>
+
+## 4. Evidence Bundles
+
+Every gate run writes `docs/state/evidence/<story>/<sha>-<gate>.json`:
+
+```json
+{
+  "schema_version": "1",
+  "gate": "c-abi-round-trip", "story": "E12S4", "commit": "8f1b2c4",
+  "status": "pass", "exit_code": 0, "duration_ms": 1200, "metric": null,
+  "summary": "18 tests passed",
+  "output_sha256": "…", "run_by": {"type": "agent", "id": "claude-code"},
+  "ran_at": "2026-09-06T09:52:11Z", "verifies": ["FR-102"], "skipped_locally": false
+}
+```
+
+Evidence is committed. `qdev review sprint` assembles the traceability matrix from `verifies` and `traces_to` plus these records. Signing evidence is deferred to v2.
 
 ---
 
 <a id="iec-compliance"></a>
 
-## 15. IEC 62304 Medical Device Architecture & Compliance
+## 5. Compliance Support Mapping
 
-| Standard Requirement | Clause | Automated Mechanism in `qdev` |
+qdev is not SaMD and is not a substitute for a quality management system. Its outputs are **designed to support** the following activities. Whether they satisfy an auditor depends on the project's own process.
+
+| Activity | Clause | qdev output |
 | --- | --- | --- |
-| **SOUP & Vulnerability Audits** | §5.3.3, §5.3.4 | `qdev soup audit` runs dependency checks; exports release SBOM. |
-| **Known Residual Anomalies** | §5.8.7, Cl. 9 | ISO 14971 risk tagging on `DW-*`; auto-generated Anomaly Report on release baseline. |
-| **Architectural Segregation** | §5.3.5 | Automated gate enforcing downward-only ring dependency between modules. |
-| **Verification Independence** | §5.5.3, §5.7.3 | Strict phase separation (`develop` vs `review`); logged reviewer evidence receipts. |
-| **Change Impact Analysis** | §5.7.4, Cl. 6.2.3 | Graph traversal determining affected stories, modules, and mandatory regression tests. |
+| SOUP inventory and vulnerability review | IEC 62304 §5.3.3, §5.3.4, §8.1.2 | `qdev soup audit` records per release; SBOM via configured command |
+| Known residual anomalies | §5.8.7, §9 | Deferred work with risk level and rationale; anomaly report at sprint close |
+| Architectural segregation | §5.3.5 | Module registry layers plus the built-in `qdev-deps` gate |
+| Verification records | §5.5.5, §5.7.5 | Evidence bundles per gate run per commit |
+| Requirement traceability | §5.1.1, §7.3.3 | `traces_to`, `verifies`, `mitigates` relations; matrix export |
+| Change impact | §6.2.3 | `qdev impact` over the relation graph and module paths |
+| Risk control traceability | ISO 14971 §7 | Hazard entities linked to stories and gates |
+
+Reviewer/developer phase separation (`develop` versus `review` skills, different models) is a useful practice but is **not** claimed as verification independence.
+
+**Tool validation.** A tool that generates design-history evidence may itself require validation under the project's QMS. A self-test suite and validation report package is on the v2 roadmap.
 
 ---
 
 <a id="git-preflight"></a>
 
-## 16. Git Integration & Preflight Synchronization
+## 6. Git Preflight & Hooks
 
-> [!CAUTION]
-> **The Git Preflight Guard**
->
-> Before allowing `/qdev-develop` or `/qdev-create-story` to begin, `qdev` checks Git status against the configured remote:
->
-> - If uncommitted changes exist outside the active story scope: **Refuses execution**.
-> - If the local working branch is behind `origin/main`: **Refuses execution** and prints: <br>`⚠️ Error: Local branch is behind origin/develop by 3 commits. Run 'git pull' before starting S5E2S4 to prevent merge collisions.`
+### `qdev preflight`
 
----
+Runs before `/qdev-develop` and `/qdev-create-story` and on `pre-push`:
 
+1. **Scope check.** Uncommitted changes must fall within the leased story's `target_modules` paths (or declared chore paths). Otherwise: refuse, exit 3, list offending paths.
+2. **Integration freshness.** In `story-branch` mode the guard checks that (a) the local integration branch is not behind its remote, and (b) the story branch's merge-base with the integration branch is within `max_integration_staleness_commits`. A story branch being "behind" the integration branch is expected and is not an error. In `trunk` mode it checks the current branch against its remote.
+3. **Cache health.** Zero blocking validation findings.
+
+```
+✖ preflight: feature/E12S4-buffer is 27 commits behind develop at merge-base (limit 20).
+  Rebase onto develop before continuing E12S4.
+```
+
+### Hooks
+
+`qdev install hooks` writes two-line shims:
+
+```sh
+#!/bin/sh
+exec qdev hook pre-commit "$@"
+```
+
+| Hook | Runs |
+| --- | --- |
+| `pre-commit` | `qdev hygiene check --diff`, `qdev validate --changed`, optional secret/PHI pattern gate |
+| `pre-push` | `qdev preflight` |
+| `prepare-commit-msg` | Only when `[commit_messages] enabled = true`: drafts a message from the leased story and recent scratchpad entries |
+
+Shims are identical on all platforms; logic lives in the binary.

@@ -1,0 +1,76 @@
+# generated: 09-06-2026 08:48
+# regenerated: 09-06-2026 after specification review re-cut
+# project: qdev
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: "{project-root}/docs/bmad/implementation-artifacts"
+
+generated: 09-06-2026 08:48
+last_updated: 09-06-2026 12:00
+project: qdev
+project_key: NOKEY
+tracking_system: file-system
+story_location: "docs/bmad/implementation-artifacts"
+
+development_status:
+  epic-1: backlog
+  1-1-workspace-scaffolding-json-envelope-exit-codes: backlog
+  1-2-dual-configuration-loader: backlog
+  1-3-qdev-init: backlog
+  1-4-entity-file-format-schemas-attribution: backlog
+  1-5-identifier-grammar-allocation: backlog
+  1-6-sqlite-cache-schema-migrations: backlog
+  1-7-incremental-hydration-sweep: backlog
+  1-8-write-path-atomic-files-locking-frontmatter-patching: backlog
+  1-9-get-list-query-engine: backlog
+  1-10-relations-dag-computed-blocked: backlog
+  1-11-qdev-validate: backlog
+  1-12-qdev-sync-cache-diagnostics: backlog
+  1-13-qdev-schema: backlog
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-state-machine-lifecycle-hooks: backlog
+  2-2-justified-backward-transitions: backlog
+  2-3-story-leases: backlog
+  2-4-scope-enforcement-cross-team-overrides: backlog
+  2-5-constraints-as-entities: backlog
+  2-6-scratchpads: backlog
+  2-7-decision-ledger: backlog
+  2-8-deferred-work: backlog
+  2-9-sprints-as-assignments: backlog
+  2-10-chores-with-path-allowlists: backlog
+  2-11-qdev-next: backlog
+  2-12-root-pulse: backlog
+  2-13-module-registry: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-gate-runner-subprocess-environment-timeouts: backlog
+  3-2-gate-result-contract-failure-taxonomy: backlog
+  3-3-gate-dependencies-all: backlog
+  3-4-ratchets-baselines: backlog
+  3-5-evidence-bundles: backlog
+  3-6-transition-bound-gates: backlog
+  3-7-git-preflight-guard: backlog
+  3-8-git-hook-shims-qdev-hook: backlog
+  3-9-hygiene-linter-lint-and-report: backlog
+  3-10-impact-analysis: backlog
+  3-11-opt-in-commit-messages: backlog
+  3-12-soup-audit-sbom: backlog
+  3-13-epic-sprint-reviews-sprint-close: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-qdev-context-projection: backlog
+  4-2-attributed-rejections: backlog
+  4-3-hygiene-directive-citation-template: backlog
+  4-4-skill-generation-install: backlog
+  4-5-mcp-server: backlog
+  4-6-the-five-skills: backlog
+  4-7-doctor-environment-skills-mcp-hooks-leases: backlog
+  4-8-structured-multi-perspective-synthesis-template: backlog
+  4-9-qdev-graph-rendering-options: backlog
+  4-10-self-hosting-handover: backlog
+  epic-4-retrospective: optional
+action_items: []

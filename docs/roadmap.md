@@ -1,135 +1,111 @@
-# qdev v1 Implementation Scope & Execution Roadmap
+# qdev v1 Scope & Execution Roadmap
 
-> Seven-phase milestone plan for v1 MVP core delivery, scope boundaries, and solutions for flagged edge cases.
+> What v1 delivers, what is deferred, how the four epics sequence the work, and the edge cases the implementation must handle. The story-level plan is [epics.md](bmad/planning-artifacts/epics.md).
 
 ## Table of Contents
 
-- [Version 1 MVP Implementation Scope](#roadmap-scope)
-- [Step-by-Step Implementation Roadmap (v1 Execution Plan)](#implementation-plan)
-- [In-Depth Architectural Review & Flagged Areas](#architectural-review)
+- [v1 Scope](#roadmap-scope)
+- [Execution Plan by Epic](#implementation-plan)
+- [Self-Hosting Handover](#handover)
+- [Edge Cases the Implementation Must Handle](#edge-cases)
 
 ---
 
 <a id="roadmap-scope"></a>
 
-## 19. Version 1 MVP Implementation Scope
+## 1. v1 Scope
 
-### In Scope for v1 (The Core Engine)
+### In scope
 
-- Single-binary Rust CLI: `qdev` in `tools/qdev` with root status & "what to do next" guidance.
-- Full support for `qdev <verb> <noun> [flags] [-- <input>]` grammar and global `--json`.
-- Dual configuration engine: `qdev.toml` + `.qdev.local.toml`.
-- Automated environment integration: `qdev install skills`, `qdev install mcp`, `qdev install hooks`.
-- Self-diagnostic health audit command: `qdev doctor`.
-- Multi-owner support (persons + teams) with Cross-Team Governance interlocks.
-- Language-agnostic module system replacing hardcoded crate assumptions.
-- Embedded SQLite engine with auto-hydration from markdown frontmatter.
-- Full `S3E1S4` grammar parser and entity relationship join table.
-- The 3 core slash-command skills (`/qdev-create-story`, `/qdev-develop`, `/qdev-review`).
-- Multi-Entity compact citation system (`[DEC-xxx]`, `[S...E...S...]`, `[AD-xx]`, `[HAZ-xx]`, `[DW-xxx]`).
-- Code Hygiene & Comment Distillation engine with auto-relocation to scratchpads.
-- Structured Multi-Perspective Synthesis (de-noised ideation & planning).
-- Relational Documentation Artifacts Catalog indexing 8 core development document types.
-- End-of-Epic and End-of-Sprint review and transition commands.
-- Gate execution engine with stdout compression and exit code parsing.
-- Red-fixture, Dual-limb hazard, and PHI leak gate verifiers.
-- SOUP audit gate integration and SBOM export.
-- Automated Regression Impact Analysis CLI (`qdev impact <story_id>`).
-- ISO 14971 risk fields in Deferred Work and Residual Anomaly report export.
-- Git preflight guard (dirty check, remote sync check).
-- Per-story scratchpad management (`qdev scratch append/read`).
-- Decision ledger (`qdev decision log`).
-- Discrete Deferred Work CLI (`qdev dw add/list/close`).
+**Substrate**
+- Two-crate Rust workspace; self-contained binary for macOS, Linux, Windows.
+- Markdown-with-frontmatter entities, one file each; SQLite cache with metadata-sweep hydration.
+- Full entity catalog: PRD, requirement, epic, story, ADR, hazard, constraint, sprint, release, deferred work, decision, scratchpad, gate, gate run, SOUP.
+- Sprint-free IDs; hash-suffixed IDs for execution-time entities; collision detection.
+- Relations with validation and cycle detection; `qdev validate`; `qdev graph --dot`.
+- JSON envelope, exit codes, `qdev schema`; non-interactive mode everywhere.
+- Dual configuration; module registry with paths and layers.
 
-### Deferred to v2 (Future Capabilities)
+**Workflow**
+- State machine with lifecycle hooks, justified backward transitions, computed `blocked`.
+- Story leases and overrides; cross-team overrides logged as decisions.
+- Constraints as entities with inheritance; attributed rejections.
+- Scratchpads, decision ledger, deferred work with ISO 14971 risk fields.
+- Sprints as assignments; multiple active sprints; carry-over without renames.
+- Chores with path allowlists.
+- `qdev next` and the root pulse.
 
-- Embedded Axum web server and browser dashboard (`qdev serve`).
-- Formal PDF regulatory submission dossier generator (v1 outputs JSON/Markdown).
-- Hosted / Networked PostgreSQL backend integration.
-- Bidirectional Jira / Linear cloud synchronization.
-- Automated visual graph rendering of the story dependency DAG.
+**Gates, evidence, Git**
+- Sub-process gate engine: env inheritance, timeouts, platform-native kill, bounded buffers, result contract, adapters for cargo and xcodebuild, failure taxonomy.
+- Ratchets with committed baselines.
+- Evidence bundles; traceability matrix and residual anomaly report at sprint close.
+- Built-in data-driven gates: scope, hygiene (lint-only), module dependency direction.
+- Preflight guard; hook shims; opt-in commit messages; `qdev impact`.
+- SOUP audit and SBOM wrappers.
+
+**Agent integration**
+- `qdev context` projection with budgets and `--stats`.
+- Skills for Claude Code, Cursor, agent directories: `/qdev`, `/qdev-plan`, `/qdev-create-story`, `/qdev-develop`, `/qdev-review`.
+- `qdev mcp serve`.
+- `qdev doctor`.
+
+### Deferred to v2+
+
+- Worktree-per-story orchestration (`qdev run --parallel`) built on leases.
+- Signed evidence chain; tool validation package.
+- Hygiene `--fix` with diff preview.
+- Token accounting per phase from agent transcripts.
+- Gate packs per ecosystem distributed outside the binary.
+- Retrospective ingestion and velocity metrics.
+- Web dashboard, Jira/Linear sync, PDF dossier, Postgres backend.
 
 ---
 
 <a id="implementation-plan"></a>
 
-## 20. Step-by-Step Implementation Roadmap (v1 Execution Plan)
+## 2. Execution Plan by Epic
 
-To deliver the `qdev` v1 core systematically without disrupting active Qubric development, the implementation is organized into seven sequential, self-verifying milestones:
+The plan is the four epics in `epics.md`, in order. Each epic ends with a demonstrable deliverable.
 
-1. **Phase 1: CLI Scaffolding, Installation & Configuration Engine**
-
-   Create `tools/qdev` in the repository. Implement the `clap` v4 CLI supporting `qdev <verb> <noun>` grammar and global `--json`. Implement `qdev init` and the configuration merger for `qdev.toml` (committed) and `.qdev.local.toml` (local user overrides). Provide `scripts/install-qdev.sh`.
-
-   *Deliverable:* `qdev --version` and `qdev config show --json` functional.
-
-2. **Phase 2: Storage Abstraction & SQLite Auto-Hydration Engine**
-
-   Define the Rust `Store` trait. Implement the `rusqlite` embedded storage engine. Implement the file-scanner checking `mtime` and SHA-256 hashes of Markdown files in `docs/` against `_sync_state`. Implement bidirectional frontmatter serialization.
-
-   *Deliverable:* `qdev sync` parses test specs into `.qubric/qdev.db` in < 30ms.
-
-3. **Phase 3: Entity Grammar & Relational Graph Operations**
-
-   Implement the `S3E1S4` grammar parser. Support multi-owner definitions (persons and teams) and the semantic relationship DAG (`depends_on`, `extends`, `supersedes`, `traces_to`, `closes_dw`). Implement discrete Deferred Work (`DW-*`) and Decision Ledger (`DEC-*`) operations.
-
-   *Deliverable:* `qdev get story S5E2S4 --json` and `qdev dw list --module bridge` functional.
-
-4. **Phase 4: Git Preflight & Cross-Team Governance Guard**
-
-   Implement the Git working-tree inspector (verifying clean tree and sync status against `origin/develop`). Implement the Cross-Team Governance interlock prompting for justification when modifying entities owned by external teams. Implement `qdev install hooks`.
-
-   *Deliverable:* `qdev preflight` refuses execution if local branch is behind remote.
-
-5. **Phase 5: Code Hygiene & Comment Distillation Filter**
-
-   Build the comment linter and distillation parser (`qdev hygiene --check`). Enforce compact multi-entity citations (`[DEC-xxx]`, `[S...E...S...]`, `[AD-xx]`). Implement automated relocation of forensic essay comments into story scratchpads.
-
-   *Deliverable:* `qdev hygiene --check` catches forensic memoir comments in diffs.
-
-6. **Phase 6: Generic Gate & Ratchet Runner**
-
-   Implement the process execution wrapper with stdout/stderr noise stripping (~95% token savings). Implement the three core SaMD gate types (Red-Fixture runner, Dual-Limb Hazard verifier, PHI leak scanner) and SOUP dependency auditor. Implement `qdev impact <id>` blast-radius calculation.
-
-   *Deliverable:* `qdev gate run c-abi-round-trip --json` executes and generates `.evidence.json`.
-
-7. **Phase 7: LLM Skills, MCP Registration & Root Pulse Integration**
-
-   Implement the root `qdev` status command ("What To Do Next" calculation) and `qdev doctor`. Implement `qdev install skills` and `qdev install mcp`. Author the three core slash-command skills: `/qdev-create-story`, `/qdev-develop`, and `/qdev-review`. Migrate existing Sprint 5 entities into the new schema.
-
-   *Deliverable:* Full end-to-end story execution using `/qdev-*` in active development.
+| Epic | Delivers | Exit criterion |
+| --- | --- | --- |
+| **E1 Relational Storage & CLI Substrate** | Workspace, config, `init`, entity formats and IDs, cache and hydration, write path, `get`/`list`, relations, `validate`, `schema`, `doctor` (cache portion) | `qdev create story` → hand-edit → `qdev get story --json` round-trips with validation findings, in under 30 ms on 1,000 fixtures |
+| **E2 Workflow & Governance Engine** | State machine and hooks, leases, constraints, scratchpads, decisions, deferred work, sprints, chores, module registry, `next`, pulse | Two concurrent agents in separate worktrees cannot claim the same story; a backward transition without justification is refused with a structured error |
+| **E3 Gates, Evidence & Git** | Gate engine and result contract, ratchets, evidence, transition-bound gates, preflight, hooks, hygiene lint, impact, commit messages, SOUP, epic and sprint reviews | `qdev transition story X review` runs bound gates, writes evidence, and blocks on a cited constraint violation; `qdev sprint close` emits RTM and anomaly report |
+| **E4 AI Context & Integration** | `context`, attributed rejections, skill generation, MCP server, the five skills, `doctor` (skills/MCP), `graph` | A full story executed end-to-end through `/qdev-develop` and `/qdev-review` in Claude Code with payloads under budget |
 
 ---
 
-<a id="architectural-review"></a>
+<a id="handover"></a>
 
-## 21. In-Depth Architectural Review & Flagged Areas
+## 3. Self-Hosting Handover
 
-An adversarial architectural review of this specification identified four subtle edge cases that the implementation must explicitly address:
+BMAD is used only to bootstrap qdev. It is not a supported input format and there is no importer. Once E1 and E2 are complete:
 
-### 1. Multi-Sprint Concurrency (Active + Patch Sprints)
+1. Run `qdev init` in this repository.
+2. Re-enter the remaining E3 and E4 stories as native qdev entities (a one-time manual or scripted step).
+3. Continue development under qdev, retiring `docs/bmad/` to an archive directory.
 
-**Issue:** In `qdev.toml`, having a single `active_sprint = 5` fails when an emergency security patch is being developed in parallel under Sprint 54.
-
-**Resolution:** The schema must support multiple sprints in `status = 'active'`. Commands accept an optional `--sprint <id>` parameter, falling back to `default_active_sprint` from configuration if omitted.
-
-### 2. Markdown Frontmatter Preservation & Round-Tripping
-
-**Issue:** Generic YAML dumpers (like PyYAML) strip blank lines and inline comments within the frontmatter block when re-serializing files.
-
-**Resolution:** Use a formatting-preserving parser/emitter in Rust (e.g., `toml_edit` or clean line-based YAML frontmatter patching) so that manual annotations inside frontmatter survive edits.
-
-### 3. Multi-Agent Worktree Collisions
-
-**Issue:** If multiple autonomous agents (e.g. Subagent A and Subagent B) work on different stories concurrently, they cannot share the same checked-out working directory without git index collisions.
-
-**Resolution:** When operating in agentic multi-track mode, `qdev` should automatically leverage **Git Worktrees** (`git worktree add`) to isolate execution branches into separate working directories.
-
-### 4. Environment Variable Inheritance in Gate Execution
-
-**Issue:** Shell and cargo test commands executed by the Gate Runner inside `qdev` might fail if critical environment variables (such as `CARGO_TARGET_DIR`, `DEVELOPER_DIR`, or tool paths) are not propagated.
-
-**Resolution:** The `qdev` gate execution engine must explicitly inherit the parent shell's environment while injecting configured project variables from `[environment]` blocks in `qdev.toml`.
+This is the first real dogfood test of the tool.
 
 ---
 
+<a id="edge-cases"></a>
+
+## 4. Edge Cases the Implementation Must Handle
+
+| # | Issue | Resolution |
+| --- | --- | --- |
+| 1 | Multiple active sprints (feature + patch) | Sprint assignments, `--sprint`, `default_sprint` fallback (**AD-8**) |
+| 2 | Frontmatter round-tripping loses comments | Line-based frontmatter patching; never re-serialise the whole YAML document |
+| 3 | Concurrent agents share a working directory | Leases record the worktree; `qdev next` skips leased stories; worktree orchestration in v2 |
+| 4 | Gate commands lack environment | Inherit parent env, then apply `[environment]` |
+| 5 | Coarse `mtime` filesystems | Size and hash confirmation; qdev's own writes mark rows dirty (**AD-6**) |
+| 6 | ID collisions across branches | Hash-suffixed execution IDs; `validate` detects planning-ID duplicates and offers guided renumber (**AD-7**) |
+| 7 | Story branch always "behind" integration | Freshness measured at merge-base with a staleness limit, not raw behind-count |
+| 8 | Hand edits to entity files | Allowed; validation findings, never lock-out (**NFR-202**) |
+| 9 | Windows | Job objects for kill, hook shims calling the binary, OS advisory locks (**AD-14**) |
+| 10 | Agent stuck on a prompt | Non-interactive mode fails closed naming the flag (**AD-12**) |
+| 11 | Gate hangs or floods output | Timeout with native kill; 1 MB ring buffers; `infra` status tells agent to halt |
+| 12 | Scratchpad bloats context | Separate JSONL file; projection includes a bounded summary only (**AD-11**) |
+| 13 | Memoir comments misdetected | Lint-and-report in v1; the agent rewrites; `--fix` deferred |

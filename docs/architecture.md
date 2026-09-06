@@ -1,17 +1,21 @@
 # qdev Architecture & Data Model Specification
 
-> In-depth technical specification of the BMAD + Shape Up hybrid methodology, relational data model, projection storage architecture, and three-phase lifecycle.
+> Technical specification of the BMAD + Shape Up hybrid methodology, entity model, storage architecture, and lifecycle. The authoritative list of architectural decisions is the [Architecture Spine](bmad/planning-artifacts/architecture-1/ARCHITECTURE-SPINE.md); this document elaborates on it.
 
 ## Table of Contents
 
 - [Problem Statement: The Markdown Context Wall](#problem-statement)
 - [Prior Art & Landscape Analysis](#prior-art)
 - [The Core Synthesis: BMAD Tree + Shape Up](#methodology)
-- [The End-to-End Product Development Lifecycle](#end-to-end-lifecycle)
-- [Relational Documentation Artifacts Catalog](#artifacts-catalog)
-- [Indexing Grammar & Data Model (Module-Agnostic)](#grammar-datamodel)
-- [Storage Architecture: SQLite + Auto-Hydration](#storage-architecture)
-- [The Three-Phase Lifecycle & Model Tiering](#phase-skills)
+- [End-to-End Lifecycle](#end-to-end-lifecycle)
+- [Entity Catalog](#entity-catalog)
+- [Identifier Grammar](#identifiers)
+- [Story State Machine](#state-machine)
+- [Relations](#relations)
+- [On-Disk Layout](#layout)
+- [SQLite Cache Schema](#schema)
+- [Storage Architecture & Hydration](#storage-architecture)
+- [Context Projection & Model Tiering](#projection)
 
 ---
 
@@ -19,30 +23,15 @@
 
 ## 1. Problem Statement: The Markdown Context Wall
 
-During the multi-sprint development of **Qubric**—a native, offline-first medical bronchoscopy platform incorporating video ingest, metrology/SLAM, and a shared core via Crux—the project adopted the BMAD method to govern planning and code generation.
+During the multi-sprint development of **Qubric**, a native, offline-first medical bronchoscopy platform, the project adopted the BMAD method to govern planning and code generation. As Sprint 5 expanded to 15 epics and over 160 stories, the markdown-driven approach encountered severe operational failure modes:
 
-As Sprint 5 expanded to 15 epics and over 160 stories, the markdown-driven approach encountered severe operational failure modes:
-
-### ❌ Context Sprawl & Token Exhaustion
-
-Critical files expanded unchecked. `AGENTS.md` ballooned from 386 to 6,144 words in ten days because story context duplicated the architecture spine. Agents loaded 20,000+ tokens of markdown just to extract three acceptance criteria.
-
-### ❌ Syntax Drift & Automation Blindness
-
-Flat files drifted across multiple human and agent formats. `deferred-work.md` accumulated 216 checkboxes, 259 bullet items, and freeform text simultaneously, blinding automated drainage scripts (`bmad-loop sweep`).
-
-### ❌ Line-Anchor Rotting
-
-Source code, CI scripts, and specs cited line numbers in markdown files (e.g. `deferred-work.md:2340-2368`). As earlier lines were modified, 17 of 21 anchors rotted silently, pointing to completely unrelated entries.
-
-### ❌ Silent YAML Comment Dropping
-
-BMAD’s python script (`sprint_plan.py`) silently erased header comments and annotations inside `sprint-status.yaml` upon re-serialization, forcing manual recovery and hand-editing.
+- **Context sprawl.** `AGENTS.md` grew from 386 to 6,144 words in ten days because story context duplicated the architecture spine. Agents loaded 20,000+ tokens to extract three acceptance criteria.
+- **Syntax drift.** `deferred-work.md` accumulated 216 checkboxes, 259 bullets, and freeform text simultaneously, blinding automated drainage scripts.
+- **Line-anchor rot.** Code and specs cited `deferred-work.md:2340-2368`; 17 of 21 anchors rotted silently.
+- **Silent YAML comment dropping.** A re-serialising script erased header comments from `sprint-status.yaml`.
 
 > [!NOTE]
-> **The Fundamental Architectural Insight**
->
-> Software requirements, epics, stories, architectural decisions (ADRs), deferred technical debt, and test verification gates form a **strongly typed directed relational graph**. Storing a relational graph in dozens of flat markdown files inevitably causes consistency breakdown and token waste. Relational entities belong in a relational database.
+> **The architectural insight.** Requirements, epics, stories, ADRs, deferred work, and gates form a strongly typed directed graph. Storing a graph in dozens of flat files causes consistency breakdown and token waste. The graph belongs in a relational index; the human-readable record belongs in Git. qdev keeps both, with Git as the source of truth.
 
 ---
 
@@ -50,16 +39,14 @@ BMAD’s python script (`sprint_plan.py`) silently erased header comments and an
 
 ## 2. Prior Art & Landscape Analysis
 
-A thorough survey of the ecosystem reveals four distinct categories of tools addressing agent coordination, none of which fully solve the problem for high-integrity medical software:
-
-| Category | Representative Tools | Capabilities | Gaps for Qubric |
+| Category | Representative Tools | Capabilities | Gap |
 | --- | --- | --- | --- |
-| **Agent Task Graphs** | `swiftj/synapse`, `Beads (bd)`, `tacks`, `taskman` | Local-first SQLite or Dolt DAGs; machine-readable JSON; agent-focused task dependency tracking. | Too low-level. Lack hierarchical understanding of PRDs, Epics, Sprints, ADR bindings, and regulatory traceability. |
-| **Versioned SQL** | `Dolt` | MySQL-compatible database with Git semantics (branch, diff, merge, snapshot). | Excellent storage substrate, but requires external CGO runtime and daemon; not a full development methodology tool. |
-| **Requirements-as-Code** | `StrictDoc`, `Sphinx-Needs`, `Mantra` | Structured technical specifications; bidirectional traceability matrices; IEC 62304 compliance. | Focused on static documentation and audits; lacks interactive agentic planning, model tiering, and execution gating. |
-| **AI Spec Toolkits** | `GitHub Spec Kit`, `ChatPRD` | Linear prompts: Constitution → Specify → Plan → Tasks. | Too flat. Fails to model multi-epic enterprise hierarchies, module boundaries, and complex systems refactors. |
+| Agent task graphs | Beads (`bd`), `synapse`, `tacks` | Local SQLite/Dolt DAGs, hash IDs, machine-readable | No PRD/epic hierarchy, ADR binding, or regulatory traceability |
+| Versioned SQL | Dolt | Git semantics on a database | External daemon; not a methodology tool |
+| Requirements-as-code | StrictDoc, Sphinx-Needs | Traceability matrices, IEC 62304 | Static documentation; no agent execution loop or gating |
+| AI spec toolkits | Spec Kit, ChatPRD | Linear prompt pipelines | Too flat for multi-epic systems and module boundaries |
 
-**Conclusion:** `qdev` is created to fill this gap: providing an offline-first, single-binary Rust engine that couples deep hierarchical planning with relational integrity, Shape Up boundary enforcement, and regulatory-grade verification gates.
+qdev borrows hash IDs from Beads, traceability from requirements-as-code tools, and the planning tree from BMAD, and adds Shape Up boundaries and an execution gate engine.
 
 ---
 
@@ -67,274 +54,312 @@ A thorough survey of the ecosystem reveals four distinct categories of tools add
 
 ## 3. The Core Synthesis: BMAD Tree + Shape Up
 
-Qubric adopts a hybrid approach that combines the strengths of BMAD's hierarchical decomposition with Basecamp's Shape Up boundary constraints.
+### BMAD hierarchical tree (positive structure)
+Tells the agent **where it is**: PRD → Requirements → Epics → Stories, with ADRs and Hazards as binding cross-cutting records.
 
-### BMAD Hierarchical Tree (Positive Structure)
+### Shape Up guardrails (negative boundaries)
+Tells the agent **where it may not go**. Each is a first-class constraint entity with an ID:
 
-**Tells the AI where it is:**
+- **Appetite**: `tiny | small | medium | deep`.
+- **Target modules**: module IDs from the registry, which resolve to path globs.
+- **Rabbit holes** (`RH-n`): known traps to avoid.
+- **No-gos** (`NG-n`): explicitly forbidden scope.
 
-- **PRD:** High-level problem definition, market/clinical rationale, target release.
-- **Epics:** Architectural domains, phases, and core capabilities.
-- **Stories:** Atomic units of work carrying functional intent and acceptance criteria.
-- **ADRs:** Binding architectural decisions outliving individual stories.
-
-### Shape Up Guardrails (Negative Boundaries)
-
-**Tells the AI where it is forbidden to go:**
-
-- **Appetite:** Budget and complexity clamp (`tiny`, `small`, `medium`, `deep`).
-- **Target Modules:** Subsystem and file boundary clamp (e.g. `["bridge", "foundation"]` or `["Packages/RustBridge"]`).
-- **Rabbit Holes:** Known architectural and technical traps to actively avoid.
-- **No-Gos:** Explicit out-of-scope capabilities forbidden in this story.
+Constraints attach to an epic or story and are inherited downward. A rejection always cites the constraint ID and text.
 
 > [!WARNING]
-> **Why Negative Constraints Stop Hallucinations**
->
-> LLMs are predisposed to over-engineer when given open-ended requirements. When prompted only with positive acceptance criteria, agents often import forbidden libraries (e.g. `tokio` in Qubric's Rust core), refactor adjacent subsystems, or build speculative features. Explicitly injecting **Rabbit Holes** and **No-Gos** into the developer prompt suppresses scope creep and reduces wasted tokens.
+> **Why negative constraints stop hallucinations.** Given only positive acceptance criteria, agents import forbidden libraries, refactor adjacent subsystems, and build speculative features. Injecting rabbit holes and no-gos with IDs suppresses scope creep and makes violations diagnosable.
 
 ---
 
 <a id="end-to-end-lifecycle"></a>
 
-## 4. The End-to-End Product Development Lifecycle
+## 4. End-to-End Lifecycle
 
-`qdev` models the full lifecycle of complex software development, establishing a disciplined progression from initial ideation down to atomic commits and sprint transitions.
+| Stage | Command(s) | Outcome |
+| --- | --- | --- |
+| 1. Initialise | `qdev init` | Config, directories, cache, hooks |
+| 2. Ideate & architect | `/qdev-plan` skill, `qdev create prd|adr|requirement` | PRD, requirements, ADRs, hazards using Structured Multi-Perspective Synthesis |
+| 3. Decompose | `qdev create epic|story`, `qdev graph --dot` | Epics, stories, constraints, dependency DAG, parallel tracks |
+| 4. Execute a story | `qdev claim` → `/qdev-develop` → `/qdev-review` | Code, scratchpad, gate evidence, done |
+| 5. Review an epic | `qdev review epic E12` | Epic report; unclassified debt blocked |
+| 6. Review a sprint | `qdev review sprint 5` | Regression gates, residual anomalies, traceability matrix |
+| 7. Close a sprint | `qdev sprint close 5 --carry-over 6` | Baseline snapshot; open work assigned to next sprint without renaming |
 
-### Stage 1: Initialization
-
-`qdev init` configures `qdev.toml` and `.qdev.local.toml`, registers team identities and developers, initializes the local gitignored SQLite cache, and installs Git preflight hooks.
-
-### Stage 2: Structured Ideation & Architecture
-
-Guided synthesis of PRDs, Architecture Spines, UX models, and Risk registers. Replaces multi-agent role-playing theater with **Structured Multi-Perspective Synthesis**.
-
-### Stage 3: Decomposition & Concurrency Planning
-
-Refines architecture into Sprints, Epics, and Stories. Analyzes the dependency DAG to identify **Parallel Execution Tracks** (e.g., UI shell vs. core engine).
-
-### Stage 4: Story Execution Loop
-
-The per-story iteration: `specify` (author spec with boundaries) → `develop` (TDD + scratchpad + hygiene filter) → `review` (adversarial audit + evidence stamp).
-
-### Stage 5: End-of-Epic Review
-
-`qdev review epic <id>` audits all delivered stories against the epic milestone, ensures no unclassified debt remains, and verifies epic-level gates.
-
-### Stage 6: End-of-Sprint Review
-
-`qdev review sprint <id>` executes full regression suites, audits Known Residual Anomalies, freezes velocity metrics, and outputs compliance traceability reports.
-
-### Stage 7: Sprint Transition & Baseline Freeze
-
-`qdev sprint close <id> --status done|paused|abandoned` snapshots the release baseline and atomically rolls over open debt or incomplete stories into the next sprint.
-
-### Eliminating Persona Theater (De-Noising Multi-Agent Sessions)
-
-A common frustration with frameworks like BMAD is "persona role-play bloat"—where multiple LLM personas (e.g., Product Manager Mary, Architect Winston, UX Sally) exchange thousands of tokens in simulated polite banter ("Hi Mary! Thanks for the great PRD...").
-
-> [!NOTE]
-> **Structured Multi-Perspective Synthesis**
->
-> `qdev` retains the analytical value of multiple viewpoints (Product, Architecture, Clinical/UX, Risk) without conversational role-play. Instead of conversational agents chatting back and forth, `qdev` prompts a single high-reasoning model with a **Multi-Perspective Synthesis Schema**:
->
-> ```
-> # Multi-Perspective Synthesis:
-> [Product & Clinical Value]: Concise statement of intent and clinical workflow impact.
-> [Architectural Constraints]: Invariants, module boundaries, C-ABI signatures, FFI implications.
-> [Safety & Risk Profile]: ISO 14971 hazards, dual-limb controls, failure injection modes.
-> [Implementation Directives]: Acceptance criteria, Shape Up Rabbit Holes, and No-Gos.
-> ```
->
-> This yields identical or superior analytical depth while saving up to 80% of prompt tokens and eliminating conversational noise.
+### Structured Multi-Perspective Synthesis
+qdev replaces multi-persona role-play with a single high-reasoning prompt that must answer four headings: **Product & domain value**, **Architectural constraints**, **Safety & risk profile**, **Implementation directives**. The template is shipped in the planning skill and is configurable.
 
 ---
 
-<a id="artifacts-catalog"></a>
+<a id="entity-catalog"></a>
 
-## 8. Relational Documentation Artifacts Catalog
+## 5. Entity Catalog
 
-To eliminate markdown sprawl while preserving deep technical context, `qdev` identifies, indexes, and relationally stores eight core documentation artifacts produced during development:
-
-| Artifact Type | Lifecycle Stage | Content Captured & Stored in SQLite |
-| --- | --- | --- |
-| **Product Brief / PRFAQ** | Ideation (Stage 2) | Working Backwards customer/clinical problem statement, customer FAQ, internal developer FAQ. |
-| **Architecture Invariant Spine** | Architecture (Stage 2) | The lean list of workspace-wide non-negotiables (no async runtimes, ring boundary directions, FFI bounds). |
-| **Architectural Decisions (ADRs)** | Architecture & Design | Permanent decision records: context, alternatives rejected, chosen approach, binding invariants. |
-| **Sprint Change Proposals** | Course Correction (Mid-Sprint) | Formalized pivot proposals (adopted from BMAD `bmad-correct-course`): trigger, issue summary, impact analysis on stories/epics, artifact conflict resolutions. |
-| **UX Interaction Specifications** | Design & Specification | State machines for viewports, safety HUD layouts, Safety PIP fallbacks, degraded UI surfaces. |
-| **Hazard Analysis & Risk Controls** | Regulatory / Safety | ISO 14971 hazard IDs, hazardous situations, software causes, dual-limb risk control verifications. |
-| **End-of-Epic Retrospective Dossiers** | Epic Review (Stage 5) | Delivered capabilities, action items, standing technical debt assignments (e.g. creating tooling epics). |
-| **Release Baselines & Traceability Matrices** | Sprint Close (Stage 7) | The locked Requirements Traceability Matrix (RTM), SOUP SBOM, and Known Residual Anomalies report. |
+| Entity | ID | Lives in | Notes |
+| --- | --- | --- | --- |
+| PRD | `PRD-n` | `docs/specs/prd/` | Vision, personas, metrics; owns requirements |
+| Requirement | `FR-n`, `NFR-n` | `docs/specs/requirements/` | Traceability root; `traces_to` target |
+| Epic | `En` | `docs/specs/epics/` | Owners, phase, constraints |
+| Story | `EnSm` | `docs/specs/stories/` | Owners, appetite, target modules, ACs, constraints |
+| ADR | `AD-n` | `docs/specs/adrs/` | Context, alternatives, decision, binds, prevents |
+| Hazard | `HAZ-n` | `docs/specs/hazards/` | ISO 14971 hazard, cause, control; `mitigates` source |
+| Constraint | `EnSm/NG-k`, `En/RH-k` | Frontmatter of owning entity | Kind, text; inherited downward |
+| Sprint | `sprint-n` | `docs/state/sprints/` | Status, owners, release, assignments with carry-over |
+| Release | `x.y.z` | `docs/state/releases/` | Base version, status, baseline snapshot |
+| Deferred work | `DW-hhhh` | `docs/state/dw/` | Module, risk, rationale, gate |
+| Decision | `DEC-hhhh` | `docs/state/decisions/` | Subject entity, type, ruling |
+| Scratchpad entry | append-only | `docs/state/scratch/<story>.jsonl` | Author, kind, text |
+| Gate | slug | `qdev.toml` + `.qdev/gates/` | Command, timeout, kind, bound transitions |
+| Gate run / evidence | `<sha>-<gate>` | `docs/state/evidence/<story>/` | Status, summary, metric, duration |
+| SOUP dependency | `name@version` | `docs/state/soup/` | Licence, CVE status, release evaluated |
+| Lease | local | `.qdev/leases/` | Holder, worktree, story, started; gitignored |
 
 ---
 
-<a id="grammar-datamodel"></a>
+<a id="identifiers"></a>
 
-## 11. Indexing Grammar & Data Model (Module-Agnostic)
+## 6. Identifier Grammar
 
-### The `S3E1S4` Indexing Grammar
+Per **AD-7**, IDs never encode a sprint and are immutable once committed.
 
-- **Story:** `S{sprint}E{epic}S{story}` (e.g. `S3E1S4`, or sub-stories `S3E1S4a`).
-- **Epic:** `S{sprint}E{epic}` (e.g. `S3E1`).
-- **PRD:** `S{sprint}-PRD` (e.g. `S5-PRD`).
-- **ADR:** `AD-{number}` (e.g. `AD-43`, globally monotonic across the workspace).
-- **Deferred Work:** `DW-{number}` (e.g. `DW-421`, globally monotonic).
-- **Decision:** `DEC-{number}` (e.g. `DEC-104`, logged per story).
-
-### Entity Relations (The Graph Engine)
-
-| Relationship | Source → Target | Semantic Meaning |
+| Kind | Grammar | Allocation |
 | --- | --- | --- |
-| `depends_on` | Story → Story | Execution DAG: Target must be in `done` status before source can start. |
-| `extends` | Story → Story | Iterative enhancement: Source refines or adds degraded modes to target. |
-| `supersedes` | Story → Story / Epic | Deprecation: Source replaces target. Target is retired and blocked from active work. |
-| `traces_to` | Story → PRD / Requirement | IEC 62304 traceability link from functional requirement to code. |
-| `closes_dw` | Story → Deferred Work | Discharges a technical debt item upon verified story closure. |
+| Epic | `E{n}` | Sequential, planning time |
+| Story | `E{n}S{m}` | Sequential within epic, planning time |
+| ADR / Requirement / Hazard / PRD | `AD-{n}`, `FR-{n}`, `NFR-{n}`, `HAZ-{n}`, `PRD-{n}` | Sequential, planning time |
+| Constraint | `{owner}/NG-{k}`, `{owner}/RH-{k}` | Sequential within owner |
+| Deferred work / Decision | `DW-{hex4+}`, `DEC-{hex4+}` | Random; length grows on collision |
+| Citation | `[E12S4]`, `[AD-43]`, `[DW-7f3a]`, `[E12S4/NG-2]` | Language-appropriate comment prefix |
 
-### SQLite Relational Schema
+Sequential planning IDs are allocated by `qdev create`, which scans existing files. `qdev validate` reports duplicates arising from concurrent planning on separate branches and offers a guided renumber that rewrites citations, which is the only sanctioned rename. Sub-stories are expressed with the `extends` relation, not with suffixes.
+
+---
+
+<a id="state-machine"></a>
+
+## 7. Story State Machine
+
+```
+draft ──► ready ──► in-progress ──► review ──► done
+             ▲            │            │
+             └────────────┴────────────┘   backward: --justification required
+terminal: superseded, abandoned (from any state, --justification required)
+computed: blocked = any depends_on target not done
+```
+
+- **draft**: being specified. `/qdev-create-story` produces a draft; it becomes `ready` when acceptance criteria and constraints validate.
+- **Forward transitions** fire `pre_transition` hooks (gates, lease check, dependency check) then `post_transition` hooks (evidence write, scratchpad note).
+- **Backward transitions** implement pivots and review rejections. They require `--justification`, which is appended to the scratchpad and logged as a `DEC-` record of type `pivot` or `review_rejection`.
+- **superseded** is set automatically on the target of a `supersedes` relation when the source reaches `ready`.
+
+Epics derive status from their stories: `planning`, `active`, `done`. Sprints: `planning | active | completed | paused | abandoned`.
+
+---
+
+<a id="relations"></a>
+
+## 8. Relations
+
+| Relation | Source → Target | Semantics |
+| --- | --- | --- |
+| `depends_on` | Story → Story | Target must be `done` before source may enter `in-progress`. Cycles are validation errors |
+| `extends` | Story → Story | Source refines target; used instead of sub-story suffixes |
+| `supersedes` | Story/Epic → Story/Epic | Target becomes `superseded` |
+| `traces_to` | Story → Requirement | Traceability |
+| `verifies` | Gate → Requirement | Traceability from evidence to requirement |
+| `mitigates` | Story/Gate → Hazard | Risk control linkage |
+| `closes_dw` | Story → Deferred work | DW closes when story reaches `done` |
+| `governed_by` | Story/Epic → ADR | ADR excerpts included in projection |
+
+Relations are declared in the source entity's frontmatter and validated on hydration; a dangling target is a validation error, not a parse failure.
+
+---
+
+<a id="layout"></a>
+
+## 9. On-Disk Layout
+
+```
+qdev.toml                     committed project config
+.qdev.local.toml              gitignored identity and preferences
+.qdev/
+  gates/                      committed gate scripts
+  cache/                      gitignored: cache.sqlite, write.lock
+  leases/                     gitignored: one file per active lease
+docs/specs/
+  prd/PRD-1.md
+  requirements/FR-101.md
+  epics/E12.md
+  stories/E12S4.md
+  adrs/AD-43.md
+  hazards/HAZ-14.md
+docs/state/
+  sprints/sprint-5.md
+  releases/0.1.0.md
+  dw/DW-7f3a.md
+  decisions/DEC-2b91.md
+  scratch/E12S4.jsonl
+  evidence/E12S4/8f1b2c4-c-abi-round-trip.json
+  baselines/<branch>/<gate>.json
+  soup/rusqlite@0.31.0.md
+```
+
+### Story file example
+
+```markdown
+---
+id: E12S4
+title: CoreResponse Buffer Layout
+status: ready
+owners: ["simon", "team:core-platform"]
+appetite: small
+safety_class: ClassB
+target_modules: ["bridge", "foundation"]
+constraints:
+  - id: NG-1
+    kind: no_go
+    text: Do not implement Swift decoding
+  - id: RH-1
+    kind: rabbit_hole
+    text: len == 0 does not mean empty result
+relations:
+  depends_on: ["E12S3"]
+  traces_to: ["FR-102"]
+  governed_by: ["AD-43"]
+gates: ["c-abi-round-trip"]
+version: 3
+created_by: { type: human, id: simon }
+updated_by: { type: agent, id: claude-code }
+---
+
+## Acceptance Criteria
+...
+```
+
+Frontmatter edits by qdev are line-based patches that preserve comments and ordering.
+
+---
+
+<a id="schema"></a>
+
+## 10. SQLite Cache Schema
+
+The cache mirrors the files; every table row carries `source_path` and `content_hash`. Abbreviated:
 
 ```sql
--- Core Releases & Sprints
-CREATE TABLE releases (
-    version TEXT PRIMARY KEY,        -- e.g. '0.1.0'
-    target_date TEXT,
-    base_version TEXT REFERENCES releases(version),
-    status TEXT CHECK(status IN ('planning', 'active', 'frozen', 'shipped'))
-);
-
-CREATE TABLE sprints (
-    id INTEGER PRIMARY KEY,          -- e.g. 5
-    release_version TEXT REFERENCES releases(version),
-    title TEXT NOT NULL,
-    owners TEXT NOT NULL,            -- JSON array: ["simon", "team:core-platform"]
-    status TEXT CHECK(status IN ('planning', 'active', 'completed', 'paused', 'abandoned')),
-    started_at TIMESTAMP,
-    completed_at TIMESTAMP
-);
-
--- Epics and Stories
-CREATE TABLE epics (
-    id TEXT PRIMARY KEY,             -- e.g. 'S5E2'
-    sprint_id INTEGER REFERENCES sprints(id),
-    title TEXT NOT NULL,
-    owners TEXT NOT NULL,            -- JSON array of owners/teams
-    phase INTEGER,
-    status TEXT DEFAULT 'planning'
+CREATE TABLE entities (           -- common index for every entity kind
+    id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT, status TEXT,
+    owners TEXT, source_path TEXT NOT NULL, content_hash TEXT NOT NULL,
+    version INTEGER, created_by_type TEXT, created_by_id TEXT,
+    updated_by_type TEXT, updated_by_id TEXT, updated_at TEXT
 );
 
 CREATE TABLE stories (
-    id TEXT PRIMARY KEY,             -- e.g. 'S5E2S4'
-    epic_id TEXT REFERENCES epics(id),
-    seq INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    owners TEXT NOT NULL,            -- JSON array: ["simon", "amelia"]
-    status TEXT CHECK(status IN ('backlog', 'ready', 'in-progress', 'review', 'done', 'escalated')),
-    appetite TEXT CHECK(appetite IN ('tiny', 'small', 'medium', 'deep')),
-    safety_class TEXT CHECK(safety_class IN ('ClassA', 'ClassB', 'ClassC')),
-    target_modules TEXT,             -- JSON array: ["bridge", "foundation"] or ["RustBridge"]
-    rabbit_holes TEXT,               -- Pitfalls to avoid
-    no_gos TEXT,                     -- Strictly out of scope
-    spec_path TEXT NOT NULL,
-    version INTEGER DEFAULT 1
+    id TEXT PRIMARY KEY REFERENCES entities(id),
+    epic_id TEXT NOT NULL, seq INTEGER NOT NULL,
+    appetite TEXT CHECK(appetite IN ('tiny','small','medium','deep')),
+    safety_class TEXT CHECK(safety_class IN ('ClassA','ClassB','ClassC')),
+    target_modules TEXT              -- JSON array of module ids
 );
 
--- Semantic Relationships
-CREATE TABLE entity_relations (
-    source_id TEXT NOT NULL,
-    relation_type TEXT NOT NULL,
-    target_id TEXT NOT NULL,
-    notes TEXT,
-    PRIMARY KEY (source_id, relation_type, target_id)
+CREATE TABLE constraints (
+    id TEXT PRIMARY KEY,             -- 'E12S4/NG-1'
+    owner_id TEXT NOT NULL, kind TEXT CHECK(kind IN ('no_go','rabbit_hole','appetite')),
+    text TEXT NOT NULL
 );
 
--- Decision Ledger
+CREATE TABLE relations (
+    source_id TEXT NOT NULL, relation TEXT NOT NULL, target_id TEXT NOT NULL,
+    PRIMARY KEY (source_id, relation, target_id)
+);
+
+CREATE TABLE sprints (
+    id INTEGER PRIMARY KEY, title TEXT, release_version TEXT,
+    status TEXT CHECK(status IN ('planning','active','completed','paused','abandoned')),
+    owners TEXT, started_at TEXT, completed_at TEXT
+);
+
+CREATE TABLE sprint_assignments (
+    sprint_id INTEGER REFERENCES sprints(id), story_id TEXT NOT NULL,
+    assigned_at TEXT NOT NULL, carried_from INTEGER,
+    PRIMARY KEY (sprint_id, story_id)
+);
+
 CREATE TABLE decisions (
-    id TEXT PRIMARY KEY,             -- e.g. 'DEC-104'
-    story_id TEXT REFERENCES stories(id),
-    decision_type TEXT CHECK(decision_type IN ('human_ruling', 'agent_assumption', 'cross_team_override')),
-    topic TEXT NOT NULL,
-    context TEXT NOT NULL,
-    ruling TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id TEXT PRIMARY KEY, subject_id TEXT NOT NULL,   -- story, epic, or ADR
+    decision_type TEXT CHECK(decision_type IN
+      ('human_ruling','agent_assumption','cross_team_override','pivot','review_rejection','lease_override')),
+    topic TEXT, context TEXT, ruling TEXT,
+    author_type TEXT, author_id TEXT, created_at TEXT
 );
 
--- Deferred Work & Anomaly Register (IEC 62304 Clause 9)
 CREATE TABLE deferred_work (
-    id TEXT PRIMARY KEY,             -- e.g. 'DW-421'
-    origin_story_id TEXT REFERENCES stories(id),
-    target_module TEXT NOT NULL,     -- Language-agnostic module / subsystem identifier
-    title TEXT NOT NULL,
-    status TEXT CHECK(status IN ('open', 'done', 'wont_fix')),
-    safety_risk TEXT CHECK(safety_risk IN ('negligible', 'acceptable_with_mitigation', 'unacceptable')) DEFAULT 'negligible',
-    clinical_rationale TEXT,         -- Required risk justification under ISO 14971
-    gate TEXT,
-    resolution TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id TEXT PRIMARY KEY, origin_story_id TEXT, target_module TEXT NOT NULL,
+    status TEXT CHECK(status IN ('open','done','wont_fix')),
+    safety_risk TEXT CHECK(safety_risk IN ('negligible','acceptable_with_mitigation','unacceptable')),
+    rationale TEXT, gate TEXT, resolution TEXT
 );
 
--- SOUP Inventory (IEC 62304 §5.3.3)
-CREATE TABLE soup_dependencies (
-    id TEXT PRIMARY KEY,             -- e.g. 'rusqlite-0.31.0'
-    dependency_name TEXT NOT NULL,
-    version TEXT NOT NULL,
-    license TEXT,
-    cve_status TEXT DEFAULT 'clean',
-    evaluated_for_release TEXT REFERENCES releases(version)
+CREATE TABLE scratchpad_entries (
+    story_id TEXT NOT NULL, seq INTEGER NOT NULL, at TEXT NOT NULL,
+    author_type TEXT, author_id TEXT, kind TEXT, text TEXT,
+    PRIMARY KEY (story_id, seq)
 );
 
--- Executable Gates & Audit Runs
 CREATE TABLE gates (
-    id TEXT PRIMARY KEY,             -- e.g. 'c-abi-round-trip'
-    gate_type TEXT CHECK(gate_type IN ('command', 'ratchet', 'red_fixture', 'hazard_limb', 'phi_leak', 'soup_audit', 'hygiene')),
-    command TEXT NOT NULL,
-    depends_on TEXT                  -- JSON array of gate IDs
+    id TEXT PRIMARY KEY, command TEXT NOT NULL, kind TEXT CHECK(kind IN ('check','ratchet')),
+    timeout_ms INTEGER, output_adapter TEXT, on_transition TEXT,   -- JSON array
+    depends_on TEXT, metric TEXT, direction TEXT
 );
 
 CREATE TABLE gate_runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    story_id TEXT REFERENCES stories(id),
-    gate_id TEXT REFERENCES gates(id),
-    commit_sha TEXT NOT NULL,
-    exit_code INTEGER NOT NULL,
-    duration_ms INTEGER NOT NULL,
-    summary TEXT,
-    ran_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id TEXT PRIMARY KEY,             -- '<sha>-<gate>'
+    story_id TEXT, gate_id TEXT NOT NULL, commit_sha TEXT NOT NULL,
+    status TEXT CHECK(status IN ('pass','fail','infra')),
+    exit_code INTEGER, duration_ms INTEGER, metric_value REAL,
+    summary TEXT, evidence_path TEXT NOT NULL, output_hash TEXT,
+    run_by_type TEXT, run_by_id TEXT, ran_at TEXT
 );
+
+CREATE TABLE soup_dependencies (
+    id TEXT PRIMARY KEY, name TEXT, version TEXT, license TEXT,
+    cve_status TEXT, introduced_by_story TEXT, evaluated_for_release TEXT
+);
+
+CREATE TABLE sync_state (path TEXT PRIMARY KEY, mtime INTEGER, size INTEGER, content_hash TEXT);
 ```
+
+Requirements, hazards, ADRs, PRDs, and releases use the `entities` table plus kind-specific detail tables of the same shape.
 
 ---
 
 <a id="storage-architecture"></a>
 
-## 12. Storage Architecture: SQLite + Auto-Hydration
+## 11. Storage Architecture & Hydration
 
-`qdev` uses a **Hydrated Projection Model**. Markdown files with YAML frontmatter act as the canonical Git source of truth, while an auto-hydrated SQLite database acts as the high-speed local query cache.
+Per **AD-3**, **AD-4**, **AD-6**:
 
-### Disk Storage (Git Source of Truth)
+1. **Boot sweep.** Stat every file under the configured spec and state directories. Compare `mtime` and size to `sync_state`. For changed files, hash the content; re-parse only if the hash differs.
+2. **Parse and upsert** frontmatter and relations in one transaction. Dangling relations and schema violations are recorded as validation findings, not fatal errors.
+3. **Conflict markers** (`<<<<<<<`) produce a `merge_conflict` finding for that file and hydration continues.
+4. **Writes** take the advisory lock, write to a temp file, rename, then upsert the cache row and mark it dirty so the next sweep cannot skip it on a coarse-`mtime` filesystem.
+5. **Optimistic concurrency.** Every entity carries `version`; `qdev update --if-version N` fails with exit code 5 on mismatch.
+6. **Worktrees.** The cache lives inside the worktree at `.qdev/cache/`; each worktree has its own. Leases record the worktree path so `qdev next` can avoid double assignment across worktrees.
 
-- Single-entity markdown files with YAML frontmatter under `docs/specs/sprint-{N}/`.
-- Discrete deferred work files under `docs/state/dw/`.
-- Committed to Git; produces clean, human-readable PR diffs.
-- Zero binary merge conflicts.
-
-### Local SQLite Cache (.qubric/qdev.db)
-
-- **Gitignored** local cache file.
-- Abstracted behind a Rust `Store` trait (allowing future Postgres backends).
-- Auto-hydrated on startup in ~25ms via file `mtime` and content hashes.
-- Can be deleted at any time and regenerated without loss of data.
+Target: ≤ 30 ms for 1,000 entities with one change.
 
 ---
 
-<a id="phase-skills"></a>
+<a id="projection"></a>
 
-## 13. The Three-Phase Lifecycle & Model Tiering
+## 12. Context Projection & Model Tiering
 
-| Phase Skill | Target Model | Core Responsibility | Context Ingested |
-| --- | --- | --- | --- |
-| **`/qdev-create-story`** | High Reasoning (Sonnet / Gemini Thinking) | Decomposes Epic into next sequential story; queries related ADRs; defines Acceptance Criteria, Rabbit Holes, and No-Gos; initializes scratchpad. | Epic goals, relevant ADRs, sibling story titles. (~800 tokens) |
-| **`/qdev-develop`** | Fast Coding (Sonnet / Flash / Cursor) | Implements code using TDD; maintains intermediate scratchpad; runs internal exit gates (No-Go checks, module boundaries, code hygiene filter). | Story spec, scratchpad, binding module invariants. (~400 tokens) |
-| **`/qdev-review`** | Adversarial Audit (Opus / Pro) | Audits git diff against acceptance criteria; verifies that No-Gos, Rabbit Holes, and comment hygiene were respected; verifies all gates; stamps evidence. | Story spec, git diff, scratchpad summary, gate receipts. (~1,200 tokens) |
+`qdev context <id> --phase <specify|develop|review> --budget <tokens>` is the single source of agent context. Skills and MCP tools call it rather than assembling context themselves.
 
----
+| Phase | Includes | Typical budget |
+| --- | --- | --- |
+| `specify` | Epic goal and constraints, sibling story titles, governing ADR summaries, linked requirements | ~800 |
+| `develop` | Story spec, inherited constraints with IDs, module paths, ADR excerpts, scratchpad summary, hygiene directive, bound gates | ~1,200 |
+| `review` | Everything in `develop` plus the diff summary, gate receipts, and evidence paths | ~2,500 |
 
+The projection is deterministic, reports its own token estimate with `--stats`, and truncates lowest-priority sections first when over budget. Model choice per phase is configuration (`[models]` in `qdev.toml`), not specification; the recommended pattern is a reasoning model for `specify`, a fast coding model for `develop`, and the strongest available model for `review`.

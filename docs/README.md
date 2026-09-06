@@ -1,41 +1,27 @@
 # qdev Documentation Index
 
-Welcome to the comprehensive technical documentation for **`qdev`**—the relational workflow engine and gatekeeper for high-integrity software development.
+Technical documentation for **qdev**, the relational workflow engine and gatekeeper for high-integrity software development.
 
-## Documentation Guides
+## Authority
 
-- **[Architecture & Data Model](architecture.md)**
-  - Problem Statement: The Markdown Context Wall
-  - Prior Art & Landscape Analysis
-  - The Core Synthesis: BMAD Tree + Shape Up
-  - The End-to-End Product Development Lifecycle
-  - Relational Documentation Artifacts Catalog
-  - Indexing Grammar & SQLite Schema
-  - Storage Architecture: SQLite + Auto-Hydration Projection Model
-  - The Three-Phase Lifecycle & Model Tiering
+- The [Architecture Spine](bmad/planning-artifacts/architecture-1/ARCHITECTURE-SPINE.md) is the authoritative list of architectural decisions (AD-1 … AD-14).
+- The [PRD](bmad/planning-artifacts/prd-1/prd.md) is the authoritative requirements list.
+- The [Epics & Stories](bmad/planning-artifacts/epics.md) are the implementation plan.
+- The guides below elaborate on those; where they conflict, the spine and PRD win.
 
-- **[CLI Reference & Configuration Guide](cli-reference.md)**
-  - Standard Command Grammar (`qdev <verb> <noun>`)
-  - Universal Structured Output (JSON Support)
-  - The Interactive Default Experience ("What To Do Next")
-  - Dual Configuration Specification (`qdev.toml` & `.qdev.local.toml`)
-  - Installation, AI Skill Deployment (`qdev install`), & Health Diagnostics (`qdev doctor`)
+## Guides
 
-- **[Quality, Gates & IEC 62304 Compliance](compliance-and-safety.md)**
-  - Multi-Entity Citations & Code Comment Hygiene Filter
-  - Generic Ratchet & Zero-Noise Gate Runner (~95% stdout token compression)
-  - Medical Device Architecture (IEC 62304 / ISO 14971, SOUP Audits, Residual Anomalies)
-  - Git Preflight Guard & Working Tree Synchronization
+- **[Planning Pipeline](planning-pipeline.md)** — entry modes (greenfield, document, brownfield, increment), the eight-stage pipeline with readiness checks, version-scoped planning and sprint cutting, elicitation engine, worked examples, feedback loops. *Draft; §11 lists the changes it implies for the other documents.*
+- **[Architecture & Data Model](architecture.md)** — problem statement, methodology, entity catalog, ID grammar, state machine, relations, on-disk layout, cache schema, hydration, context projection.
+- **[CLI Reference & Configuration](cli-reference.md)** — grammar, command catalog, JSON envelope and exit codes, non-interactive mode, pulse, `qdev.toml` and `.qdev.local.toml`, install and doctor.
+- **[Quality, Gates & Compliance Support](compliance-and-safety.md)** — citations and hygiene linter, gate engine and result contract, ratchets, evidence bundles, IEC 62304 / ISO 14971 support mapping, preflight and hooks.
+- **[Governance & Release Management](governance-and-teams.md)** — ownership, leases, overrides, sprints as assignments, carry-over, releases.
+- **[v1 Scope & Roadmap](roadmap.md)** — scope, execution plan by epic, self-hosting handover, edge cases.
 
-- **[Governance & Release Management](governance-and-teams.md)**
-  - Multi-Owner Teams & Cross-Team Governance Interlocks
-  - Orthogonal Temporal Sprints vs Functional SemVer Releases
-  - External Issue & Dossier Referencing (Jira, Vault)
+## Review history
 
-- **[Implementation Roadmap & Architecture Review](roadmap.md)**
-  - v1 MVP Implementation Scope vs v2 Deferred Capabilities
-  - Step-by-Step 7-Phase Execution Plan
-  - In-Depth Architectural Review & Edge Cases (Multi-Sprint Concurrency, Worktree Isolation)
+- [Specification Review, 2026-09-06](bmad/planning-artifacts/spec-review.md) — findings that produced the current revision of every document above.
 
-- **[Initial Planning HTML Specification](initial_planning.html)**
-  - The original interactive architecture design document.
+## Historical
+
+- [Initial Planning HTML](initial_planning.html) — the original design document, kept unmodified for reference. It predates the spine and is superseded wherever they differ (IDs, states, paths, gate model, RBAC).
