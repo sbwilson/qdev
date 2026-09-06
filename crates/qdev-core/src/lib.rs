@@ -4,6 +4,7 @@ pub mod errors;
 pub mod id;
 pub mod init;
 pub mod interactivity;
+pub mod schema;
 
 pub use config::{
     find_workspace_root, load_config, merge_configs, resolve_git_email, validate_config_table,
@@ -25,6 +26,11 @@ pub use init::{
 };
 pub use interactivity::Interactivity;
 pub use rusqlite;
+pub use schema::{
+    extract_frontmatter, extract_frontmatter_str, validate_frontmatter,
+    validate_frontmatter_detailed, validate_frontmatter_value, validate_value_detailed, EntityKind,
+    SchemaError, ValidationError,
+};
 
 use serde::{Deserialize, Serialize};
 

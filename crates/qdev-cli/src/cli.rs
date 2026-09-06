@@ -34,6 +34,14 @@ pub enum Commands {
     Init(InitArgs),
     /// Create planning and execution entities
     Create(CreateArgs),
+    /// Print JSON Schema for an entity kind
+    Schema(SchemaArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct SchemaArgs {
+    /// Entity schema kind (e.g. story, prd, epic, dw)
+    pub kind: String,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]

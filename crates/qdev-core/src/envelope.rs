@@ -101,6 +101,20 @@ mod tests {
     }
 
     #[test]
+    fn test_success_envelope_with_json_value() {
+        let val = serde_json::json!({
+            "title": "Story",
+            "type": "object"
+        });
+        let envelope = JsonEnvelope::new(val);
+        let serialized = serde_json::to_string(&envelope).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(parsed["schema_version"], "1");
+        assert_eq!(parsed["title"], "Story");
+        assert_eq!(parsed["type"], "object");
+    }
+
+    #[test]
     fn test_error_envelope_serialization_without_details() {
         let envelope = JsonErrorEnvelope::new("usage_error", "unrecognized subcommand", None);
         let serialized = serde_json::to_string(&envelope).unwrap();

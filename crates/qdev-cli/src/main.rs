@@ -132,6 +132,11 @@ fn run(raw_args: &[String]) -> ExitCode {
         return handle_init(init_args, interactivity, &cli, &output, &current_dir);
     }
 
+    // Dispatch schema command before loading config so it works without an initialized workspace
+    if let Some(Commands::Schema(ref schema_args)) = cli.command {
+        return handle_schema(schema_args, &cli, &output);
+    }
+
     let annotated_config = match qdev_core::load_config(&current_dir) {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -191,7 +196,42 @@ fn run(raw_args: &[String]) -> ExitCode {
             }
         },
         Some(Commands::Init(_)) => unreachable!(),
+        Some(Commands::Schema(_)) => unreachable!(),
     }
+}
+
+fn handle_schema(schema_args: &cli::SchemaArgs, cli: &Cli, output: &OutputEmitter) -> ExitCode {
+    let kind = match qdev_core::EntityKind::from_str_loose(&schema_args.kind) {
+        Ok(k) => k,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return ExitCode::UsageError;
+        }
+    };
+
+    if cli.json {
+        let envelope = JsonEnvelope::new(kind.schema_json());
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit schema envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else {
+        let schema_text = kind.pretty_schema_str();
+        if let Err(e) = output.emit_text(&schema_text) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit schema: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    }
+
+    ExitCode::Success
 }
 
 fn handle_init(
