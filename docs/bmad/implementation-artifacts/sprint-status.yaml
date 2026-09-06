@@ -19,7 +19,7 @@ development_status:
   1-3-qdev-init: done
   1-4-entity-file-format-schemas-attribution: done
   1-5-identifier-grammar-allocation: done
-  1-6-sqlite-cache-schema-migrations: backlog
+  1-6-sqlite-cache-schema-migrations: done
   1-7-incremental-hydration-sweep: backlog
   1-8-write-path-atomic-files-locking-frontmatter-patching: done
   1-9-get-list-query-engine: backlog

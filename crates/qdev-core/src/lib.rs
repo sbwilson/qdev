@@ -5,7 +5,16 @@ pub mod id;
 pub mod init;
 pub mod interactivity;
 pub mod schema;
+pub mod store;
 pub mod write;
+
+pub use store::{
+    create_schema_v1, drop_all_user_tables, ensure_cache, inspect_cache_schema, CacheSchemaStatus,
+    ConstraintRecord, DecisionRecord, DeferredWorkRecord, DirtyEntityRecord, EntityFilter,
+    EntityRecord, GateRecord, GateRunRecord, RelationRecord, ScratchpadRecord, SoupRecord,
+    SprintAssignmentRecord, SprintRecord, SqliteStore, Store, StoryRecord, SyncStateRecord,
+    ALL_TABLE_NAMES, BUSY_TIMEOUT_MS, CACHE_USER_VERSION,
+};
 
 pub use config::{
     find_workspace_root, load_config, merge_configs, resolve_git_email, validate_config_table,
@@ -36,8 +45,7 @@ pub use serde_yaml;
 pub use write::{
     acquire_write_lock, apply_entity_update, patch_frontmatter, replace_markdown_section,
     resolve_entity_file, sha256_digest, upsert_cache_and_mark_dirty, write_file_atomic,
-    AdvisoryLockGuard, Author, EntityRecord, EntityUpdateOptions, EntityUpdateResult,
-    FrontmatterPatchOptions,
+    AdvisoryLockGuard, Author, EntityUpdateOptions, EntityUpdateResult, FrontmatterPatchOptions,
 };
 
 use serde::{Deserialize, Serialize};

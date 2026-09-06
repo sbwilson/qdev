@@ -769,26 +769,7 @@ pub fn replace_markdown_section(
 }
 
 /// In-memory representation of an entity cache row to be upserted.
-#[derive(Debug, Clone)]
-pub struct EntityRecord {
-    pub id: String,
-    pub kind: EntityKind,
-    pub title: Option<String>,
-    pub status: Option<String>,
-    pub owners: Option<String>,
-    pub source_path: String,
-    pub content_hash: String,
-    pub version: u64,
-    pub created_by: Option<Author>,
-    pub updated_by: Option<Author>,
-    pub updated_at: String,
-    // Story detail fields
-    pub epic_id: Option<String>,
-    pub seq: Option<u32>,
-    pub appetite: Option<String>,
-    pub safety_class: Option<String>,
-    pub target_modules: Option<String>,
-}
+pub use crate::store::EntityRecord;
 
 fn current_iso8601() -> String {
     let now = SystemTime::now();
@@ -828,56 +809,24 @@ pub fn upsert_cache_and_mark_dirty(
     cache_db_path: &Path,
     entity: &EntityRecord,
 ) -> Result<(), QdevError> {
-    if let Some(parent) = cache_db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        if !parent.exists() {
-            fs::create_dir_all(parent).map_err(|e| {
-                QdevError::infrastructure_failure(
-                    "io_error",
-                    format!(
-                        "Failed to create cache directory '{}': {}",
-                        parent.display(),
-                        e
-                    ),
-                )
-            })?;
-        }
-    }
-
-    let conn = rusqlite::Connection::open(cache_db_path).map_err(|e| {
-        QdevError::infrastructure_failure(
-            "sqlite_error",
-            format!("Failed to open cache database: {}", e),
-        )
-    })?;
-
-    // WAL mode and 5000ms busy timeout per AD-4
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(|e| {
-            QdevError::infrastructure_failure(
-                "sqlite_error",
-                format!("Failed to set journal_mode=WAL: {}", e),
-            )
-        })?;
-
-    conn.pragma_update(None, "busy_timeout", 5000)
-        .map_err(|e| {
-            QdevError::infrastructure_failure(
-                "sqlite_error",
-                format!("Failed to set busy_timeout=5000: {}", e),
-            )
-        })?;
+    let store = crate::store::SqliteStore::open(cache_db_path)?;
 
     // Ensure schema v1 exists
-    crate::init::create_schema_v1(&conn)?;
-
-    conn.execute_batch("BEGIN IMMEDIATE;").map_err(|e| {
-        QdevError::infrastructure_failure(
-            "sqlite_error",
-            format!("Failed to begin transaction: {}", e),
-        )
+    store.with_conn(|conn| {
+        crate::store::create_schema_v1(conn)?;
+        Ok(())
     })?;
 
-    let tx_res = (|| -> Result<(), QdevError> {
+    store.with_conn_mut(|conn| {
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!("Failed to begin transaction: {}", e),
+                )
+            })?;
+
         let (c_type, c_id) = match entity.created_by {
             Some(ref a) => (Some(a.author_type.clone()), Some(a.id.clone())),
             None => (None, None),
@@ -888,7 +837,7 @@ pub fn upsert_cache_and_mark_dirty(
         };
 
         // 1. Upsert into entities table (preserve existing created_by via COALESCE if omitted)
-        conn.execute(
+        tx.execute(
             r#"
 INSERT INTO entities (
     id, kind, title, status, owners, source_path, content_hash, version,
@@ -934,7 +883,7 @@ ON CONFLICT(id) DO UPDATE SET
         // 2. Kind-specific upsert: stories
         if entity.kind == EntityKind::Story {
             if let (Some(ref epic), Some(seq)) = (&entity.epic_id, entity.seq) {
-                conn.execute(
+                tx.execute(
                     r#"
 INSERT INTO stories (id, epic_id, seq, appetite, safety_class, target_modules)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -965,7 +914,7 @@ ON CONFLICT(id) DO UPDATE SET
 
         // 3. Mark row as dirty in dirty_entities
         let dirty_at = current_iso8601();
-        conn.execute(
+        tx.execute(
             r#"
 INSERT INTO dirty_entities (id, dirty_at)
 VALUES (?1, ?2)
@@ -981,7 +930,7 @@ ON CONFLICT(id) DO UPDATE SET dirty_at = excluded.dirty_at;
         })?;
 
         // 4. Invalidate sync_state for this entity path
-        conn.execute(
+        tx.execute(
             "DELETE FROM sync_state WHERE path = ?1;",
             rusqlite::params![entity.source_path],
         )
@@ -992,22 +941,15 @@ ON CONFLICT(id) DO UPDATE SET dirty_at = excluded.dirty_at;
             )
         })?;
 
+        tx.commit().map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to commit transaction: {}", e),
+            )
+        })?;
+
         Ok(())
-    })();
-
-    if let Err(e) = tx_res {
-        let _ = conn.execute_batch("ROLLBACK;");
-        return Err(e);
-    }
-
-    conn.execute_batch("COMMIT;").map_err(|e| {
-        QdevError::infrastructure_failure(
-            "sqlite_error",
-            format!("Failed to commit transaction: {}", e),
-        )
-    })?;
-
-    Ok(())
+    })
 }
 
 /// Standard entity file resolution directory map with optional storage config.

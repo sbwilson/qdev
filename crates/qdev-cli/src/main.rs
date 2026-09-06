@@ -145,6 +145,15 @@ fn run(raw_args: &[String]) -> ExitCode {
         }
     };
 
+    // Boot-time cache verification and initialization per spec-1-6 (in initialized workspaces)
+    let root = qdev_core::find_workspace_root(&current_dir);
+    if root.join("qdev.toml").is_file() {
+        if let Err(e) = qdev_core::ensure_cache(&root, &annotated_config.config.storage) {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    }
+
     // Dispatch commands
     match cli.command {
         None | Some(Commands::Status) => {
