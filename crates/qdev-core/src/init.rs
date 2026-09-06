@@ -596,7 +596,7 @@ fn drop_all_user_tables(conn: &rusqlite::Connection) -> Result<(), QdevError> {
     Ok(())
 }
 
-fn create_schema_v1(conn: &rusqlite::Connection) -> Result<(), QdevError> {
+pub(crate) fn create_schema_v1(conn: &rusqlite::Connection) -> Result<(), QdevError> {
     let ddl = r#"
 CREATE TABLE IF NOT EXISTS entities (
     id TEXT PRIMARY KEY,
@@ -734,6 +734,11 @@ CREATE TABLE IF NOT EXISTS sync_state (
     mtime INTEGER,
     size INTEGER,
     content_hash TEXT
+);
+
+CREATE TABLE IF NOT EXISTS dirty_entities (
+    id TEXT PRIMARY KEY,
+    dirty_at TEXT
 );
 "#;
 

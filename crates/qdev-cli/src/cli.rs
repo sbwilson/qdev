@@ -36,6 +36,49 @@ pub enum Commands {
     Create(CreateArgs),
     /// Print JSON Schema for an entity kind
     Schema(SchemaArgs),
+    /// Update planning and execution entities
+    Update(UpdateArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct UpdateArgs {
+    /// Target entity kind or identifier (e.g. "story" or "E12S4")
+    pub target: String,
+
+    /// Target entity identifier when kind is specified (e.g. "E12S4")
+    pub id: Option<String>,
+
+    /// Update entity status
+    #[arg(short = 's', long = "status")]
+    pub status: Option<String>,
+
+    /// Update entity title
+    #[arg(short = 't', long = "title")]
+    pub title: Option<String>,
+
+    /// Arbitrary frontmatter field update (KEY=VALUE)
+    #[arg(long = "field", value_name = "KEY=VALUE")]
+    pub field: Vec<String>,
+
+    /// Markdown body section heading to replace
+    #[arg(long = "section")]
+    pub section: Option<String>,
+
+    /// Path to file containing replacement section body
+    #[arg(long = "file")]
+    pub file: Option<String>,
+
+    /// Optimistic concurrency control: expected existing entity version
+    #[arg(long = "if-version")]
+    pub if_version: Option<u64>,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]

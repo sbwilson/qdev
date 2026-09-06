@@ -6,7 +6,7 @@ use std::panic;
 use std::process::ExitCode as StdExitCode;
 
 use clap::Parser;
-use qdev_core::{ExitCode, Interactivity, JsonEnvelope, JsonErrorEnvelope, QdevError};
+use qdev_core::{serde_yaml, ExitCode, Interactivity, JsonEnvelope, JsonErrorEnvelope, QdevError};
 use serde::Serialize;
 
 use cli::{is_json_requested, Cli, Commands, ConfigCommands, CreateCommands};
@@ -195,6 +195,9 @@ fn run(raw_args: &[String]) -> ExitCode {
                 handle_create_story(story_args, &annotated_config, &cli, &output, &current_dir)
             }
         },
+        Some(Commands::Update(ref update_args)) => {
+            handle_update(update_args, &annotated_config, &cli, &output, &current_dir)
+        }
         Some(Commands::Init(_)) => unreachable!(),
         Some(Commands::Schema(_)) => unreachable!(),
     }
@@ -693,6 +696,191 @@ fn handle_create_story(
         }
     } else {
         println!("Created story {} at {}", story_id, rel_path);
+    }
+
+    ExitCode::Success
+}
+
+fn handle_update(
+    update_args: &cli::UpdateArgs,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+) -> ExitCode {
+    let root = qdev_core::find_workspace_root(current_dir);
+
+    // Parse target / id
+    let (entity_kind, entity_id) = if let Some(ref id_str) = update_args.id {
+        let kind = match qdev_core::EntityKind::from_str_loose(&update_args.target) {
+            Ok(k) => k,
+            Err(e) => {
+                let _ = output.emit_error(&e);
+                return e.exit_code();
+            }
+        };
+        (Some(kind), id_str.clone())
+    } else {
+        // Only target was provided
+        if qdev_core::EntityKind::from_str_loose(&update_args.target).is_ok() {
+            let err = QdevError::usage_error(format!(
+                "Missing entity ID for kind '{}'",
+                update_args.target
+            ));
+            let _ = output.emit_error(&err);
+            return ExitCode::UsageError;
+        }
+        (None, update_args.target.clone())
+    };
+
+    // Parse custom fields
+    let mut custom_fields = Vec::new();
+    for f in &update_args.field {
+        if let Some((k, v)) = f.split_once('=') {
+            let k_trimmed = k.trim();
+            if k_trimmed.is_empty()
+                || !k_trimmed
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            {
+                let err = QdevError::usage_error(format!(
+                    "Invalid --field argument '{}': key must contain only alphanumeric, '_', or '-' characters",
+                    f
+                ));
+                let _ = output.emit_error(&err);
+                return ExitCode::UsageError;
+            }
+            let val: serde_yaml::Value = serde_yaml::from_str(v)
+                .unwrap_or_else(|_| serde_yaml::Value::String(v.to_string()));
+            custom_fields.push((k_trimmed.to_string(), val));
+        } else {
+            let err = QdevError::usage_error(format!(
+                "Invalid --field argument '{}', expected KEY=VALUE",
+                f
+            ));
+            let _ = output.emit_error(&err);
+            return ExitCode::UsageError;
+        }
+    }
+
+    // Reject modifications to managed fields via --field
+    const MANAGED_FIELDS: &[&str] = &["id", "version", "updated_by", "created_by"];
+    for (k, _) in &custom_fields {
+        if MANAGED_FIELDS.iter().any(|m| m.eq_ignore_ascii_case(k)) {
+            let err = QdevError::usage_error(format!(
+                "Cannot modify managed frontmatter field '{}' via --field",
+                k
+            ));
+            let _ = output.emit_error(&err);
+            return ExitCode::UsageError;
+        }
+    }
+
+    // Check conflicting arguments: flag vs --field
+    if update_args.status.is_some()
+        && custom_fields
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("status"))
+    {
+        let err = QdevError::usage_error(
+            "Conflicting arguments: status specified via both --status and --field status=...",
+        );
+        let _ = output.emit_error(&err);
+        return ExitCode::UsageError;
+    }
+
+    if update_args.title.is_some()
+        && custom_fields
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("title"))
+    {
+        let err = QdevError::usage_error(
+            "Conflicting arguments: title specified via both --title and --field title=...",
+        );
+        let _ = output.emit_error(&err);
+        return ExitCode::UsageError;
+    }
+
+    // Resolve active author attribution
+    let author_type = if let Some(ref at) = update_args.author_type {
+        if at != "human" && at != "agent" {
+            let err = QdevError::usage_error(format!(
+                "Invalid author type '{}', must be 'human' or 'agent'",
+                at
+            ));
+            let _ = output.emit_error(&err);
+            return ExitCode::UsageError;
+        }
+        at.clone()
+    } else if let Ok(env_at) = std::env::var("QDEV_AUTHOR_TYPE") {
+        if env_at == "human" || env_at == "agent" {
+            env_at
+        } else {
+            "human".to_string()
+        }
+    } else {
+        "human".to_string()
+    };
+
+    let author_id = if let Some(ref aid) = update_args.author_id {
+        aid.clone()
+    } else if let Ok(env_aid) = std::env::var("QDEV_AUTHOR_ID") {
+        env_aid
+    } else if !annotated_config.config.identity.developer_id.is_empty() {
+        annotated_config.config.identity.developer_id.clone()
+    } else {
+        qdev_core::resolve_git_email(Some(&root)).unwrap_or_else(|| "developer".to_string())
+    };
+
+    let author = qdev_core::Author::new(author_type, author_id);
+
+    // Resolve section file path if provided
+    let section_file = update_args.file.as_ref().map(|f| {
+        let p = std::path::Path::new(f);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            current_dir.join(p)
+        }
+    });
+
+    let update_opts = qdev_core::EntityUpdateOptions {
+        workspace_root: root,
+        storage: Some(annotated_config.config.storage.clone()),
+        entity_kind,
+        entity_id,
+        status: update_args.status.clone(),
+        title: update_args.title.clone(),
+        custom_fields,
+        section: update_args.section.clone(),
+        section_file,
+        if_version: update_args.if_version,
+        author,
+    };
+
+    let res = match qdev_core::apply_entity_update(&update_opts) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    if cli.json {
+        let envelope = JsonEnvelope::new(res.updated_frontmatter);
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit update envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else {
+        println!(
+            "Updated {} {} (version {}) at {}",
+            res.kind, res.id, res.new_version, res.rel_path
+        );
     }
 
     ExitCode::Success

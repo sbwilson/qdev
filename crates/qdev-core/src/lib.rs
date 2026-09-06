@@ -5,6 +5,7 @@ pub mod id;
 pub mod init;
 pub mod interactivity;
 pub mod schema;
+pub mod write;
 
 pub use config::{
     find_workspace_root, load_config, merge_configs, resolve_git_email, validate_config_table,
@@ -30,6 +31,13 @@ pub use schema::{
     extract_frontmatter, extract_frontmatter_str, validate_frontmatter,
     validate_frontmatter_detailed, validate_frontmatter_value, validate_value_detailed, EntityKind,
     SchemaError, ValidationError,
+};
+pub use serde_yaml;
+pub use write::{
+    acquire_write_lock, apply_entity_update, patch_frontmatter, replace_markdown_section,
+    resolve_entity_file, sha256_digest, upsert_cache_and_mark_dirty, write_file_atomic,
+    AdvisoryLockGuard, Author, EntityRecord, EntityUpdateOptions, EntityUpdateResult,
+    FrontmatterPatchOptions,
 };
 
 use serde::{Deserialize, Serialize};
