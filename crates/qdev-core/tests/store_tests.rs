@@ -141,6 +141,7 @@ fn test_store_entity_crud_and_filters() {
     let filter = EntityFilter {
         kind: Some(EntityKind::Story),
         status: Some("ready".to_string()),
+        ..Default::default()
     };
     let list = store.list_entities(&filter).unwrap();
     assert_eq!(list.len(), 1);
@@ -150,6 +151,7 @@ fn test_store_entity_crud_and_filters() {
     let empty_filter = EntityFilter {
         kind: Some(EntityKind::Epic),
         status: None,
+        ..Default::default()
     };
     let empty_list = store.list_entities(&empty_filter).unwrap();
     assert!(empty_list.is_empty());

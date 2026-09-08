@@ -210,6 +210,12 @@ fn run(raw_args: &[String]) -> ExitCode {
         Some(Commands::Update(ref update_args)) => {
             handle_update(update_args, &annotated_config, &cli, &output, &current_dir)
         }
+        Some(Commands::Get(ref get_args)) => {
+            handle_get(get_args, &annotated_config, &cli, &output, &current_dir)
+        }
+        Some(Commands::List(ref list_args)) => {
+            handle_list(list_args, &annotated_config, &cli, &output, &current_dir)
+        }
         Some(Commands::Init(_)) => unreachable!(),
         Some(Commands::Schema(_)) => unreachable!(),
     }
@@ -896,4 +902,386 @@ fn handle_update(
     }
 
     ExitCode::Success
+}
+
+/// Opens the SQLite cache read-only for `get`/`list`, which never write.
+///
+/// Callers must check `ensure_query_workspace` first: `SqliteStore::open` creates the cache
+/// file (and its parent directory) if missing, so calling this outside an initialized
+/// workspace would otherwise silently create an empty, schema-less cache file.
+fn open_query_store(
+    root: &std::path::Path,
+    annotated_config: &qdev_core::AnnotatedConfig,
+) -> Result<qdev_core::SqliteStore, QdevError> {
+    let cache_db_path = root
+        .join(&annotated_config.config.storage.cache_dir)
+        .join("cache.sqlite");
+    qdev_core::SqliteStore::open(&cache_db_path)
+}
+
+/// Verifies `root` is an initialized qdev workspace before `get`/`list` touch the cache.
+/// Without this, opening the cache store directly (bypassing the boot-time `ensure_cache`
+/// hydration path) in an uninitialized directory would create a stray empty `cache.sqlite`
+/// and fail with a raw `sqlite_error: no such table` instead of a clean usage error.
+fn ensure_query_workspace(root: &std::path::Path) -> Result<(), QdevError> {
+    if root.join("qdev.toml").is_file() {
+        Ok(())
+    } else {
+        Err(QdevError::usage_error(
+            "Not a qdev workspace (no qdev.toml found); run `qdev init` first",
+        ))
+    }
+}
+
+fn handle_get(
+    get_args: &cli::GetArgs,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+) -> ExitCode {
+    let root = qdev_core::find_workspace_root(current_dir);
+
+    if let Err(e) = ensure_query_workspace(&root) {
+        let _ = output.emit_error(&e);
+        return e.exit_code();
+    }
+
+    // Parse target / id, mirroring handle_update's resolution pattern.
+    let (kind_hint, entity_id) = if let Some(ref id_str) = get_args.id {
+        let kind = match qdev_core::EntityKind::from_str_loose(&get_args.target) {
+            Ok(k) => k,
+            Err(e) => {
+                let _ = output.emit_error(&e);
+                return e.exit_code();
+            }
+        };
+        (Some(kind), id_str.clone())
+    } else if qdev_core::EntityKind::from_str_loose(&get_args.target).is_ok() {
+        let err =
+            QdevError::usage_error(format!("Missing entity ID for kind '{}'", get_args.target));
+        let _ = output.emit_error(&err);
+        return ExitCode::UsageError;
+    } else {
+        (None, get_args.target.clone())
+    };
+
+    // Validate --expand values: only "scratch" changes behavior; "relations"/"constraints" are
+    // accepted as no-ops since the default projection already includes them.
+    let mut expand_scratch = false;
+    for value in &get_args.expand {
+        match value.trim() {
+            "scratch" => expand_scratch = true,
+            "relations" | "constraints" | "" => {}
+            other => {
+                let err = QdevError::usage_error(format!(
+                    "Unknown --expand value '{}', expected one of: relations, constraints, scratch",
+                    other
+                ));
+                let _ = output.emit_error(&err);
+                return ExitCode::UsageError;
+            }
+        }
+    }
+
+    let store = match open_query_store(&root, annotated_config) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let query_opts = qdev_core::QueryOptions { expand_scratch };
+
+    let result = match qdev_core::query_entity(&store, kind_hint, &entity_id, &query_opts) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    if cli.json {
+        let emit_res = match result {
+            qdev_core::GetResult::Entity(projection) => {
+                let envelope = JsonEnvelope::new(*projection);
+                output.emit_envelope(&envelope)
+            }
+            qdev_core::GetResult::Constraint(constraint) => {
+                let envelope = JsonEnvelope::new(constraint);
+                output.emit_envelope(&envelope)
+            }
+        };
+        if let Err(e) = emit_res {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit get envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else {
+        let text = match &result {
+            qdev_core::GetResult::Entity(projection) => render_get_entity_text(projection),
+            qdev_core::GetResult::Constraint(constraint) => render_get_constraint_text(constraint),
+        };
+        if let Err(e) = output.emit_text(&text) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit get output: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    }
+
+    ExitCode::Success
+}
+
+#[derive(Serialize)]
+struct ListPayload {
+    kind: String,
+    items: Vec<qdev_core::ListEntryProjection>,
+}
+
+fn handle_list(
+    list_args: &cli::ListArgs,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+) -> ExitCode {
+    let root = qdev_core::find_workspace_root(current_dir);
+
+    if let Err(e) = ensure_query_workspace(&root) {
+        let _ = output.emit_error(&e);
+        return e.exit_code();
+    }
+
+    let kind = match qdev_core::EntityKind::from_str_loose(&list_args.kind) {
+        Ok(k) => k,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    // Resolve "--owner me" against the active identity the same way `qdev update`'s
+    // attribution does: config.identity.developer_id, falling back to resolve_git_email.
+    let owner = match list_args.owner.as_deref() {
+        Some("me") => {
+            let identity = if !annotated_config.config.identity.developer_id.is_empty() {
+                Some(annotated_config.config.identity.developer_id.clone())
+            } else {
+                qdev_core::resolve_git_email(Some(&root))
+            };
+            match identity {
+                Some(id) if !id.trim().is_empty() => Some(id),
+                _ => {
+                    let err = QdevError::usage_error(
+                        "Cannot resolve '--owner me': no active identity is configured and no git user.email fallback was found",
+                    );
+                    let _ = output.emit_error(&err);
+                    return ExitCode::UsageError;
+                }
+            }
+        }
+        Some(other) => Some(other.to_string()),
+        None => None,
+    };
+
+    let mut query_opts = qdev_core::ListQueryOptions::new(kind);
+    query_opts.epic_id = list_args.epic.clone();
+    query_opts.status = list_args.status.clone();
+    query_opts.owner = owner;
+    query_opts.module = list_args.module.clone();
+    query_opts.sprint = list_args.sprint;
+
+    let store = match open_query_store(&root, annotated_config) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let rows = match qdev_core::query_list(&store, &query_opts) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    if cli.json {
+        let envelope = JsonEnvelope::new(ListPayload {
+            kind: kind.as_str().to_string(),
+            items: rows,
+        });
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit list envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else {
+        let text = render_list_text(&rows);
+        if let Err(e) = output.emit_text(&text) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit list output: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    }
+
+    ExitCode::Success
+}
+
+/// Renders a single entity projection as a compact `key: value` text block.
+fn render_get_entity_text(p: &qdev_core::EntityProjection) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("id: {}\n", p.id));
+    out.push_str(&format!("kind: {}\n", p.kind));
+    if let Some(ref epic_id) = p.epic_id {
+        out.push_str(&format!("epic_id: {}\n", epic_id));
+    }
+    if let Some(ref title) = p.title {
+        out.push_str(&format!("title: {}\n", title));
+    }
+    if let Some(ref status) = p.status {
+        out.push_str(&format!("status: {}\n", status));
+    }
+    out.push_str(&format!("blocked: {}\n", p.blocked));
+    if p.stale {
+        out.push_str("stale: true\n");
+    }
+    if let Some(ref appetite) = p.appetite {
+        out.push_str(&format!("appetite: {}\n", appetite));
+    }
+    if let Some(ref safety_class) = p.safety_class {
+        out.push_str(&format!("safety_class: {}\n", safety_class));
+    }
+    out.push_str(&format!("owners: {}\n", p.owners.join(", ")));
+    if let Some(ref modules) = p.target_modules {
+        out.push_str(&format!("target_modules: {}\n", modules.join(", ")));
+    }
+    out.push_str(&format!("version: {}\n", p.version));
+
+    out.push_str("constraints:\n");
+    if p.constraints.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for c in &p.constraints {
+            match &c.inherited_from {
+                Some(from) => out.push_str(&format!(
+                    "  {} [{}] {} (inherited from {})\n",
+                    c.id, c.kind, c.text, from
+                )),
+                None => out.push_str(&format!("  {} [{}] {}\n", c.id, c.kind, c.text)),
+            }
+        }
+    }
+
+    out.push_str("relations:\n");
+    if p.relations.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for (relation, targets) in &p.relations {
+            out.push_str(&format!("  {}: {}\n", relation, targets.join(", ")));
+        }
+    }
+
+    if let Some(ref scratch) = p.scratch {
+        out.push_str("scratch:\n");
+        if scratch.is_empty() {
+            out.push_str("  (none)\n");
+        } else {
+            for entry in scratch {
+                let kind = entry.kind.as_deref().unwrap_or("note");
+                let author = match (&entry.author_type, &entry.author_id) {
+                    (Some(t), Some(id)) => format!("{}:{}", t, id),
+                    _ => "unknown".to_string(),
+                };
+                // Collapse embedded newlines so a multi-line note can't break this block's
+                // one-line-per-entry alignment (JSON mode preserves the text verbatim).
+                let text = entry.text.as_deref().unwrap_or("").replace('\n', " ");
+                out.push_str(&format!(
+                    "  [{}] {} ({}, {}) {}\n",
+                    entry.seq, entry.at, author, kind, text
+                ));
+            }
+        }
+    }
+
+    out
+}
+
+/// Renders a bare constraint lookup (`qdev get E12S4/NG-1`) as a compact `key: value` block.
+fn render_get_constraint_text(c: &qdev_core::ConstraintRecord) -> String {
+    format!(
+        "id: {}\nowner: {}\nkind: {}\ntext: {}\n",
+        c.id, c.owner_id, c.kind, c.text
+    )
+}
+
+/// Renders `list` rows as a fixed-width column table, truncating long fields to
+/// terminal-friendly widths. No table-formatting crate is used per spec.
+fn render_list_text(rows: &[qdev_core::ListEntryProjection]) -> String {
+    const ID_WIDTH: usize = 12;
+    const TITLE_WIDTH: usize = 32;
+    const STATUS_WIDTH: usize = 12;
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<id_w$}  {:<title_w$}  {:<status_w$}  OWNERS\n",
+        "ID",
+        "TITLE",
+        "STATUS",
+        id_w = ID_WIDTH,
+        title_w = TITLE_WIDTH,
+        status_w = STATUS_WIDTH
+    ));
+
+    if rows.is_empty() {
+        out.push_str("(no matching entities)\n");
+        return out;
+    }
+
+    for row in rows {
+        // The `id` column is never truncated: it's the one column whose entire purpose is
+        // unique identification, so an ellipsis here could make two different ids
+        // indistinguishable. A row with a longer-than-usual id just widens that row's column.
+        let title = truncate_field(row.title.as_deref().unwrap_or(""), TITLE_WIDTH);
+        let status = truncate_field(row.status.as_deref().unwrap_or(""), STATUS_WIDTH);
+        let owners = row.owners.join(", ");
+        out.push_str(&format!(
+            "{:<id_w$}  {:<title_w$}  {:<status_w$}  {}\n",
+            row.id,
+            title,
+            status,
+            owners,
+            id_w = ID_WIDTH,
+            title_w = TITLE_WIDTH,
+            status_w = STATUS_WIDTH
+        ));
+    }
+
+    out
+}
+
+/// Truncates `s` to at most `max` characters, appending an ellipsis when truncated.
+fn truncate_field(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    if max <= 1 {
+        return s.chars().take(max).collect();
+    }
+    let truncated: String = s.chars().take(max - 1).collect();
+    format!("{}…", truncated)
 }

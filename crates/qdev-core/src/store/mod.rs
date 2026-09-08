@@ -237,6 +237,14 @@ pub struct SweepSummary {
 pub struct EntityFilter {
     pub kind: Option<EntityKind>,
     pub status: Option<String>,
+    /// Story's owning epic id (joined via the `stories` table).
+    pub epic_id: Option<String>,
+    /// Exact owner name/team to match within the JSON-array `owners` column.
+    pub owner: Option<String>,
+    /// Exact module id to match within the JSON-array `target_modules` column (stories only).
+    pub module: Option<String>,
+    /// Sprint id a story must be assigned to (joined via `sprint_assignments`).
+    pub sprint: Option<i64>,
 }
 
 /// The unified Store trait exposing reads and writes for all 15 cache tables.

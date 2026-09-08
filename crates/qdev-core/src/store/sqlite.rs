@@ -707,6 +707,12 @@ WHERE e.id = ?1;
 
     fn list_entities(&self, filter: &EntityFilter) -> Result<Vec<EntityRecord>, QdevError> {
         self.with_conn(|conn| {
+            // `owner`/`module` are matched by exact array-element equality in Rust below, not in
+            // SQL: `owners`/`target_modules` are JSON-array text columns, and a SQL `LIKE`
+            // pattern can't express exact membership without either being vulnerable to
+            // unescaped wildcard characters (`%`, `_`) in the filter value or SQLite's default
+            // ASCII-case-insensitive `LIKE` matching — both would violate the "exact match"
+            // contract these filters document.
             let mut stmt = conn
                 .prepare(
                     r#"
@@ -718,6 +724,8 @@ FROM entities e
 LEFT JOIN stories s ON e.id = s.id
 WHERE (?1 IS NULL OR e.kind = ?1)
   AND (?2 IS NULL OR e.status = ?2)
+  AND (?3 IS NULL OR s.epic_id = ?3)
+  AND (?4 IS NULL OR e.id IN (SELECT story_id FROM sprint_assignments WHERE sprint_id = ?4))
 ORDER BY e.id ASC;
 "#,
                 )
@@ -730,44 +738,50 @@ ORDER BY e.id ASC;
 
             let kind_filter = filter.kind.map(|k| k.as_str().to_string());
             let status_filter = filter.status.clone();
+            let epic_filter = filter.epic_id.clone();
+            let sprint_filter = filter.sprint;
 
             let rows = stmt
-                .query_map(rusqlite::params![kind_filter, status_filter], |row| {
-                    let kind_str: String = row.get(1)?;
-                    let kind = EntityKind::from_str_loose(&kind_str).unwrap_or(EntityKind::Story);
-                    let c_type: Option<String> = row.get(8).unwrap_or(None);
-                    let c_id: Option<String> = row.get(9).unwrap_or(None);
-                    let created_by = match (c_type, c_id) {
-                        (Some(t), Some(i)) => Some(Author::new(t, i)),
-                        _ => None,
-                    };
-                    let u_type: Option<String> = row.get(10).unwrap_or(None);
-                    let u_id: Option<String> = row.get(11).unwrap_or(None);
-                    let updated_by = match (u_type, u_id) {
-                        (Some(t), Some(i)) => Some(Author::new(t, i)),
-                        _ => None,
-                    };
+                .query_map(
+                    rusqlite::params![kind_filter, status_filter, epic_filter, sprint_filter,],
+                    |row| {
+                        let kind_str: String = row.get(1)?;
+                        let kind =
+                            EntityKind::from_str_loose(&kind_str).unwrap_or(EntityKind::Story);
+                        let c_type: Option<String> = row.get(8).unwrap_or(None);
+                        let c_id: Option<String> = row.get(9).unwrap_or(None);
+                        let created_by = match (c_type, c_id) {
+                            (Some(t), Some(i)) => Some(Author::new(t, i)),
+                            _ => None,
+                        };
+                        let u_type: Option<String> = row.get(10).unwrap_or(None);
+                        let u_id: Option<String> = row.get(11).unwrap_or(None);
+                        let updated_by = match (u_type, u_id) {
+                            (Some(t), Some(i)) => Some(Author::new(t, i)),
+                            _ => None,
+                        };
 
-                    Ok(EntityRecord {
-                        id: row.get(0)?,
-                        kind,
-                        title: row.get(2)?,
-                        status: row.get(3)?,
-                        owners: row.get(4)?,
-                        source_path: row.get(5)?,
-                        content_hash: row.get(6)?,
-                        version: row.get(7)?,
-                        created_by,
-                        updated_by,
-                        updated_at: row.get(12)?,
-                        epic_id: row.get(13)?,
-                        seq: row.get(14)?,
-                        appetite: row.get(15)?,
-                        safety_class: row.get(16)?,
-                        target_modules: row.get(17)?,
-                        stale: row.get(18)?,
-                    })
-                })
+                        Ok(EntityRecord {
+                            id: row.get(0)?,
+                            kind,
+                            title: row.get(2)?,
+                            status: row.get(3)?,
+                            owners: row.get(4)?,
+                            source_path: row.get(5)?,
+                            content_hash: row.get(6)?,
+                            version: row.get(7)?,
+                            created_by,
+                            updated_by,
+                            updated_at: row.get(12)?,
+                            epic_id: row.get(13)?,
+                            seq: row.get(14)?,
+                            appetite: row.get(15)?,
+                            safety_class: row.get(16)?,
+                            target_modules: row.get(17)?,
+                            stale: row.get(18)?,
+                        })
+                    },
+                )
                 .map_err(|e| {
                     QdevError::infrastructure_failure(
                         "sqlite_error",
@@ -783,6 +797,13 @@ ORDER BY e.id ASC;
                         format!("Failed reading entity row: {}", e),
                     )
                 })?);
+            }
+
+            if let Some(ref owner) = filter.owner {
+                results.retain(|e| json_string_array_contains(e.owners.as_deref(), owner));
+            }
+            if let Some(ref module) = filter.module {
+                results.retain(|e| json_string_array_contains(e.target_modules.as_deref(), module));
             }
 
             Ok(results)
@@ -3416,6 +3437,15 @@ pub(crate) enum HydrateOutcome {
     MergeConflict,
     SchemaViolation { errors: Vec<ValidationError> },
     NoId,
+}
+
+/// Checks whether a cached JSON-array-of-strings column (e.g. `owners`, `target_modules`)
+/// contains `value` as an exact element. Used for `list_entities`'s `owner`/`module` filters
+/// instead of a SQL `LIKE` pattern, which cannot express exact membership without either
+/// unescaped-wildcard false positives or SQLite's default case-insensitive matching.
+fn json_string_array_contains(raw: Option<&str>, value: &str) -> bool {
+    raw.and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .is_some_and(|arr| arr.iter().any(|v| v == value))
 }
 
 fn relative_path(workspace_root: &Path, file_path: &Path) -> String {

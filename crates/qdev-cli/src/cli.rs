@@ -38,6 +38,50 @@ pub enum Commands {
     Schema(SchemaArgs),
     /// Update planning and execution entities
     Update(UpdateArgs),
+    /// Fetch a single entity's isolated projection
+    Get(GetArgs),
+    /// List and filter entities of one kind
+    List(ListArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct GetArgs {
+    /// Target entity kind or identifier (e.g. "story" or "E12S4")
+    pub target: String,
+
+    /// Target entity identifier when kind is specified (e.g. "E12S4")
+    pub id: Option<String>,
+
+    /// Additional sections to include: scratch (relations/constraints are always included and
+    /// are accepted here as no-ops for forward compatibility)
+    #[arg(long = "expand", value_delimiter = ',')]
+    pub expand: Vec<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ListArgs {
+    /// Entity kind to list (e.g. "story" or "stories")
+    pub kind: String,
+
+    /// Filter by owning epic id (e.g. E12)
+    #[arg(long = "epic")]
+    pub epic: Option<String>,
+
+    /// Filter by status
+    #[arg(short = 's', long = "status")]
+    pub status: Option<String>,
+
+    /// Filter by owner; "me" resolves against the active identity
+    #[arg(short = 'o', long = "owner")]
+    pub owner: Option<String>,
+
+    /// Filter by target module id
+    #[arg(short = 'm', long = "module")]
+    pub module: Option<String>,
+
+    /// Filter by assigned sprint number
+    #[arg(long = "sprint")]
+    pub sprint: Option<i64>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]

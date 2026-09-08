@@ -115,11 +115,13 @@ Every command accepts `--json`. Success payloads are the data object plus `schem
 {
   "schema_version": "1",
   "id": "E12S4",
+  "kind": "story",
   "epic_id": "E12",
   "title": "CoreResponse Buffer Layout",
   "status": "ready",
   "blocked": false,
   "appetite": "small",
+  "safety_class": "ClassB",
   "owners": ["simon", "team:core-platform"],
   "target_modules": ["bridge", "foundation"],
   "constraints": [
@@ -127,10 +129,12 @@ Every command accepts `--json`. Success payloads are the data object plus `schem
     {"id": "E12/RH-2", "kind": "rabbit_hole", "text": "len == 0 does not mean empty result", "inherited_from": "E12"}
   ],
   "relations": {"depends_on": ["E12S3"], "traces_to": ["FR-102"], "governed_by": ["AD-43"]},
-  "gates": ["c-abi-round-trip"],
-  "version": 3
+  "version": 3,
+  "stale": false
 }
 ```
+
+`qdev get` does not yet include a `gates` field — story-to-gate association isn't modeled until Epic 3.
 
 Errors go to stdout in JSON mode, stderr in text mode:
 

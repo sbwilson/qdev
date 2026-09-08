@@ -4,6 +4,7 @@ pub mod errors;
 pub mod id;
 pub mod init;
 pub mod interactivity;
+pub mod query;
 pub mod schema;
 pub mod store;
 pub mod write;
@@ -35,6 +36,10 @@ pub use init::{
     GITIGNORE_ENTRIES, STANDARD_DIRECTORIES,
 };
 pub use interactivity::Interactivity;
+pub use query::{
+    query_entity, query_list, ConstraintProjection, EntityProjection, GetResult,
+    ListEntryProjection, ListQueryOptions, QueryOptions, ScratchEntryProjection,
+};
 pub use rusqlite;
 pub use schema::{
     extract_frontmatter, extract_frontmatter_str, validate_frontmatter,
