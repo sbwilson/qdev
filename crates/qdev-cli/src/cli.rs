@@ -46,6 +46,19 @@ pub enum Commands {
     Relate(RelateArgs),
     /// Remove a relation from a source entity to a target entity
     Unrelate(UnrelateArgs),
+    /// Render the story dependency graph
+    Graph(GraphArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct GraphArgs {
+    /// Emit Graphviz DOT (the only supported output format for now)
+    #[arg(long)]
+    pub dot: bool,
+
+    /// Filter to one epic's stories (e.g. E12)
+    #[arg(long = "epic")]
+    pub epic: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]

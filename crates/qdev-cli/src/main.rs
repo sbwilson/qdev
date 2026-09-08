@@ -226,6 +226,9 @@ fn run(raw_args: &[String]) -> ExitCode {
             &output,
             &current_dir,
         ),
+        Some(Commands::Graph(ref graph_args)) => {
+            handle_graph(graph_args, &annotated_config, &cli, &output, &current_dir)
+        }
         Some(Commands::Init(_)) => unreachable!(),
         Some(Commands::Schema(_)) => unreachable!(),
     }
@@ -1147,6 +1150,142 @@ fn handle_list(
             let _ = output.emit_error(&err);
             return ExitCode::InfrastructureFailure;
         }
+    }
+
+    ExitCode::Success
+}
+
+/// Relation kinds rendered as graph edges; `traces_to`, `verifies`, `mitigates`, `closes_dw`,
+/// and `governed_by` connect stories to non-story entities and are out of scope for this
+/// story-only graph.
+const GRAPH_EDGE_RELATIONS: [&str; 3] = ["depends_on", "extends", "supersedes"];
+
+fn dot_status_style(status: Option<&str>) -> (&'static str, &'static str) {
+    match status {
+        Some("draft") => ("lightgray", "solid"),
+        Some("ready") => ("lightblue", "solid"),
+        Some("in-progress") => ("yellow", "solid"),
+        Some("review") => ("orange", "solid"),
+        Some("done") => ("green", "solid"),
+        Some("superseded") | Some("abandoned") => ("gray45", "dashed"),
+        _ => ("white", "solid"),
+    }
+}
+
+/// Escapes a value for use inside a double-quoted DOT string literal.
+fn dot_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn render_graph_dot(
+    nodes: &[qdev_core::ListEntryProjection],
+    relations: &[qdev_core::RelationRecord],
+) -> String {
+    let node_ids: std::collections::HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+
+    let mut dot = String::from("digraph qdev {\n");
+    for node in nodes {
+        let (color, style) = dot_status_style(node.status.as_deref());
+        let label = match &node.title {
+            Some(title) => format!("{}\\n{}", dot_escape(&node.id), dot_escape(title)),
+            None => dot_escape(&node.id),
+        };
+        dot.push_str(&format!(
+            "  \"{}\" [label=\"{}\", style=\"filled,{}\", fillcolor=\"{}\"];\n",
+            dot_escape(&node.id),
+            label,
+            style,
+            color
+        ));
+    }
+    for rel in relations {
+        if !GRAPH_EDGE_RELATIONS.contains(&rel.relation.as_str()) {
+            continue;
+        }
+        if !node_ids.contains(rel.source_id.as_str()) || !node_ids.contains(rel.target_id.as_str())
+        {
+            continue;
+        }
+        dot.push_str(&format!(
+            "  \"{}\" -> \"{}\" [label=\"{}\"];\n",
+            dot_escape(&rel.source_id),
+            dot_escape(&rel.target_id),
+            dot_escape(&rel.relation)
+        ));
+    }
+    dot.push_str("}\n");
+    dot
+}
+
+fn handle_graph(
+    graph_args: &cli::GraphArgs,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+) -> ExitCode {
+    if !graph_args.dot {
+        let err = QdevError::policy_refusal(
+            "needs_confirmation",
+            "qdev graph currently requires '--dot'; no other output format is supported yet",
+        )
+        .with_details(serde_json::json!({ "flag": "--dot" }));
+        let _ = output.emit_error(&err);
+        return ExitCode::PolicyRefusal;
+    }
+
+    if cli.json {
+        let err = QdevError::policy_refusal(
+            "needs_confirmation",
+            "qdev graph does not support '--json' yet; only '--dot' output is available",
+        )
+        .with_details(serde_json::json!({ "flag": "--json" }));
+        let _ = output.emit_error(&err);
+        return ExitCode::PolicyRefusal;
+    }
+
+    let root = qdev_core::find_workspace_root(current_dir);
+
+    if let Err(e) = ensure_query_workspace(&root) {
+        let _ = output.emit_error(&e);
+        return e.exit_code();
+    }
+
+    let mut query_opts = qdev_core::ListQueryOptions::new(qdev_core::EntityKind::Story);
+    query_opts.epic_id = graph_args.epic.clone();
+
+    let store = match open_query_store(&root, annotated_config) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let nodes = match qdev_core::query_list(&store, &query_opts) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let relations = match store.list_relations() {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let dot = render_graph_dot(&nodes, &relations);
+    if let Err(e) = output.emit_text(&dot) {
+        let err = QdevError::infrastructure_failure(
+            "io_error",
+            format!("Failed to emit graph output: {}", e),
+        );
+        let _ = output.emit_error(&err);
+        return ExitCode::InfrastructureFailure;
     }
 
     ExitCode::Success
