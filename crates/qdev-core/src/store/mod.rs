@@ -1,15 +1,18 @@
 pub mod sqlite;
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
+use crate::config::StorageConfig;
 use crate::errors::QdevError;
 use crate::schema::EntityKind;
 use crate::write::Author;
 
 pub use sqlite::{
-    create_schema_v1, drop_all_user_tables, ensure_cache, inspect_cache_schema, CacheSchemaStatus,
+    create_schema_v2, drop_all_user_tables, ensure_cache, inspect_cache_schema, CacheSchemaStatus,
     SqliteStore, ALL_TABLE_NAMES, BUSY_TIMEOUT_MS, CACHE_SCHEMA_VERSION, CACHE_USER_VERSION,
-    SCHEMA_V1_DDL,
+    SCHEMA_V2_DDL,
 };
 
 /// Common entity record representing rows in the `entities` table.
@@ -26,6 +29,9 @@ pub struct EntityRecord {
     pub created_by: Option<Author>,
     pub updated_by: Option<Author>,
     pub updated_at: String,
+    /// True when the most recent parse of this entity's source file failed (merge conflict or
+    /// schema violation) and the retained row may not reflect the current file content.
+    pub stale: bool,
     // Story detail fields (kept for compatibility with write layer and convenient access)
     pub epic_id: Option<String>,
     pub seq: Option<u32>,
@@ -201,6 +207,31 @@ pub struct DirtyEntityRecord {
     pub dirty_at: String,
 }
 
+/// Per-path validation finding record representing rows in the `findings` table.
+/// Findings are current state: each sweep pass replaces a path's findings, and purging a
+/// path removes its findings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingRecord {
+    pub path: String,
+    pub code: String,
+    pub severity: String,
+    pub message: Option<String>,
+    pub found_at: String,
+}
+
+/// Summary of one incremental sweep pass. Field names mirror the planned `qdev sync` counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SweepSummary {
+    /// Files re-parsed and upserted this pass.
+    pub parsed: usize,
+    /// Scanned files whose content hash was unchanged (no re-parse).
+    pub unchanged: usize,
+    /// Removed files whose cache rows were purged this pass.
+    pub purged: usize,
+    /// Total finding rows remaining in the cache after this pass.
+    pub findings: usize,
+}
+
 /// Query filter for listing entities.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EntityFilter {
@@ -208,7 +239,7 @@ pub struct EntityFilter {
     pub status: Option<String>,
 }
 
-/// The unified Store trait exposing reads and writes for all 14 cache tables.
+/// The unified Store trait exposing reads and writes for all 15 cache tables.
 pub trait Store: Send + Sync {
     // Entities
     fn upsert_entity(&self, record: &EntityRecord) -> Result<(), QdevError>;
@@ -319,4 +350,18 @@ pub trait Store: Send + Sync {
     fn get_dirty_entities(&self) -> Result<Vec<DirtyEntityRecord>, QdevError>;
     fn clear_dirty_entity(&self, id: &str) -> Result<bool, QdevError>;
     fn clear_all_dirty_entities(&self) -> Result<usize, QdevError>;
+
+    // Findings
+    fn upsert_finding(&self, finding: &FindingRecord) -> Result<(), QdevError>;
+    fn get_finding(&self, path: &str, code: &str) -> Result<Option<FindingRecord>, QdevError>;
+    fn get_findings_for_path(&self, path: &str) -> Result<Vec<FindingRecord>, QdevError>;
+    fn list_findings(&self) -> Result<Vec<FindingRecord>, QdevError>;
+    fn delete_findings_for_path(&self, path: &str) -> Result<usize, QdevError>;
+
+    // Incremental sweep
+    fn sweep_workspace(
+        &self,
+        workspace_root: &Path,
+        storage: &StorageConfig,
+    ) -> Result<SweepSummary, QdevError>;
 }

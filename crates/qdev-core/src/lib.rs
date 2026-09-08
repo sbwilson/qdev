@@ -9,11 +9,11 @@ pub mod store;
 pub mod write;
 
 pub use store::{
-    create_schema_v1, drop_all_user_tables, ensure_cache, inspect_cache_schema, CacheSchemaStatus,
+    create_schema_v2, drop_all_user_tables, ensure_cache, inspect_cache_schema, CacheSchemaStatus,
     ConstraintRecord, DecisionRecord, DeferredWorkRecord, DirtyEntityRecord, EntityFilter,
-    EntityRecord, GateRecord, GateRunRecord, RelationRecord, ScratchpadRecord, SoupRecord,
-    SprintAssignmentRecord, SprintRecord, SqliteStore, Store, StoryRecord, SyncStateRecord,
-    ALL_TABLE_NAMES, BUSY_TIMEOUT_MS, CACHE_USER_VERSION,
+    EntityRecord, FindingRecord, GateRecord, GateRunRecord, RelationRecord, ScratchpadRecord,
+    SoupRecord, SprintAssignmentRecord, SprintRecord, SqliteStore, Store, StoryRecord,
+    SweepSummary, SyncStateRecord, ALL_TABLE_NAMES, BUSY_TIMEOUT_MS, CACHE_USER_VERSION,
 };
 
 pub use config::{

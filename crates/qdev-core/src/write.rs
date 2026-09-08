@@ -811,9 +811,9 @@ pub fn upsert_cache_and_mark_dirty(
 ) -> Result<(), QdevError> {
     let store = crate::store::SqliteStore::open(cache_db_path)?;
 
-    // Ensure schema v1 exists
+    // Ensure schema v2 exists
     store.with_conn(|conn| {
-        crate::store::create_schema_v1(conn)?;
+        crate::store::create_schema_v2(conn)?;
         Ok(())
     })?;
 
@@ -855,7 +855,8 @@ ON CONFLICT(id) DO UPDATE SET
     created_by_id = COALESCE(excluded.created_by_id, entities.created_by_id),
     updated_by_type = excluded.updated_by_type,
     updated_by_id = excluded.updated_by_id,
-    updated_at = excluded.updated_at;
+    updated_at = excluded.updated_at,
+    stale = 0;
 "#,
             rusqlite::params![
                 entity.id,
@@ -1342,6 +1343,7 @@ pub fn apply_entity_update(options: &EntityUpdateOptions) -> Result<EntityUpdate
         created_by: c_author,
         updated_by: u_author,
         updated_at: current_iso8601(),
+        stale: false,
         epic_id,
         seq,
         appetite,

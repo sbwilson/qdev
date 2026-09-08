@@ -1,0 +1,10 @@
+# Deferred Work
+
+Items deferred from reviews and implementation, kept out of the story they surfaced in.
+
+## Deferred from: code review of spec-1-7-incremental-hydration-sweep (2026-09-08)
+
+- **`PRAGMA schema_version` used as an application version, and a future `user_version` silently rebuilt on the boot path** — `create_schema_v2` writes SQLite's internal `schema_version` cookie and `inspect_cache_schema` compares it to `CACHE_SCHEMA_VERSION`; any future DDL touch would bump it and convert a healthy cache into a destructive full rebuild. Separately, `ensure_cache` rebuilds a newer-than-supported cache without asking, while `init.rs::check_cache_status` returns a `schema_version_mismatch` conflict for the same condition. Pre-existing from story 1.6 (verbatim at baseline `d00b436`). `crates/qdev-core/src/store/sqlite.rs:3248, :3289`
+- **No indexes; the sweep does two full `entities` scans per pass** — the v2 DDL declares no `CREATE INDEX` (nor did v1), yet the sweep runs a `SELECT ... WHERE source_path = ?` per re-parsed file and two full `SELECT id, source_path FROM entities` scans per pass. The benchmark meets the 30 ms budget at N=1,000, so this is a scaling concern. An index on `entities(source_path)` plus `WHERE id IN (SELECT id FROM dirty_entities)` would replace both scans. `crates/qdev-core/src/store/sqlite.rs:2870`
+- **`docs/architecture.md` §10/§11 still documents the v1 cache schema** — §10 lists 14 tables with no `findings` table and no `entities.stale` column; §11.2 still promises that dangling relations are recorded as validation findings, which story 1.7 deliberately scoped out. Fix edits a shared context document rather than story code. `docs/architecture.md:245`
+- **Two files declaring the same frontmatter `id` silently overwrite each other** — the second file wins via `ON CONFLICT(id)`, and later deleting the loser purges nothing. Pre-existing: `rebuild_from_workspace` has always been last-writer-wins and story 1.7 does not change it. `crates/qdev-core/src/store/sqlite.rs:3901`

@@ -6,21 +6,22 @@ use tempfile::TempDir;
 use qdev_core::schema::EntityKind;
 use qdev_core::store::{
     ensure_cache, inspect_cache_schema, CacheSchemaStatus, ConstraintRecord, DecisionRecord,
-    DeferredWorkRecord, EntityFilter, EntityRecord, GateRecord, GateRunRecord, RelationRecord,
-    ScratchpadRecord, SoupRecord, SprintAssignmentRecord, SprintRecord, SqliteStore, Store,
-    StoryRecord, ALL_TABLE_NAMES, BUSY_TIMEOUT_MS, CACHE_SCHEMA_VERSION, CACHE_USER_VERSION,
+    DeferredWorkRecord, EntityFilter, EntityRecord, FindingRecord, GateRecord, GateRunRecord,
+    RelationRecord, ScratchpadRecord, SoupRecord, SprintAssignmentRecord, SprintRecord,
+    SqliteStore, Store, StoryRecord, ALL_TABLE_NAMES, BUSY_TIMEOUT_MS, CACHE_SCHEMA_VERSION,
+    CACHE_USER_VERSION,
 };
 use qdev_core::write::Author;
 use qdev_core::StorageConfig;
 
 #[test]
-fn test_schema_creation_and_all_14_tables_exist() {
+fn test_schema_creation_and_all_15_tables_exist() {
     let temp = TempDir::new().unwrap();
     let db_path = temp.path().join("test.sqlite");
     let store = SqliteStore::open(&db_path).unwrap();
     store
         .with_conn(|conn| {
-            qdev_core::store::create_schema_v1(conn).unwrap();
+            qdev_core::store::create_schema_v2(conn).unwrap();
             Ok(())
         })
         .unwrap();
@@ -35,7 +36,7 @@ fn test_schema_creation_and_all_14_tables_exist() {
             .filter_map(|r| r.ok())
             .collect();
 
-        assert_eq!(ALL_TABLE_NAMES.len(), 14);
+        assert_eq!(ALL_TABLE_NAMES.len(), 15);
         for &expected in ALL_TABLE_NAMES {
             assert!(
                 tables.contains(&expected.to_string()),
@@ -76,7 +77,7 @@ fn test_user_version_and_schema_version_pragmas() {
     let store = SqliteStore::open(&db_path).unwrap();
     store
         .with_conn(|conn| {
-            qdev_core::store::create_schema_v1(conn).unwrap();
+            qdev_core::store::create_schema_v2(conn).unwrap();
             Ok(())
         })
         .unwrap();
@@ -113,6 +114,7 @@ fn test_store_entity_crud_and_filters() {
         created_by: Some(Author::new("human", "simon")),
         updated_by: Some(Author::new("agent", "claude")),
         updated_at: "2026-09-07T00:00:00Z".to_string(),
+        stale: false,
         epic_id: Some("E12".to_string()),
         seq: Some(4),
         appetite: Some("small".to_string()),
@@ -175,6 +177,7 @@ fn test_store_story_details_crud() {
         created_by: None,
         updated_by: None,
         updated_at: "2026-09-07T00:00:00Z".to_string(),
+        stale: false,
         epic_id: None,
         seq: None,
         appetite: None,
@@ -493,6 +496,127 @@ fn test_store_sync_state_crud() {
 }
 
 #[test]
+fn test_upsert_entity_round_trips_stale() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let mut record = EntityRecord {
+        id: "E12S4".to_string(),
+        kind: EntityKind::Story,
+        title: Some("Buffer Layout".to_string()),
+        status: Some("draft".to_string()),
+        owners: None,
+        source_path: "docs/specs/stories/E12S4.md".to_string(),
+        content_hash: "hash".to_string(),
+        version: 1,
+        created_by: Some(Author::new("human", "simon")),
+        updated_by: Some(Author::new("human", "simon")),
+        updated_at: "2026-09-07T00:00:00Z".to_string(),
+        stale: true,
+        epic_id: None,
+        seq: None,
+        appetite: None,
+        safety_class: None,
+        target_modules: None,
+    };
+
+    store.upsert_entity(&record).unwrap();
+    assert!(
+        store.get_entity("E12S4").unwrap().unwrap().stale,
+        "a stale record must not silently round-trip as fresh"
+    );
+
+    record.stale = false;
+    store.upsert_entity(&record).unwrap();
+    assert!(!store.get_entity("E12S4").unwrap().unwrap().stale);
+}
+
+#[test]
+fn test_store_findings_crud() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let conflicted = "docs/specs/stories/E12S4.md";
+    let invalid = "docs/specs/stories/E12S5.md";
+
+    let finding = FindingRecord {
+        path: conflicted.to_string(),
+        code: "merge_conflict".to_string(),
+        severity: "error".to_string(),
+        message: Some("File contains merge conflict markers".to_string()),
+        found_at: "2026-09-07T00:00:00Z".to_string(),
+    };
+    store.upsert_finding(&finding).unwrap();
+    store
+        .upsert_finding(&FindingRecord {
+            path: conflicted.to_string(),
+            code: "schema_violation".to_string(),
+            severity: "error".to_string(),
+            message: Some("bad version".to_string()),
+            found_at: "2026-09-07T00:00:00Z".to_string(),
+        })
+        .unwrap();
+    store
+        .upsert_finding(&FindingRecord {
+            path: invalid.to_string(),
+            code: "schema_violation".to_string(),
+            severity: "error".to_string(),
+            message: None,
+            found_at: "2026-09-07T00:00:01Z".to_string(),
+        })
+        .unwrap();
+
+    // Read back one row - every column must round-trip to its own field.
+    let fetched = store
+        .get_finding(conflicted, "merge_conflict")
+        .unwrap()
+        .expect("finding exists");
+    assert_eq!(fetched.path, conflicted);
+    assert_eq!(fetched.code, "merge_conflict");
+    assert_eq!(fetched.severity, "error");
+    assert_eq!(
+        fetched.message.as_deref(),
+        Some("File contains merge conflict markers")
+    );
+    assert_eq!(fetched.found_at, "2026-09-07T00:00:00Z");
+    assert!(store
+        .get_finding(conflicted, "read_error")
+        .unwrap()
+        .is_none());
+    assert!(store
+        .get_finding(invalid, "merge_conflict")
+        .unwrap()
+        .is_none());
+
+    // Per-path and global reads.
+    let for_path = store.get_findings_for_path(conflicted).unwrap();
+    assert_eq!(for_path.len(), 2);
+    assert!(for_path.iter().all(|f| f.path == conflicted));
+    assert_eq!(store.list_findings().unwrap().len(), 3);
+
+    // (path, code) is the primary key: re-upserting replaces severity/message/found_at.
+    store
+        .upsert_finding(&FindingRecord {
+            path: conflicted.to_string(),
+            code: "merge_conflict".to_string(),
+            severity: "warning".to_string(),
+            message: Some("still conflicted".to_string()),
+            found_at: "2026-09-08T00:00:00Z".to_string(),
+        })
+        .unwrap();
+    assert_eq!(store.get_findings_for_path(conflicted).unwrap().len(), 2);
+    let updated = store
+        .get_finding(conflicted, "merge_conflict")
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.severity, "warning");
+    assert_eq!(updated.message.as_deref(), Some("still conflicted"));
+    assert_eq!(updated.found_at, "2026-09-08T00:00:00Z");
+
+    // Deleting one path leaves the other path's findings alone.
+    assert_eq!(store.delete_findings_for_path(conflicted).unwrap(), 2);
+    assert!(store.get_findings_for_path(conflicted).unwrap().is_empty());
+    assert_eq!(store.list_findings().unwrap().len(), 1);
+    assert_eq!(store.delete_findings_for_path(conflicted).unwrap(), 0);
+}
+
+#[test]
 fn test_store_dirty_entities() {
     let store = SqliteStore::open_in_memory().unwrap();
 
@@ -571,12 +695,12 @@ updated_by:
     // 3. Re-running ensure_cache should automatically detect mismatch, drop legacy table, rebuild from files
     let store2 = ensure_cache(root, &storage).unwrap();
 
-    // Verify user_version is back to 1 and schema_version is 1
+    // Verify user_version and schema_version are back to the v2 values
     store2.with_conn(|conn| {
         let user_ver: u32 = conn.query_row("PRAGMA user_version;", [], |r| r.get(0)).unwrap();
-        assert_eq!(user_ver, 1);
+        assert_eq!(user_ver, CACHE_USER_VERSION);
         let schema_ver: u32 = conn.query_row("PRAGMA schema_version;", [], |r| r.get(0)).unwrap();
-        assert_eq!(schema_ver, 1);
+        assert_eq!(schema_ver, CACHE_SCHEMA_VERSION);
 
         // Verify legacy table was dropped
         let has_legacy: bool = conn
@@ -923,6 +1047,7 @@ fn test_delete_entity_with_child_rows() {
         created_by: None,
         updated_by: None,
         updated_at: "2026-09-07T00:00:00Z".to_string(),
+        stale: false,
         epic_id: Some("E12".to_string()),
         seq: Some(4),
         appetite: Some("small".to_string()),
@@ -1008,6 +1133,7 @@ fn test_upsert_entity_preserves_story_details() {
         created_by: None,
         updated_by: None,
         updated_at: "2026-09-07T00:00:00Z".to_string(),
+        stale: false,
         epic_id: Some("E12".to_string()),
         seq: Some(4),
         appetite: Some("medium".to_string()),

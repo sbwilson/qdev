@@ -7,7 +7,7 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 use qdev_core::rusqlite;
-use qdev_core::store::ALL_TABLE_NAMES;
+use qdev_core::store::{ALL_TABLE_NAMES, CACHE_SCHEMA_VERSION, CACHE_USER_VERSION};
 
 fn dump_all_tables(db_path: &Path) -> BTreeMap<String, Vec<Vec<String>>> {
     let conn = rusqlite::Connection::open(db_path).unwrap();
@@ -101,12 +101,18 @@ fn test_cli_boot_with_empty_cache() {
     let user_version: u32 = conn
         .query_row("PRAGMA user_version;", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(user_version, 1, "user_version must be 1");
+    assert_eq!(
+        user_version, CACHE_USER_VERSION,
+        "user_version must match CACHE_USER_VERSION"
+    );
 
     let schema_version: u32 = conn
         .query_row("PRAGMA schema_version;", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(schema_version, 1, "schema_version must be 1");
+    assert_eq!(
+        schema_version, CACHE_SCHEMA_VERSION,
+        "schema_version must match CACHE_SCHEMA_VERSION"
+    );
 
     let journal_mode: String = conn
         .query_row("PRAGMA journal_mode;", [], |r| r.get(0))
@@ -161,12 +167,12 @@ fn test_cli_boot_with_missing_cache_dir() {
     );
     assert!(cache_db_path.exists(), "cache.sqlite must be recreated");
 
-    // 5. Verify user_version and all 14 tables
+    // 5. Verify user_version and all 15 tables
     let conn = rusqlite::Connection::open(&cache_db_path).unwrap();
     let user_version: u32 = conn
         .query_row("PRAGMA user_version;", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(user_version, 1);
+    assert_eq!(user_version, CACHE_USER_VERSION);
 
     for &table in ALL_TABLE_NAMES {
         let count: u32 = conn
@@ -236,12 +242,18 @@ updated_at: 2026-09-07T00:00:00Z
     let user_version: u32 = conn
         .query_row("PRAGMA user_version;", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(user_version, 1, "user_version must be reset to 1");
+    assert_eq!(
+        user_version, CACHE_USER_VERSION,
+        "user_version must be reset to CACHE_USER_VERSION"
+    );
 
     let schema_version: u32 = conn
         .query_row("PRAGMA schema_version;", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(schema_version, 1, "schema_version must be reset to 1");
+    assert_eq!(
+        schema_version, CACHE_SCHEMA_VERSION,
+        "schema_version must be reset to CACHE_SCHEMA_VERSION"
+    );
 
     let has_legacy: bool = conn
         .query_row(
@@ -308,6 +320,13 @@ id: sprint-1
 kind: sprint
 title: Sprint 1
 status: active
+version: 1
+created_by:
+  type: human
+  id: alice
+updated_by:
+  type: human
+  id: alice
 owners: ["alice"]
 started_at: 2026-09-07T00:00:00Z
 assignments:
@@ -326,9 +345,17 @@ assignments:
         r#"---
 id: DW-1
 kind: deferred_work
+title: Postponed optimization
 origin_story_id: E12S1
 target_module: core
 status: open
+version: 1
+created_by:
+  type: human
+  id: alice
+updated_by:
+  type: human
+  id: alice
 safety_risk: acceptable_with_mitigation
 rationale: Postponed optimization
 gate: ratchet
@@ -347,11 +374,19 @@ resolution: Planned for sprint 2
 id: rusqlite@0.31.0
 kind: soup
 name: rusqlite
-version: 0.31.0
+status: accepted
+version: 1
+dependency_version: "0.31.0"
 license: MIT
 cve_status: clean
 introduced_by_story: E12S1
 evaluated_for_release: 0.1.0
+created_by:
+  type: human
+  id: alice
+updated_by:
+  type: human
+  id: alice
 ---
 ## SOUP Details
 "#,

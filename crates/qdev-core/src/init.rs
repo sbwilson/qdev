@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::errors::QdevError;
 
 pub use crate::store::{
-    create_schema_v1, drop_all_user_tables, BUSY_TIMEOUT_MS, CACHE_SCHEMA_VERSION,
+    create_schema_v2, drop_all_user_tables, BUSY_TIMEOUT_MS, CACHE_SCHEMA_VERSION,
 };
 
 pub const STANDARD_DIRECTORIES: &[&str] = &[
@@ -393,7 +393,7 @@ fn initialize_cache(
         })?;
 
         let res = (|| -> Result<(), QdevError> {
-            create_schema_v1(&conn)?;
+            create_schema_v2(&conn)?;
             conn.execute_batch(&format!("PRAGMA user_version = {};", CACHE_SCHEMA_VERSION))
                 .map_err(|e| {
                     QdevError::infrastructure_failure(
@@ -443,7 +443,7 @@ fn initialize_cache(
 
         let res = (|| -> Result<(), QdevError> {
             drop_all_user_tables(&conn)?;
-            create_schema_v1(&conn)?;
+            create_schema_v2(&conn)?;
             conn.execute_batch(&format!("PRAGMA user_version = {};", CACHE_SCHEMA_VERSION))
                 .map_err(|e| {
                     QdevError::infrastructure_failure(

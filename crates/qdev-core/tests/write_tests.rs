@@ -427,6 +427,7 @@ VALUES ('docs/specs/stories/E12S4.md', 'oldhash', '2026-09-01T00:00:00Z');
         created_by: Some(Author::new("human", "simon")),
         updated_by: Some(Author::new("agent", "claude-code")),
         updated_at: "2026-09-07T00:00:00Z".to_string(),
+        stale: false,
         epic_id: Some("E12".to_string()),
         seq: Some(4),
         appetite: Some("small".to_string()),
@@ -757,6 +758,7 @@ fn test_upsert_cache_preserves_created_by_coalesce() {
         created_by: Some(Author::new("human", "alice")),
         updated_by: Some(Author::new("human", "alice")),
         updated_at: "2026-09-01T00:00:00Z".to_string(),
+        stale: false,
         epic_id: Some("E12".to_string()),
         seq: Some(4),
         appetite: None,
@@ -778,6 +780,7 @@ fn test_upsert_cache_preserves_created_by_coalesce() {
         created_by: None, // No created_by in updated frontmatter
         updated_by: Some(Author::new("agent", "bob")),
         updated_at: "2026-09-07T00:00:00Z".to_string(),
+        stale: false,
         epic_id: Some("E12".to_string()),
         seq: Some(4),
         appetite: None,
@@ -826,4 +829,63 @@ fn test_resolve_entity_file_case_insensitive() {
     assert_eq!(kind, EntityKind::Story);
     assert_eq!(id, "e12s4");
     assert!(path.ends_with("E12S4-login.md"));
+}
+
+#[test]
+fn test_upsert_cache_clears_stale_flag() {
+    // An entity flagged stale by a merge conflict or schema violation must lose the flag once
+    // the write path repairs it; otherwise staleness is permanently sticky.
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".qdev/cache/cache.sqlite");
+    fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+    let record = EntityRecord {
+        id: "E12S4".to_string(),
+        kind: EntityKind::Story,
+        title: Some("Buffer Layout".to_string()),
+        status: Some("in-progress".to_string()),
+        owners: None,
+        source_path: "docs/specs/stories/E12S4.md".to_string(),
+        content_hash: sha256_digest(b"test content"),
+        version: 2,
+        created_by: Some(Author::new("human", "simon")),
+        updated_by: Some(Author::new("agent", "claude-code")),
+        updated_at: "2026-09-07T00:00:00Z".to_string(),
+        stale: false,
+        epic_id: Some("E12".to_string()),
+        seq: Some(4),
+        appetite: None,
+        safety_class: None,
+        target_modules: None,
+    };
+
+    upsert_cache_and_mark_dirty(&db_path, &record).unwrap();
+
+    // Flag it stale the way the sweep does for an unparsable file.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute("UPDATE entities SET stale = 1 WHERE id = 'E12S4';", [])
+            .unwrap();
+        let stale: i64 = conn
+            .query_row("SELECT stale FROM entities WHERE id = 'E12S4';", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(stale, 1, "precondition: the row is flagged stale");
+    }
+
+    let repaired = EntityRecord {
+        version: 3,
+        content_hash: sha256_digest(b"repaired content"),
+        ..record
+    };
+    upsert_cache_and_mark_dirty(&db_path, &repaired).unwrap();
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let stale: i64 = conn
+        .query_row("SELECT stale FROM entities WHERE id = 'E12S4';", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(stale, 0, "a successful write must clear the stale flag");
 }

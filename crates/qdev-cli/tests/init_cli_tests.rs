@@ -39,7 +39,7 @@ fn test_non_interactive_success() {
     assert!(stdout_str.contains("✔ docs/specs/{prd,requirements,epics,stories,adrs,hazards}"));
     assert!(stdout_str
         .contains("✔ docs/state/{sprints,releases,dw,decisions,scratch,evidence,baselines,soup}"));
-    assert!(stdout_str.contains("✔ cache schema v1"));
+    assert!(stdout_str.contains("✔ cache schema v2"));
 
     // Verify created files and directories
     assert!(root.join("qdev.toml").is_file());
@@ -317,7 +317,7 @@ fn test_non_interactive_json_output() {
 
     assert_eq!(val["schema_version"], "1");
     assert!(val.get("root").is_some());
-    assert_eq!(val["cache_schema_version"], 1);
+    assert_eq!(val["cache_schema_version"], 2);
     assert_eq!(val["cache_migrated"], false);
     assert_eq!(val["gitignore_updated"], true);
     assert!(val["created_files"]
@@ -414,14 +414,14 @@ fn test_existing_workspace_older_cache_migration_with_yes() {
         .assert()
         .success()
         .code(0)
-        .stdout(predicate::str::contains("migrated to v1"));
+        .stdout(predicate::str::contains("migrated to v2"));
 
-    // Verify cache.sqlite user_version is now 1
+    // Verify cache.sqlite user_version is now 2
     let conn = rusqlite::Connection::open(cache_dir.join("cache.sqlite")).unwrap();
     let user_version: u32 = conn
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 1);
+    assert_eq!(user_version, 2);
 }
 
 #[test]
@@ -466,7 +466,7 @@ fn test_idempotent_rerun_current_schema() {
         .assert()
         .success()
         .code(0)
-        .stdout(predicate::str::contains("schema v1 up to date"));
+        .stdout(predicate::str::contains("schema v2 up to date"));
 
     // Configuration preserved
     let preserved = fs::read_to_string(root.join("qdev.toml")).unwrap();
@@ -491,7 +491,7 @@ fn test_interactive_wizard_prompt() {
         .stderr(predicate::str::contains("Developer ID"))
         .stderr(predicate::str::contains("Team(s)"))
         .stdout(predicate::str::contains("✔ qdev.toml"))
-        .stdout(predicate::str::contains("✔ cache schema v1"));
+        .stdout(predicate::str::contains("✔ cache schema v2"));
 
     let qdev_content = fs::read_to_string(root.join("qdev.toml")).unwrap();
     assert!(qdev_content.contains("name = \"InteractiveApp\""));
@@ -528,13 +528,13 @@ fn test_interactive_migration_confirmation() {
         .success()
         .code(0)
         .stderr(predicate::str::contains("Migrate cache schema"))
-        .stdout(predicate::str::contains("migrated to v1"));
+        .stdout(predicate::str::contains("migrated to v2"));
 
     let conn = rusqlite::Connection::open(cache_dir.join("cache.sqlite")).unwrap();
     let user_version: u32 = conn
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 1);
+    assert_eq!(user_version, 2);
 }
 
 #[test]
@@ -611,13 +611,13 @@ fn test_future_schema_version_conflict_fails_with_yes() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
 
-    // Create .qdev/cache/cache.sqlite with user_version = 2
+    // Create .qdev/cache/cache.sqlite with user_version = 3 (newer than supported v2)
     let cache_dir = root.join(".qdev/cache");
     fs::create_dir_all(&cache_dir).unwrap();
     let cache_file = cache_dir.join("cache.sqlite");
     {
         let conn = rusqlite::Connection::open(&cache_file).unwrap();
-        conn.execute_batch("PRAGMA user_version = 2;").unwrap();
+        conn.execute_batch("PRAGMA user_version = 3;").unwrap();
     }
 
     let mut cmd = Command::cargo_bin("qdev").unwrap();

@@ -1,24 +1,26 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 
 use crate::config::StorageConfig;
 use crate::errors::QdevError;
 use crate::id::{Identifier, IdentifierKind};
-use crate::schema::{extract_frontmatter, EntityKind};
+use crate::schema::{extract_frontmatter, validate_value_detailed, EntityKind, ValidationError};
 use crate::store::{
     ConstraintRecord, DecisionRecord, DeferredWorkRecord, DirtyEntityRecord, EntityFilter,
-    EntityRecord, GateRecord, GateRunRecord, RelationRecord, ScratchpadRecord, SoupRecord,
-    SprintAssignmentRecord, SprintRecord, Store, StoryRecord, SyncStateRecord,
+    EntityRecord, FindingRecord, GateRecord, GateRunRecord, RelationRecord, ScratchpadRecord,
+    SoupRecord, SprintAssignmentRecord, SprintRecord, Store, StoryRecord, SweepSummary,
+    SyncStateRecord,
 };
 use crate::write::Author;
 
-pub const CACHE_SCHEMA_VERSION: u32 = 1;
-pub const CACHE_USER_VERSION: u32 = 1;
+pub const CACHE_SCHEMA_VERSION: u32 = 2;
+pub const CACHE_USER_VERSION: u32 = 2;
 pub const BUSY_TIMEOUT_MS: u64 = 5000;
 
 pub const ALL_TABLE_NAMES: &[&str] = &[
@@ -36,9 +38,10 @@ pub const ALL_TABLE_NAMES: &[&str] = &[
     "soup_dependencies",
     "sync_state",
     "dirty_entities",
+    "findings",
 ];
 
-pub const SCHEMA_V1_DDL: &str = r#"
+pub const SCHEMA_V2_DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS entities (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -52,7 +55,8 @@ CREATE TABLE IF NOT EXISTS entities (
     created_by_id TEXT,
     updated_by_type TEXT,
     updated_by_id TEXT,
-    updated_at TEXT
+    updated_at TEXT,
+    stale INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS stories (
@@ -181,6 +185,15 @@ CREATE TABLE IF NOT EXISTS dirty_entities (
     id TEXT PRIMARY KEY,
     dirty_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS findings (
+    path TEXT NOT NULL,
+    code TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    message TEXT,
+    found_at TEXT NOT NULL,
+    PRIMARY KEY (path, code)
+);
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,7 +299,7 @@ impl SqliteStore {
                 )
             })?;
 
-        create_schema_v1(&conn)?;
+        create_schema_v2(&conn)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -333,8 +346,8 @@ impl SqliteStore {
         f(&mut conn)
     }
 
-    /// Drops all existing tables and triggers, recreates schema v1, rebuilds all cache rows from
-    /// Markdown entity files in the workspace, and sets user_version = 1 and schema_version = 1.
+    /// Drops all existing tables and triggers, recreates schema v2, rebuilds all cache rows from
+    /// Markdown entity files in the workspace, and sets user_version = 2 and schema_version = 2.
     pub fn reset_and_rebuild(
         &self,
         workspace_root: &Path,
@@ -342,13 +355,13 @@ impl SqliteStore {
     ) -> Result<(), QdevError> {
         self.with_conn_mut(|conn| {
             drop_all_user_tables(conn)?;
-            create_schema_v1(conn)?;
+            create_schema_v2(conn)?;
             Ok(())
         })?;
 
         self.rebuild_from_workspace(workspace_root, storage)?;
 
-        // Ensure user_version and schema_version pragmas are 1 after rebuild
+        // Ensure user_version and schema_version pragmas are 2 after rebuild
         self.with_conn(|conn| {
             conn.execute_batch(&format!(
                 "PRAGMA user_version = {};\nPRAGMA schema_version = {};\n",
@@ -367,6 +380,8 @@ impl SqliteStore {
     }
 
     /// Scans the workspace specification and state directories and rebuilds all cache tables.
+    /// Shares the per-file parse/upsert/finding logic with `sweep_workspace` so a full rebuild
+    /// and a sweep of the same tree converge on identical state.
     pub fn rebuild_from_workspace(
         &self,
         workspace_root: &Path,
@@ -395,6 +410,8 @@ impl SqliteStore {
         collect_files_with_ext(&evidence_dir, "json", &mut evidence_files);
         evidence_files.sort();
 
+        let config_path = workspace_root.join("qdev.toml");
+
         // Rebuild within a single transaction
         self.with_conn_mut(|conn| {
             let tx = conn.transaction().map_err(|e| {
@@ -421,6 +438,7 @@ DELETE FROM soup_dependencies;
 DELETE FROM dirty_entities;
 DELETE FROM sync_state;
 DELETE FROM entities;
+DELETE FROM findings;
 "#,
             )
             .map_err(|e| {
@@ -430,72 +448,13 @@ DELETE FROM entities;
                 )
             })?;
 
-            // 1. Process gates from qdev.toml if present
-            let config_path = workspace_root.join("qdev.toml");
+            // 1. Process gates from qdev.toml if present (and record its sync_state row)
             if config_path.exists() {
                 if let Ok(content) = fs::read_to_string(&config_path) {
-                    if let Ok(parsed_toml) = toml::from_str::<toml::Value>(&content) {
-                        if let Some(toml::Value::Array(gates)) = parsed_toml.get("gates") {
-                            for g in gates {
-                                if let Some(gate_table) = g.as_table() {
-                                    if let Some(id) = gate_table.get("id").and_then(|v| v.as_str()) {
-                                        let cmd = gate_table
-                                            .get("command")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or_default();
-                                        let kind = gate_table
-                                            .get("kind")
-                                            .and_then(|v| v.as_str());
-                                        let timeout_ms = gate_table
-                                            .get("timeout_ms")
-                                            .and_then(|v| v.as_integer())
-                                            .filter(|&i| i >= 0)
-                                            .map(|i| i as u64);
-                                        let output_adapter = gate_table
-                                            .get("output_adapter")
-                                            .and_then(|v| v.as_str());
-                                        let on_trans = gate_table
-                                            .get("on_transition")
-                                            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| v.to_string()));
-                                        let deps = gate_table
-                                            .get("depends_on")
-                                            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| v.to_string()));
-                                        let metric = gate_table
-                                            .get("metric")
-                                            .and_then(|v| v.as_str());
-                                        let direction = gate_table
-                                            .get("direction")
-                                            .and_then(|v| v.as_str());
-
-                                        tx.execute(
-                                            r#"
-INSERT INTO gates (id, command, kind, timeout_ms, output_adapter, on_transition, depends_on, metric, direction)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-ON CONFLICT(id) DO UPDATE SET
-    command = excluded.command,
-    kind = excluded.kind,
-    timeout_ms = excluded.timeout_ms,
-    output_adapter = excluded.output_adapter,
-    on_transition = excluded.on_transition,
-    depends_on = excluded.depends_on,
-    metric = excluded.metric,
-    direction = excluded.direction;
-"#,
-                                            rusqlite::params![
-                                                id, cmd, kind, timeout_ms, output_adapter, on_trans, deps, metric, direction
-                                            ],
-                                        )
-                                        .map_err(|e| {
-                                            QdevError::infrastructure_failure(
-                                                "sqlite_error",
-                                                format!("Failed to rebuild gate '{}': {}", id, e),
-                                            )
-                                        })?;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    let (mtime, size) = file_mtime_size(&config_path);
+                    let content_hash = sha256_digest(content.as_bytes());
+                    upsert_sync_state_row(&tx, "qdev.toml", mtime, size, &content_hash)?;
+                    refresh_gates(&tx, &content)?;
                 }
             }
 
@@ -505,521 +464,7 @@ ON CONFLICT(id) DO UPDATE SET
                     Ok(c) => c,
                     Err(_) => continue,
                 };
-
-                let rel_path = file_path
-                    .strip_prefix(workspace_root)
-                    .unwrap_or(file_path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-
-                let metadata = fs::metadata(file_path).ok();
-                let mtime = metadata
-                    .as_ref()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                let size = metadata.map(|m| m.len()).unwrap_or(0);
-                let content_hash = sha256_digest(content.as_bytes());
-
-                // Upsert sync_state
-                tx.execute(
-                    r#"
-INSERT INTO sync_state (path, mtime, size, content_hash)
-VALUES (?1, ?2, ?3, ?4)
-ON CONFLICT(path) DO UPDATE SET
-    mtime = excluded.mtime,
-    size = excluded.size,
-    content_hash = excluded.content_hash;
-"#,
-                    rusqlite::params![rel_path, mtime, size, content_hash],
-                )
-                .map_err(|e| {
-                    QdevError::infrastructure_failure(
-                        "sqlite_error",
-                        format!("Failed to upsert sync_state for '{}': {}", rel_path, e),
-                    )
-                })?;
-
-                let frontmatter = match extract_frontmatter(&content) {
-                    Ok(fm) => fm,
-                    Err(_) => continue,
-                };
-
-                let id = match frontmatter.get("id").and_then(|v| v.as_str()) {
-                    Some(id) if !id.trim().is_empty() => id.to_string(),
-                    _ => continue,
-                };
-
-                let kind = determine_entity_kind(file_path, &id, &frontmatter);
-                let title = frontmatter.get("title").and_then(|v| v.as_str()).map(str::to_string);
-                let status = frontmatter.get("status").and_then(|v| v.as_str()).map(str::to_string);
-                let owners = frontmatter.get("owners").map(|v| v.to_string());
-                let version = frontmatter.get("version").and_then(|v| v.as_u64()).unwrap_or(1);
-
-                let c_type = frontmatter
-                    .get("created_by")
-                    .and_then(|v| v.get("type"))
-                    .and_then(|v| v.as_str());
-                let c_id = frontmatter
-                    .get("created_by")
-                    .and_then(|v| v.get("id"))
-                    .and_then(|v| v.as_str());
-                let u_type = frontmatter
-                    .get("updated_by")
-                    .and_then(|v| v.get("type"))
-                    .and_then(|v| v.as_str());
-                let u_id = frontmatter
-                    .get("updated_by")
-                    .and_then(|v| v.get("id"))
-                    .and_then(|v| v.as_str());
-
-                let updated_at = frontmatter
-                    .get("updated_at")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| iso8601_from_timestamp(mtime));
-
-                // Upsert entities table
-                tx.execute(
-                    r#"
-INSERT INTO entities (
-    id, kind, title, status, owners, source_path, content_hash, version,
-    created_by_type, created_by_id, updated_by_type, updated_by_id, updated_at
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-ON CONFLICT(id) DO UPDATE SET
-    kind = excluded.kind,
-    title = excluded.title,
-    status = excluded.status,
-    owners = excluded.owners,
-    source_path = excluded.source_path,
-    content_hash = excluded.content_hash,
-    version = excluded.version,
-    created_by_type = excluded.created_by_type,
-    created_by_id = excluded.created_by_id,
-    updated_by_type = excluded.updated_by_type,
-    updated_by_id = excluded.updated_by_id,
-    updated_at = excluded.updated_at;
-"#,
-                    rusqlite::params![
-                        id,
-                        kind.as_str(),
-                        title,
-                        status,
-                        owners,
-                        rel_path,
-                        content_hash,
-                        version,
-                        c_type,
-                        c_id,
-                        u_type,
-                        u_id,
-                        updated_at,
-                    ],
-                )
-                .map_err(|e| {
-                    QdevError::infrastructure_failure(
-                        "sqlite_error",
-                        format!("Failed to rebuild entity '{}': {}", id, e),
-                    )
-                })?;
-
-                // 2a. Kind-specific: Story
-                if kind == EntityKind::Story {
-                    let epic_id = frontmatter
-                        .get("epic_id")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                        .or_else(|| {
-                            if let Ok(Identifier::Story { epic, .. }) = id.parse::<Identifier>() {
-                                Some(format!("E{}", epic))
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or_default();
-
-                    let seq = frontmatter
-                        .get("seq")
-                        .and_then(|v| v.as_u64())
-                        .map(|v| v as u32)
-                        .or_else(|| {
-                            if let Ok(Identifier::Story { story, .. }) = id.parse::<Identifier>() {
-                                Some(story)
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(0);
-
-                    let appetite = frontmatter.get("appetite").and_then(|v| v.as_str());
-                    let safety_class = frontmatter.get("safety_class").and_then(|v| v.as_str());
-                    let target_modules = frontmatter.get("target_modules").map(|v| v.to_string());
-
-                    tx.execute(
-                        r#"
-INSERT INTO stories (id, epic_id, seq, appetite, safety_class, target_modules)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-ON CONFLICT(id) DO UPDATE SET
-    epic_id = excluded.epic_id,
-    seq = excluded.seq,
-    appetite = excluded.appetite,
-    safety_class = excluded.safety_class,
-    target_modules = excluded.target_modules;
-"#,
-                        rusqlite::params![id, epic_id, seq, appetite, safety_class, target_modules],
-                    )
-                    .map_err(|e| {
-                        QdevError::infrastructure_failure(
-                            "sqlite_error",
-                            format!("Failed to rebuild story details '{}': {}", id, e),
-                        )
-                    })?;
-                }
-
-                // 2b. Constraints (from frontmatter of any entity)
-                if let Some(serde_json::Value::Array(constraints)) = frontmatter.get("constraints") {
-                    for c in constraints {
-                        if let Some(c_id) = c.get("id").and_then(|v| v.as_str()) {
-                            let comp_id = if c_id.contains('/') {
-                                c_id.to_string()
-                            } else {
-                                format!("{}/{}", id, c_id)
-                            };
-                            let c_kind = c.get("kind").and_then(|v| v.as_str()).unwrap_or("no_go");
-                            let c_text = c.get("text").and_then(|v| v.as_str()).unwrap_or("");
-
-                            tx.execute(
-                                r#"
-INSERT INTO constraints (id, owner_id, kind, text)
-VALUES (?1, ?2, ?3, ?4)
-ON CONFLICT(id) DO UPDATE SET
-    owner_id = excluded.owner_id,
-    kind = excluded.kind,
-    text = excluded.text;
-"#,
-                                rusqlite::params![comp_id, id, c_kind, c_text],
-                            )
-                            .map_err(|e| {
-                                QdevError::infrastructure_failure(
-                                    "sqlite_error",
-                                    format!("Failed to rebuild constraint '{}': {}", comp_id, e),
-                                )
-                            })?;
-                        }
-                    }
-                }
-
-                // 2c. Relations (from frontmatter of any entity)
-                if let Some(serde_json::Value::Object(relations)) = frontmatter.get("relations") {
-                    for (rel_name, targets_val) in relations {
-                        if let Some(targets) = targets_val.as_array() {
-                            for target in targets {
-                                if let Some(target_id) = target.as_str() {
-                                    tx.execute(
-                                        r#"
-INSERT INTO relations (source_id, relation, target_id)
-VALUES (?1, ?2, ?3)
-ON CONFLICT(source_id, relation, target_id) DO NOTHING;
-"#,
-                                        rusqlite::params![id, rel_name, target_id],
-                                    )
-                                    .map_err(|e| {
-                                        QdevError::infrastructure_failure(
-                                            "sqlite_error",
-                                            format!(
-                                                "Failed to rebuild relation '{}' -> '{}': {}",
-                                                id, target_id, e
-                                            ),
-                                        )
-                                    })?;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 2d. Kind-specific: Sprint
-                if kind == EntityKind::Sprint {
-                    let sprint_num: i64 = if let Some(stripped) = id.strip_prefix("sprint-") {
-                        stripped.parse().unwrap_or(0)
-                    } else {
-                        id.parse().unwrap_or(0)
-                    };
-
-                    let rel_ver = frontmatter
-                        .get("release_version")
-                        .or_else(|| frontmatter.get("release"))
-                        .and_then(|v| v.as_str());
-                    let started_at = frontmatter.get("started_at").and_then(|v| v.as_str());
-                    let completed_at = frontmatter.get("completed_at").and_then(|v| v.as_str());
-
-                    tx.execute(
-                        r#"
-INSERT INTO sprints (id, title, release_version, status, owners, started_at, completed_at)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-ON CONFLICT(id) DO UPDATE SET
-    title = excluded.title,
-    release_version = excluded.release_version,
-    status = excluded.status,
-    owners = excluded.owners,
-    started_at = excluded.started_at,
-    completed_at = excluded.completed_at;
-"#,
-                        rusqlite::params![
-                            sprint_num,
-                            title,
-                            rel_ver,
-                            status,
-                            owners,
-                            started_at,
-                            completed_at
-                        ],
-                    )
-                    .map_err(|e| {
-                        QdevError::infrastructure_failure(
-                            "sqlite_error",
-                            format!("Failed to rebuild sprint '{}': {}", id, e),
-                        )
-                    })?;
-
-                    if let Some(serde_json::Value::Array(assignments)) = frontmatter.get("assignments") {
-                        for a in assignments {
-                            let (story_id, assigned_at, carried_from) = match a {
-                                serde_json::Value::String(s) => {
-                                    (s.clone(), started_at.unwrap_or("").to_string(), None)
-                                }
-                                serde_json::Value::Object(map) => {
-                                    let s_id = map
-                                        .get("story_id")
-                                        .or_else(|| map.get("story"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    let at = map
-                                        .get("assigned_at")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or(started_at.unwrap_or(""))
-                                        .to_string();
-                                    let carried = map
-                                        .get("carried_from")
-                                        .and_then(|v| {
-                                            v.as_i64().or_else(|| {
-                                                v.as_str().and_then(|s| {
-                                                    s.strip_prefix("sprint-")
-                                                        .unwrap_or(s)
-                                                        .parse::<i64>()
-                                                        .ok()
-                                                })
-                                            })
-                                        });
-                                    (s_id, at, carried)
-                                }
-                                _ => continue,
-                            };
-
-                            if !story_id.is_empty() {
-                                tx.execute(
-                                    r#"
-INSERT INTO sprint_assignments (sprint_id, story_id, assigned_at, carried_from)
-VALUES (?1, ?2, ?3, ?4)
-ON CONFLICT(sprint_id, story_id) DO UPDATE SET
-    assigned_at = excluded.assigned_at,
-    carried_from = excluded.carried_from;
-"#,
-                                    rusqlite::params![sprint_num, story_id, assigned_at, carried_from],
-                                )
-                                .map_err(|e| {
-                                    QdevError::infrastructure_failure(
-                                        "sqlite_error",
-                                        format!(
-                                            "Failed to rebuild sprint assignment for '{}': {}",
-                                            story_id, e
-                                        ),
-                                    )
-                                })?;
-                            }
-                        }
-                    }
-                }
-
-                // 2e. Kind-specific: DeferredWork
-                if kind == EntityKind::DeferredWork {
-                    let origin = frontmatter.get("origin_story_id").and_then(|v| v.as_str());
-                    let target_module = frontmatter
-                        .get("target_module")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let safety_risk = frontmatter.get("safety_risk").and_then(|v| v.as_str());
-                    let rationale = frontmatter.get("rationale").and_then(|v| v.as_str());
-                    let gate = frontmatter.get("gate").and_then(|v| v.as_str());
-                    let resolution = frontmatter.get("resolution").and_then(|v| v.as_str());
-
-                    tx.execute(
-                        r#"
-INSERT INTO deferred_work (id, origin_story_id, target_module, status, safety_risk, rationale, gate, resolution)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-ON CONFLICT(id) DO UPDATE SET
-    origin_story_id = excluded.origin_story_id,
-    target_module = excluded.target_module,
-    status = excluded.status,
-    safety_risk = excluded.safety_risk,
-    rationale = excluded.rationale,
-    gate = excluded.gate,
-    resolution = excluded.resolution;
-"#,
-                        rusqlite::params![
-                            id,
-                            origin,
-                            target_module,
-                            status,
-                            safety_risk,
-                            rationale,
-                            gate,
-                            resolution
-                        ],
-                    )
-                    .map_err(|e| {
-                        QdevError::infrastructure_failure(
-                            "sqlite_error",
-                            format!("Failed to rebuild deferred work '{}': {}", id, e),
-                        )
-                    })?;
-                }
-
-                // 2f. Kind-specific: Decision
-                if kind == EntityKind::Decision {
-                    let subject_id = frontmatter
-                        .get("subject_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let dec_type = frontmatter.get("decision_type").and_then(|v| v.as_str());
-                    let topic = frontmatter.get("topic").and_then(|v| v.as_str());
-                    let context = frontmatter.get("context").and_then(|v| v.as_str());
-                    let ruling = frontmatter.get("ruling").and_then(|v| v.as_str());
-                    let created_at = frontmatter
-                        .get("created_at")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(&updated_at);
-
-                    tx.execute(
-                        r#"
-INSERT INTO decisions (id, subject_id, decision_type, topic, context, ruling, author_type, author_id, created_at)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-ON CONFLICT(id) DO UPDATE SET
-    subject_id = excluded.subject_id,
-    decision_type = excluded.decision_type,
-    topic = excluded.topic,
-    context = excluded.context,
-    ruling = excluded.ruling,
-    author_type = excluded.author_type,
-    author_id = excluded.author_id,
-    created_at = excluded.created_at;
-"#,
-                        rusqlite::params![
-                            id, subject_id, dec_type, topic, context, ruling, c_type, c_id, created_at
-                        ],
-                    )
-                    .map_err(|e| {
-                        QdevError::infrastructure_failure(
-                            "sqlite_error",
-                            format!("Failed to rebuild decision '{}': {}", id, e),
-                        )
-                    })?;
-                }
-
-                // 2g. Kind-specific: Soup
-                if kind == EntityKind::Soup {
-                    let name = frontmatter.get("name").and_then(|v| v.as_str());
-                    let ver = frontmatter
-                        .get("dependency_version")
-                        .or_else(|| frontmatter.get("version"))
-                        .and_then(|v| v.as_str());
-                    let license = frontmatter.get("license").and_then(|v| v.as_str());
-                    let cve_status = frontmatter.get("cve_status").and_then(|v| v.as_str());
-                    let intro_story = frontmatter.get("introduced_by_story").and_then(|v| v.as_str());
-                    let eval_rel = frontmatter.get("evaluated_for_release").and_then(|v| v.as_str());
-
-                    tx.execute(
-                        r#"
-INSERT INTO soup_dependencies (id, name, version, license, cve_status, introduced_by_story, evaluated_for_release)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-ON CONFLICT(id) DO UPDATE SET
-    name = excluded.name,
-    version = excluded.version,
-    license = excluded.license,
-    cve_status = excluded.cve_status,
-    introduced_by_story = excluded.introduced_by_story,
-    evaluated_for_release = excluded.evaluated_for_release;
-"#,
-                        rusqlite::params![id, name, ver, license, cve_status, intro_story, eval_rel],
-                    )
-                    .map_err(|e| {
-                        QdevError::infrastructure_failure(
-                            "sqlite_error",
-                            format!("Failed to rebuild SOUP dependency '{}': {}", id, e),
-                        )
-                    })?;
-                }
-
-                // 2h. Kind-specific: Evidence
-                if kind == EntityKind::Evidence {
-                    let story_id = frontmatter.get("story_id").and_then(|v| v.as_str());
-                    let gate_id = frontmatter.get("gate_id").and_then(|v| v.as_str()).unwrap_or("");
-                    let commit_sha = frontmatter.get("commit_sha").and_then(|v| v.as_str()).unwrap_or("");
-                    let ev_status = frontmatter.get("status").and_then(|v| v.as_str());
-                    let exit_code = frontmatter.get("exit_code").and_then(|v| v.as_i64()).map(|i| i as i32);
-                    let duration_ms = frontmatter.get("duration_ms").and_then(|v| v.as_u64());
-                    let metric_val = frontmatter.get("metric_value").and_then(|v| v.as_f64());
-                    let summary = frontmatter.get("summary").and_then(|v| v.as_str());
-                    let output_hash = frontmatter.get("output_hash").and_then(|v| v.as_str());
-                    let ran_at = frontmatter.get("ran_at").and_then(|v| v.as_str());
-
-                    tx.execute(
-                        r#"
-INSERT INTO gate_runs (
-    id, story_id, gate_id, commit_sha, status, exit_code, duration_ms,
-    metric_value, summary, evidence_path, output_hash, run_by_type, run_by_id, ran_at
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-ON CONFLICT(id) DO UPDATE SET
-    story_id = excluded.story_id,
-    gate_id = excluded.gate_id,
-    commit_sha = excluded.commit_sha,
-    status = excluded.status,
-    exit_code = excluded.exit_code,
-    duration_ms = excluded.duration_ms,
-    metric_value = excluded.metric_value,
-    summary = excluded.summary,
-    evidence_path = excluded.evidence_path,
-    output_hash = excluded.output_hash,
-    run_by_type = excluded.run_by_type,
-    run_by_id = excluded.run_by_id,
-    ran_at = excluded.ran_at;
-"#,
-                        rusqlite::params![
-                            id,
-                            story_id,
-                            gate_id,
-                            commit_sha,
-                            ev_status,
-                            exit_code,
-                            duration_ms,
-                            metric_val,
-                            summary,
-                            rel_path,
-                            output_hash,
-                            c_type,
-                            c_id,
-                            ran_at
-                        ],
-                    )
-                    .map_err(|e| {
-                        QdevError::infrastructure_failure(
-                            "sqlite_error",
-                            format!("Failed to rebuild gate run '{}': {}", id, e),
-                        )
-                    })?;
-                }
+                let _ = hydrate_markdown_file(&tx, workspace_root, file_path, &content)?;
             }
 
             // 3. Process scratchpad (.jsonl) files
@@ -1028,108 +473,7 @@ ON CONFLICT(id) DO UPDATE SET
                     Ok(c) => c,
                     Err(_) => continue,
                 };
-                let story_id = file_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default();
-
-                let rel_path = file_path
-                    .strip_prefix(workspace_root)
-                    .unwrap_or(file_path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-
-                let metadata = fs::metadata(file_path).ok();
-                let mtime = metadata
-                    .as_ref()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                let size = metadata.map(|m| m.len()).unwrap_or(0);
-                let content_hash = sha256_digest(content.as_bytes());
-
-                tx.execute(
-                    r#"
-INSERT INTO sync_state (path, mtime, size, content_hash)
-VALUES (?1, ?2, ?3, ?4)
-ON CONFLICT(path) DO UPDATE SET
-    mtime = excluded.mtime,
-    size = excluded.size,
-    content_hash = excluded.content_hash;
-"#,
-                    rusqlite::params![rel_path, mtime, size, content_hash],
-                )
-                .map_err(|e| {
-                    QdevError::infrastructure_failure(
-                        "sqlite_error",
-                        format!("Failed to record sync_state for scratchpad '{}': {}", rel_path, e),
-                    )
-                })?;
-
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    if let Ok(entry_json) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                        let seq = entry_json.get("seq").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                        let at = entry_json
-                            .get("at")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let (author_type, author_id) = if let Some(author_obj) = entry_json.get("author").and_then(|v| v.as_object()) {
-                            let t = author_obj
-                                .get("type")
-                                .and_then(|v| v.as_str())
-                                .or_else(|| entry_json.get("author_type").and_then(|v| v.as_str()));
-                            let id = author_obj
-                                .get("id")
-                                .and_then(|v| v.as_str())
-                                .or_else(|| author_obj.get("name").and_then(|v| v.as_str()))
-                                .or_else(|| entry_json.get("author_id").and_then(|v| v.as_str()));
-                            (t, id)
-                        } else {
-                            (
-                                entry_json.get("author_type").and_then(|v| v.as_str()),
-                                entry_json.get("author_id").and_then(|v| v.as_str()),
-                            )
-                        };
-                        let entry_kind = entry_json.get("kind").and_then(|v| v.as_str());
-                        let text = entry_json.get("text").and_then(|v| v.as_str());
-
-                        tx.execute(
-                            r#"
-INSERT INTO scratchpad_entries (story_id, seq, at, author_type, author_id, kind, text)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-ON CONFLICT(story_id, seq) DO UPDATE SET
-    at = excluded.at,
-    author_type = excluded.author_type,
-    author_id = excluded.author_id,
-    kind = excluded.kind,
-    text = excluded.text;
-"#,
-                            rusqlite::params![
-                                story_id,
-                                seq,
-                                at,
-                                author_type,
-                                author_id,
-                                entry_kind,
-                                text
-                            ],
-                        )
-                        .map_err(|e| {
-                            QdevError::infrastructure_failure(
-                                "sqlite_error",
-                                format!(
-                                    "Failed to rebuild scratchpad entry for '{}:{}': {}",
-                                    story_id, seq, e
-                                ),
-                            )
-                        })?;
-                    }
-                }
+                hydrate_scratch_file(&tx, workspace_root, file_path, &content)?;
             }
 
             // 4. Process evidence JSON files
@@ -1138,122 +482,7 @@ ON CONFLICT(story_id, seq) DO UPDATE SET
                     Ok(c) => c,
                     Err(_) => continue,
                 };
-
-                let rel_path = file_path
-                    .strip_prefix(workspace_root)
-                    .unwrap_or(file_path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-
-                let metadata = fs::metadata(file_path).ok();
-                let mtime = metadata
-                    .as_ref()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                let size = metadata.map(|m| m.len()).unwrap_or(0);
-                let content_hash = sha256_digest(content.as_bytes());
-
-                tx.execute(
-                    r#"
-INSERT INTO sync_state (path, mtime, size, content_hash)
-VALUES (?1, ?2, ?3, ?4)
-ON CONFLICT(path) DO UPDATE SET
-    mtime = excluded.mtime,
-    size = excluded.size,
-    content_hash = excluded.content_hash;
-"#,
-                    rusqlite::params![rel_path, mtime, size, content_hash],
-                )
-                .map_err(|e| {
-                    QdevError::infrastructure_failure(
-                        "sqlite_error",
-                        format!("Failed to record sync_state for evidence '{}': {}", rel_path, e),
-                    )
-                })?;
-
-                if let Ok(ev_json) = serde_json::from_str::<serde_json::Value>(&content) {
-                    let ev_id = ev_json
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                        .unwrap_or_else(|| {
-                            file_path
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("")
-                                .to_string()
-                        });
-
-                    if !ev_id.is_empty() {
-                        let story_id = ev_json.get("story_id").and_then(|v| v.as_str());
-                        let gate_id = ev_json.get("gate_id").and_then(|v| v.as_str()).unwrap_or("");
-                        let commit_sha = ev_json.get("commit_sha").and_then(|v| v.as_str()).unwrap_or("");
-                        let ev_status = ev_json.get("status").and_then(|v| v.as_str());
-                        let exit_code = ev_json.get("exit_code").and_then(|v| v.as_i64()).map(|i| i as i32);
-                        let duration_ms = ev_json.get("duration_ms").and_then(|v| v.as_u64());
-                        let metric_val = ev_json.get("metric_value").and_then(|v| v.as_f64());
-                        let summary = ev_json.get("summary").and_then(|v| v.as_str());
-                        let output_hash = ev_json.get("output_hash").and_then(|v| v.as_str());
-                        let ran_at = ev_json.get("ran_at").and_then(|v| v.as_str());
-                        let run_by_type = ev_json
-                            .get("run_by")
-                            .or_else(|| ev_json.get("created_by"))
-                            .and_then(|v| v.get("type"))
-                            .and_then(|v| v.as_str());
-                        let run_by_id = ev_json
-                            .get("run_by")
-                            .or_else(|| ev_json.get("created_by"))
-                            .and_then(|v| v.get("id"))
-                            .and_then(|v| v.as_str());
-
-                        tx.execute(
-                            r#"
-INSERT INTO gate_runs (
-    id, story_id, gate_id, commit_sha, status, exit_code, duration_ms,
-    metric_value, summary, evidence_path, output_hash, run_by_type, run_by_id, ran_at
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-ON CONFLICT(id) DO UPDATE SET
-    story_id = excluded.story_id,
-    gate_id = excluded.gate_id,
-    commit_sha = excluded.commit_sha,
-    status = excluded.status,
-    exit_code = excluded.exit_code,
-    duration_ms = excluded.duration_ms,
-    metric_value = excluded.metric_value,
-    summary = excluded.summary,
-    evidence_path = excluded.evidence_path,
-    output_hash = excluded.output_hash,
-    run_by_type = excluded.run_by_type,
-    run_by_id = excluded.run_by_id,
-    ran_at = excluded.ran_at;
-"#,
-                            rusqlite::params![
-                                ev_id,
-                                story_id,
-                                gate_id,
-                                commit_sha,
-                                ev_status,
-                                exit_code,
-                                duration_ms,
-                                metric_val,
-                                summary,
-                                rel_path,
-                                output_hash,
-                                run_by_type,
-                                run_by_id,
-                                ran_at
-                            ],
-                        )
-                        .map_err(|e| {
-                            QdevError::infrastructure_failure(
-                                "sqlite_error",
-                                format!("Failed to rebuild gate run from JSON '{}': {}", ev_id, e),
-                            )
-                        })?;
-                    }
-                }
+                hydrate_evidence_file(&tx, workspace_root, file_path, &content)?;
             }
 
             tx.commit().map_err(|e| {
@@ -1298,8 +527,8 @@ impl Store for SqliteStore {
                 r#"
 INSERT INTO entities (
     id, kind, title, status, owners, source_path, content_hash, version,
-    created_by_type, created_by_id, updated_by_type, updated_by_id, updated_at
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+    created_by_type, created_by_id, updated_by_type, updated_by_id, updated_at, stale
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
 ON CONFLICT(id) DO UPDATE SET
     kind = excluded.kind,
     title = excluded.title,
@@ -1312,7 +541,8 @@ ON CONFLICT(id) DO UPDATE SET
     created_by_id = COALESCE(excluded.created_by_id, entities.created_by_id),
     updated_by_type = excluded.updated_by_type,
     updated_by_id = excluded.updated_by_id,
-    updated_at = excluded.updated_at;
+    updated_at = excluded.updated_at,
+    stale = excluded.stale;
 "#,
                 rusqlite::params![
                     record.id,
@@ -1328,6 +558,7 @@ ON CONFLICT(id) DO UPDATE SET
                     u_type,
                     u_id,
                     record.updated_at,
+                    record.stale as i64,
                 ],
             )
             .map_err(|e| {
@@ -1396,7 +627,7 @@ ON CONFLICT(id) DO UPDATE SET
 SELECT
     e.id, e.kind, e.title, e.status, e.owners, e.source_path, e.content_hash, e.version,
     e.created_by_type, e.created_by_id, e.updated_by_type, e.updated_by_id, e.updated_at,
-    s.epic_id, s.seq, s.appetite, s.safety_class, s.target_modules
+    s.epic_id, s.seq, s.appetite, s.safety_class, s.target_modules, e.stale
 FROM entities e
 LEFT JOIN stories s ON e.id = s.id
 WHERE e.id = ?1;
@@ -1461,6 +692,12 @@ WHERE e.id = ?1;
                     appetite: row.get(15).unwrap_or(None),
                     safety_class: row.get(16).unwrap_or(None),
                     target_modules: row.get(17).unwrap_or(None),
+                    stale: row.get(18).map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed reading stale flag for '{}': {}", id, e),
+                        )
+                    })?,
                 }))
             } else {
                 Ok(None)
@@ -1476,7 +713,7 @@ WHERE e.id = ?1;
 SELECT
     e.id, e.kind, e.title, e.status, e.owners, e.source_path, e.content_hash, e.version,
     e.created_by_type, e.created_by_id, e.updated_by_type, e.updated_by_id, e.updated_at,
-    s.epic_id, s.seq, s.appetite, s.safety_class, s.target_modules
+    s.epic_id, s.seq, s.appetite, s.safety_class, s.target_modules, e.stale
 FROM entities e
 LEFT JOIN stories s ON e.id = s.id
 WHERE (?1 IS NULL OR e.kind = ?1)
@@ -1528,6 +765,7 @@ ORDER BY e.id ASC;
                         appetite: row.get(15)?,
                         safety_class: row.get(16)?,
                         target_modules: row.get(17)?,
+                        stale: row.get(18)?,
                     })
                 })
                 .map_err(|e| {
@@ -3334,14 +2572,529 @@ ON CONFLICT(id) DO UPDATE SET dirty_at = excluded.dirty_at;
             Ok(count)
         })
     }
+
+    fn upsert_finding(&self, finding: &FindingRecord) -> Result<(), QdevError> {
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+INSERT INTO findings (path, code, severity, message, found_at)
+VALUES (?1, ?2, ?3, ?4, ?5)
+ON CONFLICT(path, code) DO UPDATE SET
+    severity = excluded.severity,
+    message = excluded.message,
+    found_at = excluded.found_at;
+"#,
+                rusqlite::params![
+                    finding.path,
+                    finding.code,
+                    finding.severity,
+                    finding.message,
+                    finding.found_at,
+                ],
+            )
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!(
+                        "Failed to upsert finding '{}/{}': {}",
+                        finding.path, finding.code, e
+                    ),
+                )
+            })?;
+            Ok(())
+        })
+    }
+
+    fn get_finding(&self, path: &str, code: &str) -> Result<Option<FindingRecord>, QdevError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT path, code, severity, message, found_at FROM findings WHERE path = ?1 AND code = ?2;",
+                )
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to prepare get_finding query: {}", e),
+                    )
+                })?;
+            let mut rows = stmt
+                .query(rusqlite::params![path, code])
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to query finding '{}/{}': {}", path, code, e),
+                    )
+                })?;
+            if let Some(row) = rows.next().map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!("Failed to read finding row: {}", e),
+                )
+            })? {
+                Ok(Some(FindingRecord {
+                    path: row.get(0).unwrap_or_default(),
+                    code: row.get(1).unwrap_or_default(),
+                    severity: row.get(2).unwrap_or_default(),
+                    message: row.get(3).unwrap_or(None),
+                    found_at: row.get(4).unwrap_or_default(),
+                }))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    fn get_findings_for_path(&self, path: &str) -> Result<Vec<FindingRecord>, QdevError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT path, code, severity, message, found_at FROM findings WHERE path = ?1 ORDER BY code ASC;",
+                )
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to prepare get_findings_for_path query: {}", e),
+                    )
+                })?;
+            let rows = stmt
+                .query_map(rusqlite::params![path], |row| {
+                    Ok(FindingRecord {
+                        path: row.get(0)?,
+                        code: row.get(1)?,
+                        severity: row.get(2)?,
+                        message: row.get(3)?,
+                        found_at: row.get(4)?,
+                    })
+                })
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to query findings for path '{}': {}", path, e),
+                    )
+                })?;
+            let mut results = Vec::new();
+            for r in rows {
+                results.push(r.map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to read finding row for path '{}': {}", path, e),
+                    )
+                })?);
+            }
+            Ok(results)
+        })
+    }
+
+    fn list_findings(&self) -> Result<Vec<FindingRecord>, QdevError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT path, code, severity, message, found_at FROM findings ORDER BY path ASC, code ASC;",
+                )
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to prepare list_findings query: {}", e),
+                    )
+                })?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(FindingRecord {
+                        path: row.get(0)?,
+                        code: row.get(1)?,
+                        severity: row.get(2)?,
+                        message: row.get(3)?,
+                        found_at: row.get(4)?,
+                    })
+                })
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to query findings: {}", e),
+                    )
+                })?;
+            let mut results = Vec::new();
+            for r in rows {
+                results.push(r.map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to read finding row: {}", e),
+                    )
+                })?);
+            }
+            Ok(results)
+        })
+    }
+
+    fn delete_findings_for_path(&self, path: &str) -> Result<usize, QdevError> {
+        self.with_conn(|conn| {
+            let count = conn
+                .execute(
+                    "DELETE FROM findings WHERE path = ?1;",
+                    rusqlite::params![path],
+                )
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to delete findings for path '{}': {}", path, e),
+                    )
+                })?;
+            Ok(count)
+        })
+    }
+
+    fn sweep_workspace(
+        &self,
+        workspace_root: &Path,
+        storage: &StorageConfig,
+    ) -> Result<SweepSummary, QdevError> {
+        let cache_dir = workspace_root.join(&storage.cache_dir);
+        let lock_path = cache_dir.join("write.lock");
+        let _lock_guard = crate::write::acquire_write_lock(
+            &lock_path,
+            std::time::Duration::from_millis(BUSY_TIMEOUT_MS),
+        )?;
+
+        let specs_dir = workspace_root.join(&storage.specs_dir);
+        let state_dir = workspace_root.join(&storage.state_dir);
+        let scratch_dir = state_dir.join("scratch");
+        let evidence_dir = state_dir.join("evidence");
+        let config_path = workspace_root.join("qdev.toml");
+
+        // Collect the current on-disk file sets (the same 4+1 sets a full rebuild scans)
+        let mut entity_files = Vec::new();
+        collect_markdown_files(&specs_dir, &mut entity_files);
+        collect_markdown_files(&state_dir, &mut entity_files);
+        entity_files.sort();
+
+        let mut scratch_files = Vec::new();
+        collect_files_with_ext(&scratch_dir, "jsonl", &mut scratch_files);
+        scratch_files.sort();
+
+        let mut evidence_files = Vec::new();
+        collect_files_with_ext(&evidence_dir, "json", &mut evidence_files);
+        evidence_files.sort();
+
+        let mut disk: Vec<(String, PathBuf, SweepFileRole)> = Vec::new();
+        for f in &entity_files {
+            disk.push((
+                relative_path(workspace_root, f),
+                f.clone(),
+                SweepFileRole::Markdown,
+            ));
+        }
+        for f in &scratch_files {
+            disk.push((
+                relative_path(workspace_root, f),
+                f.clone(),
+                SweepFileRole::Scratch,
+            ));
+        }
+        for f in &evidence_files {
+            disk.push((
+                relative_path(workspace_root, f),
+                f.clone(),
+                SweepFileRole::Evidence,
+            ));
+        }
+        if config_path.exists() {
+            disk.push((
+                "qdev.toml".to_string(),
+                config_path.clone(),
+                SweepFileRole::Config,
+            ));
+        }
+        let disk_paths: HashSet<String> = disk.iter().map(|d| d.0.clone()).collect();
+
+        self.with_conn_mut(|conn| {
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to begin sweep transaction: {}", e),
+                    )
+                })?;
+
+            // Load current sync_state: path -> (mtime, size, content_hash)
+            let mut sync_map: HashMap<String, (i64, i64, Option<String>)> = HashMap::new();
+            {
+                let mut stmt = tx
+                    .prepare("SELECT path, mtime, size, content_hash FROM sync_state;")
+                    .map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to prepare sync_state sweep query: {}", e),
+                        )
+                    })?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    })
+                    .map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to query sync_state for sweep: {}", e),
+                        )
+                    })?;
+                for r in rows {
+                    let (p, m, s, h) = r.map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to read sync_state row for sweep: {}", e),
+                        )
+                    })?;
+                    sync_map.insert(p, (m, s, h));
+                }
+            }
+
+            // Load dirty entity ids and map them to their source paths
+            let mut dirty_ids: HashSet<String> = HashSet::new();
+            {
+                let mut stmt = tx.prepare("SELECT id FROM dirty_entities;").map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to prepare dirty sweep query: {}", e),
+                    )
+                })?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to query dirty_entities for sweep: {}", e),
+                        )
+                    })?;
+                for r in rows {
+                    dirty_ids.insert(r.map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to read dirty row for sweep: {}", e),
+                        )
+                    })?);
+                }
+            }
+            let mut dirty_paths: HashSet<String> = HashSet::new();
+            if !dirty_ids.is_empty() {
+                let mut stmt = tx
+                    .prepare("SELECT id, source_path FROM entities;")
+                    .map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to prepare entity path sweep query: {}", e),
+                        )
+                    })?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to query entities for sweep: {}", e),
+                        )
+                    })?;
+                for r in rows {
+                    let (id, sp) = r.map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to read entity row for sweep: {}", e),
+                        )
+                    })?;
+                    if dirty_ids.contains(&id) {
+                        dirty_paths.insert(sp);
+                    }
+                }
+            }
+
+            let mut parsed = 0usize;
+            let mut unchanged = 0usize;
+            let mut purged = 0usize;
+            // Paths whose hydration succeeded this pass. Only these consume a dirty row.
+            let mut parsed_paths: HashSet<String> = HashSet::new();
+
+            // 1. Purge removed files (present in sync_state but absent on disk)
+            for path in sync_map.keys() {
+                if !disk_paths.contains(path) {
+                    purge_removed_path(&tx, path)?;
+                    purged += 1;
+                }
+            }
+
+            // 2. Sweep each on-disk file
+            for (rel, abs, role) in &disk {
+                let (mtime, size) = file_mtime_size(abs);
+                let size_i64 = size as i64;
+                let is_dirty = dirty_paths.contains(rel);
+                let stored = sync_map.get(rel);
+
+                // A file is a re-hash candidate only if its mtime or size differs, its
+                // sync_state row is missing, or its entity is dirty.
+                let meta_changed = match stored {
+                    Some((m, s, _)) => *m != mtime || *s != size_i64,
+                    None => true,
+                };
+                if !meta_changed && !is_dirty {
+                    unchanged += 1;
+                    continue;
+                }
+
+                // Candidate: read and hash. A read failure is recorded as a finding and the
+                // previous rows are retained stale - it is never silently counted as swept.
+                let content = match fs::read_to_string(abs) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        clear_findings_for_path(&tx, rel)?;
+                        record_finding(
+                            &tx,
+                            rel,
+                            "read_error",
+                            "error",
+                            &format!("File could not be read: {}", e),
+                        )?;
+                        flag_stale_by_source_path(&tx, rel)?;
+                        unchanged += 1;
+                        continue;
+                    }
+                };
+                let hash = sha256_digest(content.as_bytes());
+                let hash_changed = match stored {
+                    Some((_, _, h)) => h.as_deref() != Some(hash.as_str()),
+                    None => true,
+                };
+
+                if hash_changed || is_dirty {
+                    match role {
+                        SweepFileRole::Markdown => {
+                            // `parsed` counts only successful upserts; conflicted / schema-violating
+                            // files are retained stale and not counted here.
+                            let outcome =
+                                hydrate_markdown_file(&tx, workspace_root, abs, &content)?;
+                            if matches!(outcome, HydrateOutcome::Parsed { .. }) {
+                                parsed += 1;
+                                parsed_paths.insert(rel.clone());
+                            }
+                        }
+                        SweepFileRole::Scratch => {
+                            hydrate_scratch_file(&tx, workspace_root, abs, &content)?;
+                            parsed += 1;
+                            parsed_paths.insert(rel.clone());
+                        }
+                        SweepFileRole::Evidence => {
+                            hydrate_evidence_file(&tx, workspace_root, abs, &content)?;
+                            parsed += 1;
+                            parsed_paths.insert(rel.clone());
+                        }
+                        SweepFileRole::Config => {
+                            refresh_gates(&tx, &content)?;
+                            upsert_sync_state_row(&tx, rel, mtime, size, &hash)?;
+                            parsed += 1;
+                            parsed_paths.insert(rel.clone());
+                        }
+                    }
+                } else {
+                    // Hash unchanged (e.g. touch / same-size edit): refresh mtime+size only
+                    upsert_sync_state_row(&tx, rel, mtime, size, &hash)?;
+                    unchanged += 1;
+                }
+            }
+
+            // 3. Clear consumed dirty rows: entities whose file actually re-parsed this pass,
+            //    plus orphaned rows for entities that were purged. A file that was unreadable,
+            //    conflicted or schema-invalid keeps its dirty row so the next boot retries.
+            {
+                let mut stmt = tx
+                    .prepare("SELECT id, source_path FROM entities;")
+                    .map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to prepare dirty-clear sweep query: {}", e),
+                        )
+                    })?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to query entities for dirty-clear: {}", e),
+                        )
+                    })?;
+                let mut to_clear: Vec<String> = Vec::new();
+                for r in rows {
+                    let (id, sp) = r.map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to read entity row for dirty-clear: {}", e),
+                        )
+                    })?;
+                    if dirty_paths.contains(&sp) && parsed_paths.contains(&sp) {
+                        to_clear.push(id);
+                    }
+                }
+                for id in &to_clear {
+                    tx.execute(
+                        "DELETE FROM dirty_entities WHERE id = ?1;",
+                        rusqlite::params![id],
+                    )
+                    .map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to clear dirty entity '{}': {}", id, e),
+                        )
+                    })?;
+                }
+            }
+            tx.execute(
+                "DELETE FROM dirty_entities WHERE id NOT IN (SELECT id FROM entities);",
+                [],
+            )
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!("Failed to clear orphaned dirty entities: {}", e),
+                )
+            })?;
+
+            // Count remaining findings before committing
+            let findings: usize = tx
+                .query_row("SELECT COUNT(*) FROM findings;", [], |row| row.get(0))
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to count findings for sweep summary: {}", e),
+                    )
+                })?;
+
+            tx.commit().map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!("Failed to commit sweep transaction: {}", e),
+                )
+            })?;
+
+            Ok(SweepSummary {
+                parsed,
+                unchanged,
+                purged,
+                findings,
+            })
+        })
+    }
 }
 
-/// Creates all 14 schema tables if not present and sets PRAGMA user_version = 1 and PRAGMA schema_version = 1.
-pub fn create_schema_v1(conn: &rusqlite::Connection) -> Result<(), QdevError> {
-    conn.execute_batch(SCHEMA_V1_DDL).map_err(|e| {
+/// Creates all 15 schema tables if not present and sets PRAGMA user_version = 2 and PRAGMA schema_version = 2.
+pub fn create_schema_v2(conn: &rusqlite::Connection) -> Result<(), QdevError> {
+    conn.execute_batch(SCHEMA_V2_DDL).map_err(|e| {
         QdevError::infrastructure_failure(
             "sqlite_error",
-            format!("Failed to create SQLite cache schema v1: {}", e),
+            format!("Failed to create SQLite cache schema v2: {}", e),
         )
     })?;
 
@@ -3550,12 +3303,34 @@ pub fn inspect_cache_schema(path: &Path) -> Result<CacheSchemaStatus, QdevError>
         return Ok(CacheSchemaStatus::Mismatch);
     }
 
+    // The v2 DDL is `CREATE TABLE IF NOT EXISTS`, so running it against a v1 database creates
+    // `findings` and stamps the pragmas without adding `entities.stale`. Checking the column
+    // keeps such a half-migrated cache reported as a mismatch, so it is rebuilt rather than
+    // trusted and then failing on every sweep.
+    let has_stale: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('entities') WHERE name = 'stale';",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to inspect entities columns: {}", e),
+            )
+        })?;
+    if !has_stale {
+        return Ok(CacheSchemaStatus::Mismatch);
+    }
+
     Ok(CacheSchemaStatus::Valid)
 }
 
 /// Boot-time verification and initialization of the SQLite cache database.
-/// Ensures `.qdev/cache/cache.sqlite` exists with all 14 tables, WAL mode, busy_timeout=5000,
-/// and schema_version = user_version = 1. Automatically rebuilds from files on missing cache or version mismatch.
+/// Ensures `.qdev/cache/cache.sqlite` exists with all 15 tables, WAL mode, busy_timeout=5000,
+/// and schema_version = user_version = 2. Automatically rebuilds from files on missing cache
+/// or version mismatch, and runs the incremental hydration sweep on every healthy boot.
 pub fn ensure_cache(
     workspace_root: &Path,
     storage: &StorageConfig,
@@ -3618,8 +3393,1285 @@ pub fn ensure_cache(
         }
         Ok(store)
     } else {
-        SqliteStore::open(&cache_db_path)
+        let store = SqliteStore::open(&cache_db_path)?;
+        store.sweep_workspace(workspace_root, storage)?;
+        Ok(store)
     }
+}
+
+/// Role of a scanned file during a sweep, driving which hydration routine processes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepFileRole {
+    Markdown,
+    Scratch,
+    Evidence,
+    Config,
+}
+
+/// Outcome of hydrating a single Markdown entity file. Shared by the full rebuild and the
+/// incremental sweep so both converge on identical findings/stale state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HydrateOutcome {
+    Parsed { id: String },
+    MergeConflict,
+    SchemaViolation { errors: Vec<ValidationError> },
+    NoId,
+}
+
+fn relative_path(workspace_root: &Path, file_path: &Path) -> String {
+    file_path
+        .strip_prefix(workspace_root)
+        .unwrap_or(file_path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn file_mtime_size(file_path: &Path) -> (i64, u64) {
+    let metadata = fs::metadata(file_path).ok();
+    let mtime = metadata
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let size = metadata.map(|m| m.len()).unwrap_or(0);
+    (mtime, size)
+}
+
+fn upsert_sync_state_row(
+    tx: &rusqlite::Transaction,
+    rel_path: &str,
+    mtime: i64,
+    size: u64,
+    content_hash: &str,
+) -> Result<(), QdevError> {
+    tx.execute(
+        r#"
+INSERT INTO sync_state (path, mtime, size, content_hash)
+VALUES (?1, ?2, ?3, ?4)
+ON CONFLICT(path) DO UPDATE SET
+    mtime = excluded.mtime,
+    size = excluded.size,
+    content_hash = excluded.content_hash;
+"#,
+        rusqlite::params![rel_path, mtime, size, content_hash],
+    )
+    .map(|_| ())
+    .map_err(|e| {
+        QdevError::infrastructure_failure(
+            "sqlite_error",
+            format!("Failed to upsert sync_state for '{}': {}", rel_path, e),
+        )
+    })
+}
+
+fn now_iso8601() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    iso8601_from_timestamp(secs)
+}
+
+fn clear_findings_for_path(tx: &rusqlite::Transaction, path: &str) -> Result<(), QdevError> {
+    tx.execute(
+        "DELETE FROM findings WHERE path = ?1;",
+        rusqlite::params![path],
+    )
+    .map(|_| ())
+    .map_err(|e| {
+        QdevError::infrastructure_failure(
+            "sqlite_error",
+            format!("Failed to clear findings for '{}': {}", path, e),
+        )
+    })
+}
+
+fn record_finding(
+    tx: &rusqlite::Transaction,
+    path: &str,
+    code: &str,
+    severity: &str,
+    message: &str,
+) -> Result<(), QdevError> {
+    tx.execute(
+        r#"
+INSERT INTO findings (path, code, severity, message, found_at)
+VALUES (?1, ?2, ?3, ?4, ?5)
+ON CONFLICT(path, code) DO UPDATE SET
+    severity = excluded.severity,
+    message = excluded.message,
+    found_at = excluded.found_at;
+"#,
+        rusqlite::params![path, code, severity, message, now_iso8601()],
+    )
+    .map(|_| ())
+    .map_err(|e| {
+        QdevError::infrastructure_failure(
+            "sqlite_error",
+            format!("Failed to record finding '{}' for '{}': {}", code, path, e),
+        )
+    })
+}
+
+/// Flags every entity row owned by `source_path` as stale (previous state retained).
+fn flag_stale_by_source_path(
+    tx: &rusqlite::Transaction,
+    source_path: &str,
+) -> Result<(), QdevError> {
+    tx.execute(
+        "UPDATE entities SET stale = 1 WHERE source_path = ?1;",
+        rusqlite::params![source_path],
+    )
+    .map(|_| ())
+    .map_err(|e| {
+        QdevError::infrastructure_failure(
+            "sqlite_error",
+            format!("Failed to flag stale entities for '{}': {}", source_path, e),
+        )
+    })
+}
+
+/// Maps a sprint entity id to the integer key used by the `sprints` / `sprint_assignments`
+/// tables. Shared by hydration and purge so both paths agree on the key for every id shape.
+fn sprint_number(id: &str) -> i64 {
+    id.strip_prefix("sprint-")
+        .unwrap_or(id)
+        .parse::<i64>()
+        .unwrap_or(0)
+}
+
+/// Deletes the kind-specific detail row a single entity owns (`stories`, `sprints` +
+/// `sprint_assignments`, `deferred_work`, `decisions`, `soup_dependencies`, `gate_runs`).
+/// Shared by the purge cascade and by re-parse, which must drop the previous kind's row when
+/// an entity changes kind in place.
+fn delete_kind_detail_row(
+    tx: &rusqlite::Transaction,
+    id: &str,
+    kind: EntityKind,
+) -> Result<(), QdevError> {
+    let (sql, param): (&str, Box<dyn rusqlite::ToSql>) = match kind {
+        EntityKind::Sprint => (
+            "DELETE FROM sprints WHERE id = ?1;",
+            Box::new(sprint_number(id)),
+        ),
+        EntityKind::Story => (
+            "DELETE FROM stories WHERE id = ?1;",
+            Box::new(id.to_string()),
+        ),
+        EntityKind::DeferredWork => (
+            "DELETE FROM deferred_work WHERE id = ?1;",
+            Box::new(id.to_string()),
+        ),
+        EntityKind::Decision => (
+            "DELETE FROM decisions WHERE id = ?1;",
+            Box::new(id.to_string()),
+        ),
+        EntityKind::Soup => (
+            "DELETE FROM soup_dependencies WHERE id = ?1;",
+            Box::new(id.to_string()),
+        ),
+        EntityKind::Evidence => (
+            "DELETE FROM gate_runs WHERE id = ?1;",
+            Box::new(id.to_string()),
+        ),
+        _ => return Ok(()),
+    };
+
+    tx.execute(sql, rusqlite::params![param]).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "sqlite_error",
+            format!("Failed to purge {} row for '{}': {}", kind.as_str(), id, e),
+        )
+    })?;
+    Ok(())
+}
+
+/// Deletes the child rows an entity owns before it is re-hydrated, so a re-parse *replaces*
+/// them instead of merging into rows the file no longer declares. The full rebuild gets the
+/// same effect by truncating every table first; the sweep must do it per entity.
+fn clear_owned_child_rows(
+    tx: &rusqlite::Transaction,
+    id: &str,
+    new_kind: EntityKind,
+) -> Result<(), QdevError> {
+    tx.execute(
+        "DELETE FROM constraints WHERE owner_id = ?1;",
+        rusqlite::params![id],
+    )
+    .map_err(|e| {
+        QdevError::infrastructure_failure(
+            "sqlite_error",
+            format!("Failed to clear constraints for entity '{}': {}", id, e),
+        )
+    })?;
+    tx.execute(
+        "DELETE FROM relations WHERE source_id = ?1;",
+        rusqlite::params![id],
+    )
+    .map_err(|e| {
+        QdevError::infrastructure_failure(
+            "sqlite_error",
+            format!("Failed to clear relations for entity '{}': {}", id, e),
+        )
+    })?;
+
+    // An in-place kind change leaves the previous kind's detail row behind.
+    let prev_kind: Option<String> = tx
+        .query_row(
+            "SELECT kind FROM entities WHERE id = ?1;",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to read previous kind for entity '{}': {}", id, e),
+            )
+        })?;
+    if let Some(prev) = prev_kind {
+        if let Ok(prev_kind) = EntityKind::from_str_loose(&prev) {
+            if prev_kind != new_kind {
+                delete_kind_detail_row(tx, id, prev_kind)?;
+            }
+        }
+    }
+
+    // Sprint assignments are keyed by sprint number, not entity id, so an upsert alone never
+    // removes an assignment the file dropped.
+    if new_kind == EntityKind::Sprint {
+        tx.execute(
+            "DELETE FROM sprint_assignments WHERE sprint_id = ?1;",
+            rusqlite::params![sprint_number(id)],
+        )
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to clear sprint assignments for '{}': {}", id, e),
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Deletes an entity row plus every cache row keyed to it (cascade and target-side relations).
+fn purge_entity_with_children(
+    tx: &rusqlite::Transaction,
+    id: &str,
+    kind: EntityKind,
+) -> Result<(), QdevError> {
+    if kind == EntityKind::Sprint {
+        tx.execute(
+            "DELETE FROM sprint_assignments WHERE sprint_id = ?1;",
+            rusqlite::params![sprint_number(id)],
+        )
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to purge sprint assignments for '{}': {}", id, e),
+            )
+        })?;
+    }
+    delete_kind_detail_row(tx, id, kind)?;
+
+    tx.execute("DELETE FROM stories WHERE id = ?1;", rusqlite::params![id])
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to purge story row for entity '{}': {}", id, e),
+            )
+        })?;
+    tx.execute(
+        "DELETE FROM constraints WHERE owner_id = ?1;",
+        rusqlite::params![id],
+    )
+    .map_err(|e| {
+        QdevError::infrastructure_failure(
+            "sqlite_error",
+            format!("Failed to purge constraints for entity '{}': {}", id, e),
+        )
+    })?;
+    tx.execute(
+        "DELETE FROM relations WHERE source_id = ?1 OR target_id = ?1;",
+        rusqlite::params![id],
+    )
+    .map_err(|e| {
+        QdevError::infrastructure_failure(
+            "sqlite_error",
+            format!("Failed to purge relations for entity '{}': {}", id, e),
+        )
+    })?;
+    tx.execute("DELETE FROM entities WHERE id = ?1;", rusqlite::params![id])
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to purge entity '{}': {}", id, e),
+            )
+        })?;
+    Ok(())
+}
+
+fn entity_rows_for_source_path(
+    tx: &rusqlite::Transaction,
+    source_path: &str,
+) -> Result<Vec<(String, EntityKind)>, QdevError> {
+    let mut stmt = tx
+        .prepare("SELECT id, kind FROM entities WHERE source_path = ?1;")
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!(
+                    "Failed to prepare source-path entity lookup for '{}': {}",
+                    source_path, e
+                ),
+            )
+        })?;
+    let rows = stmt
+        .query_map(rusqlite::params![source_path], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!(
+                    "Failed to query entities for source path '{}': {}",
+                    source_path, e
+                ),
+            )
+        })?;
+    let mut owned = Vec::new();
+    for r in rows {
+        let (id, kind_str) = r.map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!(
+                    "Failed to read entity row for source path '{}': {}",
+                    source_path, e
+                ),
+            )
+        })?;
+        let kind = EntityKind::from_str_loose(&kind_str).unwrap_or(EntityKind::Story);
+        owned.push((id, kind));
+    }
+    Ok(owned)
+}
+
+/// Purges every cache row owned by a removed file path: entity rows (with child cascade and
+/// target-side relations), scratchpad entries by story id, gate runs by evidence path,
+/// gates when qdev.toml disappears, the sync_state row, and the path's findings.
+fn purge_removed_path(tx: &rusqlite::Transaction, rel_path: &str) -> Result<(), QdevError> {
+    for (entity_id, kind) in entity_rows_for_source_path(tx, rel_path)? {
+        purge_entity_with_children(tx, &entity_id, kind)?;
+    }
+
+    if rel_path.ends_with(".jsonl") {
+        if let Some(story_id) = Path::new(rel_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+        {
+            tx.execute(
+                "DELETE FROM scratchpad_entries WHERE story_id = ?1;",
+                rusqlite::params![story_id],
+            )
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!(
+                        "Failed to purge scratchpad entries for removed '{}': {}",
+                        rel_path, e
+                    ),
+                )
+            })?;
+        }
+    }
+    if rel_path.ends_with(".json") {
+        tx.execute(
+            "DELETE FROM gate_runs WHERE evidence_path = ?1;",
+            rusqlite::params![rel_path],
+        )
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!(
+                    "Failed to purge gate runs for removed '{}': {}",
+                    rel_path, e
+                ),
+            )
+        })?;
+    }
+    if rel_path == "qdev.toml" {
+        tx.execute("DELETE FROM gates;", []).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to clear gates for removed '{}': {}", rel_path, e),
+            )
+        })?;
+    }
+
+    tx.execute(
+        "DELETE FROM sync_state WHERE path = ?1;",
+        rusqlite::params![rel_path],
+    )
+    .map_err(|e| {
+        QdevError::infrastructure_failure(
+            "sqlite_error",
+            format!("Failed to purge sync_state for '{}': {}", rel_path, e),
+        )
+    })?;
+    clear_findings_for_path(tx, rel_path)?;
+    Ok(())
+}
+
+/// Refreshes the gates table from qdev.toml content (clears first so removed gates drop).
+fn refresh_gates(tx: &rusqlite::Transaction, content: &str) -> Result<(), QdevError> {
+    tx.execute("DELETE FROM gates;", []).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "sqlite_error",
+            format!("Failed to clear gates table: {}", e),
+        )
+    })?;
+
+    if let Ok(parsed_toml) = toml::from_str::<toml::Value>(content) {
+        if let Some(toml::Value::Array(gates)) = parsed_toml.get("gates") {
+            for g in gates {
+                if let Some(gate_table) = g.as_table() {
+                    if let Some(id) = gate_table.get("id").and_then(|v| v.as_str()) {
+                        let cmd = gate_table
+                            .get("command")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        let kind = gate_table.get("kind").and_then(|v| v.as_str());
+                        let timeout_ms = gate_table
+                            .get("timeout_ms")
+                            .and_then(|v| v.as_integer())
+                            .filter(|&i| i >= 0)
+                            .map(|i| i as u64);
+                        let output_adapter =
+                            gate_table.get("output_adapter").and_then(|v| v.as_str());
+                        let on_trans = gate_table
+                            .get("on_transition")
+                            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| v.to_string()));
+                        let deps = gate_table
+                            .get("depends_on")
+                            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| v.to_string()));
+                        let metric = gate_table.get("metric").and_then(|v| v.as_str());
+                        let direction = gate_table.get("direction").and_then(|v| v.as_str());
+
+                        tx.execute(
+                            r#"
+INSERT INTO gates (id, command, kind, timeout_ms, output_adapter, on_transition, depends_on, metric, direction)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+ON CONFLICT(id) DO UPDATE SET
+    command = excluded.command,
+    kind = excluded.kind,
+    timeout_ms = excluded.timeout_ms,
+    output_adapter = excluded.output_adapter,
+    on_transition = excluded.on_transition,
+    depends_on = excluded.depends_on,
+    metric = excluded.metric,
+    direction = excluded.direction;
+"#,
+                            rusqlite::params![
+                                id, cmd, kind, timeout_ms, output_adapter, on_trans, deps, metric, direction
+                            ],
+                        )
+                        .map_err(|e| {
+                            QdevError::infrastructure_failure(
+                                "sqlite_error",
+                                format!("Failed to upsert gate '{}': {}", id, e),
+                            )
+                        })?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Shared per-Markdown-file hydration: records sync_state, then either parses and upserts the
+/// entity (clearing stale) or records a merge_conflict / schema_violation finding and flags the
+/// previous row stale. Used by both the full rebuild and the incremental sweep.
+fn hydrate_markdown_file(
+    tx: &rusqlite::Transaction,
+    workspace_root: &Path,
+    file_path: &Path,
+    content: &str,
+) -> Result<HydrateOutcome, QdevError> {
+    let rel_path = relative_path(workspace_root, file_path);
+    let (mtime, size) = file_mtime_size(file_path);
+    let content_hash = sha256_digest(content.as_bytes());
+
+    // Upsert sync_state for every scanned file
+    upsert_sync_state_row(tx, &rel_path, mtime, size, &content_hash)?;
+
+    // Findings are per-path current state: reset this path's findings, then re-record if the
+    // file is invalid. A successful parse therefore leaves no findings for the path.
+    clear_findings_for_path(tx, &rel_path)?;
+
+    // Conflict markers: never parse; record finding; keep previous row flagged stale
+    if content.contains("<<<<<<<") {
+        record_finding(
+            tx,
+            &rel_path,
+            "merge_conflict",
+            "error",
+            "File contains merge conflict markers ('<<<<<<<') and was not parsed",
+        )?;
+        flag_stale_by_source_path(tx, &rel_path)?;
+        return Ok(HydrateOutcome::MergeConflict);
+    }
+
+    let frontmatter = match extract_frontmatter(content) {
+        Ok(fm) => fm,
+        Err(e) => {
+            record_finding(tx, &rel_path, "schema_violation", "error", &e.to_string())?;
+            flag_stale_by_source_path(tx, &rel_path)?;
+            return Ok(HydrateOutcome::SchemaViolation {
+                errors: vec![ValidationError {
+                    path: String::new(),
+                    message: e.to_string(),
+                }],
+            });
+        }
+    };
+
+    let id = match frontmatter.get("id").and_then(|v| v.as_str()) {
+        Some(id) if !id.trim().is_empty() => id.to_string(),
+        _ => {
+            record_finding(
+                tx,
+                &rel_path,
+                "schema_violation",
+                "error",
+                "Frontmatter has no non-empty 'id'",
+            )?;
+            flag_stale_by_source_path(tx, &rel_path)?;
+            return Ok(HydrateOutcome::NoId);
+        }
+    };
+
+    let kind = determine_entity_kind(file_path, &id, &frontmatter);
+    if let Err(errors) = validate_value_detailed(kind, &frontmatter) {
+        let message = errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        record_finding(tx, &rel_path, "schema_violation", "error", &message)?;
+        flag_stale_by_source_path(tx, &rel_path)?;
+        return Ok(HydrateOutcome::SchemaViolation { errors });
+    }
+
+    // In-place id edit: purge rows claiming this source_path under a different id
+    // (child cascade + target-side relations) so no orphan rows survive.
+    for (old_id, old_kind) in entity_rows_for_source_path(tx, &rel_path)? {
+        if old_id != id {
+            purge_entity_with_children(tx, &old_id, old_kind)?;
+        }
+    }
+
+    // Re-parse replaces this entity's child rows: constraints, outbound relations, sprint
+    // assignments and any detail row left by a previous kind. Upserts alone would keep rows
+    // the file no longer declares, diverging from a full rebuild.
+    clear_owned_child_rows(tx, &id, kind)?;
+
+    let title = frontmatter
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let status = frontmatter
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let owners = frontmatter.get("owners").map(|v| v.to_string());
+    let version = frontmatter
+        .get("version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1);
+
+    let c_type = frontmatter
+        .get("created_by")
+        .and_then(|v| v.get("type"))
+        .and_then(|v| v.as_str());
+    let c_id = frontmatter
+        .get("created_by")
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str());
+    let u_type = frontmatter
+        .get("updated_by")
+        .and_then(|v| v.get("type"))
+        .and_then(|v| v.as_str());
+    let u_id = frontmatter
+        .get("updated_by")
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str());
+
+    let updated_at = frontmatter
+        .get("updated_at")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| iso8601_from_timestamp(mtime));
+
+    // Upsert entities table (successful parse clears the stale flag)
+    tx.execute(
+        r#"
+INSERT INTO entities (
+    id, kind, title, status, owners, source_path, content_hash, version,
+    created_by_type, created_by_id, updated_by_type, updated_by_id, updated_at, stale
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+ON CONFLICT(id) DO UPDATE SET
+    kind = excluded.kind,
+    title = excluded.title,
+    status = excluded.status,
+    owners = excluded.owners,
+    source_path = excluded.source_path,
+    content_hash = excluded.content_hash,
+    version = excluded.version,
+    created_by_type = excluded.created_by_type,
+    created_by_id = excluded.created_by_id,
+    updated_by_type = excluded.updated_by_type,
+    updated_by_id = excluded.updated_by_id,
+    updated_at = excluded.updated_at,
+    stale = 0;
+"#,
+        rusqlite::params![
+            id,
+            kind.as_str(),
+            title,
+            status,
+            owners,
+            rel_path,
+            content_hash,
+            version,
+            c_type,
+            c_id,
+            u_type,
+            u_id,
+            updated_at,
+            0i64,
+        ],
+    )
+    .map_err(|e| {
+        QdevError::infrastructure_failure(
+            "sqlite_error",
+            format!("Failed to upsert entity '{}': {}", id, e),
+        )
+    })?;
+
+    // Kind-specific: Story
+    if kind == EntityKind::Story {
+        let epic_id = frontmatter
+            .get("epic_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                if let Ok(Identifier::Story { epic, .. }) = id.parse::<Identifier>() {
+                    Some(format!("E{}", epic))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        let seq = frontmatter
+            .get("seq")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .or_else(|| {
+                if let Ok(Identifier::Story { story, .. }) = id.parse::<Identifier>() {
+                    Some(story)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        let appetite = frontmatter.get("appetite").and_then(|v| v.as_str());
+        let safety_class = frontmatter.get("safety_class").and_then(|v| v.as_str());
+        let target_modules = frontmatter.get("target_modules").map(|v| v.to_string());
+
+        tx.execute(
+            r#"
+INSERT INTO stories (id, epic_id, seq, appetite, safety_class, target_modules)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+ON CONFLICT(id) DO UPDATE SET
+    epic_id = excluded.epic_id,
+    seq = excluded.seq,
+    appetite = excluded.appetite,
+    safety_class = excluded.safety_class,
+    target_modules = excluded.target_modules;
+"#,
+            rusqlite::params![id, epic_id, seq, appetite, safety_class, target_modules],
+        )
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to upsert story details '{}': {}", id, e),
+            )
+        })?;
+    }
+
+    // Constraints (from frontmatter of any entity)
+    if let Some(serde_json::Value::Array(constraints)) = frontmatter.get("constraints") {
+        for c in constraints {
+            if let Some(c_id) = c.get("id").and_then(|v| v.as_str()) {
+                let comp_id = if c_id.contains('/') {
+                    c_id.to_string()
+                } else {
+                    format!("{}/{}", id, c_id)
+                };
+                let c_kind = c.get("kind").and_then(|v| v.as_str()).unwrap_or("no_go");
+                let c_text = c.get("text").and_then(|v| v.as_str()).unwrap_or("");
+
+                tx.execute(
+                    r#"
+INSERT INTO constraints (id, owner_id, kind, text)
+VALUES (?1, ?2, ?3, ?4)
+ON CONFLICT(id) DO UPDATE SET
+    owner_id = excluded.owner_id,
+    kind = excluded.kind,
+    text = excluded.text;
+"#,
+                    rusqlite::params![comp_id, id, c_kind, c_text],
+                )
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to upsert constraint '{}': {}", comp_id, e),
+                    )
+                })?;
+            }
+        }
+    }
+
+    // Relations (from frontmatter of any entity)
+    if let Some(serde_json::Value::Object(relations)) = frontmatter.get("relations") {
+        for (rel_name, targets_val) in relations {
+            if let Some(targets) = targets_val.as_array() {
+                for target in targets {
+                    if let Some(target_id) = target.as_str() {
+                        tx.execute(
+                            r#"
+INSERT INTO relations (source_id, relation, target_id)
+VALUES (?1, ?2, ?3)
+ON CONFLICT(source_id, relation, target_id) DO NOTHING;
+"#,
+                            rusqlite::params![id, rel_name, target_id],
+                        )
+                        .map_err(|e| {
+                            QdevError::infrastructure_failure(
+                                "sqlite_error",
+                                format!(
+                                    "Failed to upsert relation '{}' -> '{}': {}",
+                                    id, target_id, e
+                                ),
+                            )
+                        })?;
+                    }
+                }
+            }
+        }
+    }
+
+    // Kind-specific: Sprint
+    if kind == EntityKind::Sprint {
+        let sprint_num: i64 = sprint_number(&id);
+
+        let rel_ver = frontmatter
+            .get("release_version")
+            .or_else(|| frontmatter.get("release"))
+            .and_then(|v| v.as_str());
+        let started_at = frontmatter.get("started_at").and_then(|v| v.as_str());
+        let completed_at = frontmatter.get("completed_at").and_then(|v| v.as_str());
+
+        tx.execute(
+            r#"
+INSERT INTO sprints (id, title, release_version, status, owners, started_at, completed_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+ON CONFLICT(id) DO UPDATE SET
+    title = excluded.title,
+    release_version = excluded.release_version,
+    status = excluded.status,
+    owners = excluded.owners,
+    started_at = excluded.started_at,
+    completed_at = excluded.completed_at;
+"#,
+            rusqlite::params![
+                sprint_num,
+                title,
+                rel_ver,
+                status,
+                owners,
+                started_at,
+                completed_at
+            ],
+        )
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to upsert sprint '{}': {}", id, e),
+            )
+        })?;
+
+        if let Some(serde_json::Value::Array(assignments)) = frontmatter.get("assignments") {
+            for a in assignments {
+                let (story_id, assigned_at, carried_from) = match a {
+                    serde_json::Value::String(s) => {
+                        (s.clone(), started_at.unwrap_or("").to_string(), None)
+                    }
+                    serde_json::Value::Object(map) => {
+                        let s_id = map
+                            .get("story_id")
+                            .or_else(|| map.get("story"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let at = map
+                            .get("assigned_at")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(started_at.unwrap_or(""))
+                            .to_string();
+                        let carried = map.get("carried_from").and_then(|v| {
+                            v.as_i64().or_else(|| {
+                                v.as_str().and_then(|s| {
+                                    s.strip_prefix("sprint-").unwrap_or(s).parse::<i64>().ok()
+                                })
+                            })
+                        });
+                        (s_id, at, carried)
+                    }
+                    _ => continue,
+                };
+
+                if !story_id.is_empty() {
+                    tx.execute(
+                        r#"
+INSERT INTO sprint_assignments (sprint_id, story_id, assigned_at, carried_from)
+VALUES (?1, ?2, ?3, ?4)
+ON CONFLICT(sprint_id, story_id) DO UPDATE SET
+    assigned_at = excluded.assigned_at,
+    carried_from = excluded.carried_from;
+"#,
+                        rusqlite::params![sprint_num, story_id, assigned_at, carried_from],
+                    )
+                    .map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!(
+                                "Failed to upsert sprint assignment for '{}': {}",
+                                story_id, e
+                            ),
+                        )
+                    })?;
+                }
+            }
+        }
+    }
+
+    // Kind-specific: DeferredWork
+    if kind == EntityKind::DeferredWork {
+        let origin = frontmatter.get("origin_story_id").and_then(|v| v.as_str());
+        let target_module = frontmatter
+            .get("target_module")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let safety_risk = frontmatter.get("safety_risk").and_then(|v| v.as_str());
+        let rationale = frontmatter.get("rationale").and_then(|v| v.as_str());
+        let gate = frontmatter.get("gate").and_then(|v| v.as_str());
+        let resolution = frontmatter.get("resolution").and_then(|v| v.as_str());
+
+        tx.execute(
+            r#"
+INSERT INTO deferred_work (id, origin_story_id, target_module, status, safety_risk, rationale, gate, resolution)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+ON CONFLICT(id) DO UPDATE SET
+    origin_story_id = excluded.origin_story_id,
+    target_module = excluded.target_module,
+    status = excluded.status,
+    safety_risk = excluded.safety_risk,
+    rationale = excluded.rationale,
+    gate = excluded.gate,
+    resolution = excluded.resolution;
+"#,
+            rusqlite::params![
+                id,
+                origin,
+                target_module,
+                status,
+                safety_risk,
+                rationale,
+                gate,
+                resolution
+            ],
+        )
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to upsert deferred work '{}': {}", id, e),
+            )
+        })?;
+    }
+
+    // Kind-specific: Decision
+    if kind == EntityKind::Decision {
+        let subject_id = frontmatter
+            .get("subject_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let dec_type = frontmatter.get("decision_type").and_then(|v| v.as_str());
+        let topic = frontmatter.get("topic").and_then(|v| v.as_str());
+        let context = frontmatter.get("context").and_then(|v| v.as_str());
+        let ruling = frontmatter.get("ruling").and_then(|v| v.as_str());
+        let created_at = frontmatter
+            .get("created_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&updated_at);
+
+        tx.execute(
+            r#"
+INSERT INTO decisions (id, subject_id, decision_type, topic, context, ruling, author_type, author_id, created_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+ON CONFLICT(id) DO UPDATE SET
+    subject_id = excluded.subject_id,
+    decision_type = excluded.decision_type,
+    topic = excluded.topic,
+    context = excluded.context,
+    ruling = excluded.ruling,
+    author_type = excluded.author_type,
+    author_id = excluded.author_id,
+    created_at = excluded.created_at;
+"#,
+            rusqlite::params![
+                id, subject_id, dec_type, topic, context, ruling, c_type, c_id, created_at
+            ],
+        )
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to upsert decision '{}': {}", id, e),
+            )
+        })?;
+    }
+
+    // Kind-specific: Soup
+    if kind == EntityKind::Soup {
+        let name = frontmatter.get("name").and_then(|v| v.as_str());
+        let ver = frontmatter
+            .get("dependency_version")
+            .or_else(|| frontmatter.get("version"))
+            .and_then(|v| v.as_str());
+        let license = frontmatter.get("license").and_then(|v| v.as_str());
+        let cve_status = frontmatter.get("cve_status").and_then(|v| v.as_str());
+        let intro_story = frontmatter
+            .get("introduced_by_story")
+            .and_then(|v| v.as_str());
+        let eval_rel = frontmatter
+            .get("evaluated_for_release")
+            .and_then(|v| v.as_str());
+
+        tx.execute(
+            r#"
+INSERT INTO soup_dependencies (id, name, version, license, cve_status, introduced_by_story, evaluated_for_release)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+ON CONFLICT(id) DO UPDATE SET
+    name = excluded.name,
+    version = excluded.version,
+    license = excluded.license,
+    cve_status = excluded.cve_status,
+    introduced_by_story = excluded.introduced_by_story,
+    evaluated_for_release = excluded.evaluated_for_release;
+"#,
+            rusqlite::params![id, name, ver, license, cve_status, intro_story, eval_rel],
+        )
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to upsert SOUP dependency '{}': {}", id, e),
+            )
+        })?;
+    }
+
+    // Kind-specific: Evidence
+    if kind == EntityKind::Evidence {
+        let story_id = frontmatter.get("story_id").and_then(|v| v.as_str());
+        let gate_id = frontmatter
+            .get("gate_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let commit_sha = frontmatter
+            .get("commit_sha")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let ev_status = frontmatter.get("status").and_then(|v| v.as_str());
+        let exit_code = frontmatter
+            .get("exit_code")
+            .and_then(|v| v.as_i64())
+            .map(|i| i as i32);
+        let duration_ms = frontmatter.get("duration_ms").and_then(|v| v.as_u64());
+        let metric_val = frontmatter.get("metric_value").and_then(|v| v.as_f64());
+        let summary = frontmatter.get("summary").and_then(|v| v.as_str());
+        let output_hash = frontmatter.get("output_hash").and_then(|v| v.as_str());
+        let ran_at = frontmatter.get("ran_at").and_then(|v| v.as_str());
+
+        tx.execute(
+            r#"
+INSERT INTO gate_runs (
+    id, story_id, gate_id, commit_sha, status, exit_code, duration_ms,
+    metric_value, summary, evidence_path, output_hash, run_by_type, run_by_id, ran_at
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+ON CONFLICT(id) DO UPDATE SET
+    story_id = excluded.story_id,
+    gate_id = excluded.gate_id,
+    commit_sha = excluded.commit_sha,
+    status = excluded.status,
+    exit_code = excluded.exit_code,
+    duration_ms = excluded.duration_ms,
+    metric_value = excluded.metric_value,
+    summary = excluded.summary,
+    evidence_path = excluded.evidence_path,
+    output_hash = excluded.output_hash,
+    run_by_type = excluded.run_by_type,
+    run_by_id = excluded.run_by_id,
+    ran_at = excluded.ran_at;
+"#,
+            rusqlite::params![
+                id,
+                story_id,
+                gate_id,
+                commit_sha,
+                ev_status,
+                exit_code,
+                duration_ms,
+                metric_val,
+                summary,
+                rel_path,
+                output_hash,
+                c_type,
+                c_id,
+                ran_at
+            ],
+        )
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to upsert gate run '{}': {}", id, e),
+            )
+        })?;
+    }
+
+    Ok(HydrateOutcome::Parsed { id })
+}
+
+/// Shared scratchpad (.jsonl) hydration: records sync_state and replaces the story's entries.
+fn hydrate_scratch_file(
+    tx: &rusqlite::Transaction,
+    workspace_root: &Path,
+    file_path: &Path,
+    content: &str,
+) -> Result<(), QdevError> {
+    let rel_path = relative_path(workspace_root, file_path);
+    let (mtime, size) = file_mtime_size(file_path);
+    let content_hash = sha256_digest(content.as_bytes());
+    upsert_sync_state_row(tx, &rel_path, mtime, size, &content_hash)?;
+
+    let story_id = file_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+
+    // Re-parse replaces the story's entries so lines removed from the file don't linger
+    tx.execute(
+        "DELETE FROM scratchpad_entries WHERE story_id = ?1;",
+        rusqlite::params![story_id],
+    )
+    .map_err(|e| {
+        QdevError::infrastructure_failure(
+            "sqlite_error",
+            format!(
+                "Failed to clear scratchpad entries for '{}': {}",
+                story_id, e
+            ),
+        )
+    })?;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(entry_json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            let seq = entry_json.get("seq").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let at = entry_json.get("at").and_then(|v| v.as_str()).unwrap_or("");
+            let (author_type, author_id) =
+                if let Some(author_obj) = entry_json.get("author").and_then(|v| v.as_object()) {
+                    let t = author_obj
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| entry_json.get("author_type").and_then(|v| v.as_str()));
+                    let id = author_obj
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| author_obj.get("name").and_then(|v| v.as_str()))
+                        .or_else(|| entry_json.get("author_id").and_then(|v| v.as_str()));
+                    (t, id)
+                } else {
+                    (
+                        entry_json.get("author_type").and_then(|v| v.as_str()),
+                        entry_json.get("author_id").and_then(|v| v.as_str()),
+                    )
+                };
+            let entry_kind = entry_json.get("kind").and_then(|v| v.as_str());
+            let text = entry_json.get("text").and_then(|v| v.as_str());
+
+            tx.execute(
+                r#"
+INSERT INTO scratchpad_entries (story_id, seq, at, author_type, author_id, kind, text)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+ON CONFLICT(story_id, seq) DO UPDATE SET
+    at = excluded.at,
+    author_type = excluded.author_type,
+    author_id = excluded.author_id,
+    kind = excluded.kind,
+    text = excluded.text;
+"#,
+                rusqlite::params![story_id, seq, at, author_type, author_id, entry_kind, text],
+            )
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!(
+                        "Failed to upsert scratchpad entry for '{}:{}': {}",
+                        story_id, seq, e
+                    ),
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Shared evidence (.json) hydration: records sync_state and replaces gate runs from the file.
+fn hydrate_evidence_file(
+    tx: &rusqlite::Transaction,
+    workspace_root: &Path,
+    file_path: &Path,
+    content: &str,
+) -> Result<(), QdevError> {
+    let rel_path = relative_path(workspace_root, file_path);
+    let (mtime, size) = file_mtime_size(file_path);
+    let content_hash = sha256_digest(content.as_bytes());
+    upsert_sync_state_row(tx, &rel_path, mtime, size, &content_hash)?;
+
+    // Re-parse replaces gate runs originating from this evidence file
+    tx.execute(
+        "DELETE FROM gate_runs WHERE evidence_path = ?1;",
+        rusqlite::params![rel_path],
+    )
+    .map_err(|e| {
+        QdevError::infrastructure_failure(
+            "sqlite_error",
+            format!(
+                "Failed to clear gate runs for evidence '{}': {}",
+                rel_path, e
+            ),
+        )
+    })?;
+
+    if let Ok(ev_json) = serde_json::from_str::<serde_json::Value>(content) {
+        let ev_id = ev_json
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                file_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string()
+            });
+
+        if !ev_id.is_empty() {
+            let story_id = ev_json.get("story_id").and_then(|v| v.as_str());
+            let gate_id = ev_json
+                .get("gate_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let commit_sha = ev_json
+                .get("commit_sha")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let ev_status = ev_json.get("status").and_then(|v| v.as_str());
+            let exit_code = ev_json
+                .get("exit_code")
+                .and_then(|v| v.as_i64())
+                .map(|i| i as i32);
+            let duration_ms = ev_json.get("duration_ms").and_then(|v| v.as_u64());
+            let metric_val = ev_json.get("metric_value").and_then(|v| v.as_f64());
+            let summary = ev_json.get("summary").and_then(|v| v.as_str());
+            let output_hash = ev_json.get("output_hash").and_then(|v| v.as_str());
+            let ran_at = ev_json.get("ran_at").and_then(|v| v.as_str());
+            let run_by_type = ev_json
+                .get("run_by")
+                .or_else(|| ev_json.get("created_by"))
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str());
+            let run_by_id = ev_json
+                .get("run_by")
+                .or_else(|| ev_json.get("created_by"))
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_str());
+
+            tx.execute(
+                r#"
+INSERT INTO gate_runs (
+    id, story_id, gate_id, commit_sha, status, exit_code, duration_ms,
+    metric_value, summary, evidence_path, output_hash, run_by_type, run_by_id, ran_at
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+ON CONFLICT(id) DO UPDATE SET
+    story_id = excluded.story_id,
+    gate_id = excluded.gate_id,
+    commit_sha = excluded.commit_sha,
+    status = excluded.status,
+    exit_code = excluded.exit_code,
+    duration_ms = excluded.duration_ms,
+    metric_value = excluded.metric_value,
+    summary = excluded.summary,
+    evidence_path = excluded.evidence_path,
+    output_hash = excluded.output_hash,
+    run_by_type = excluded.run_by_type,
+    run_by_id = excluded.run_by_id,
+    ran_at = excluded.ran_at;
+"#,
+                rusqlite::params![
+                    ev_id,
+                    story_id,
+                    gate_id,
+                    commit_sha,
+                    ev_status,
+                    exit_code,
+                    duration_ms,
+                    metric_val,
+                    summary,
+                    rel_path,
+                    output_hash,
+                    run_by_type,
+                    run_by_id,
+                    ran_at
+                ],
+            )
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!("Failed to upsert gate run from JSON '{}': {}", ev_id, e),
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) {

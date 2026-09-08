@@ -6,7 +6,10 @@ use std::panic;
 use std::process::ExitCode as StdExitCode;
 
 use clap::Parser;
-use qdev_core::{serde_yaml, ExitCode, Interactivity, JsonEnvelope, JsonErrorEnvelope, QdevError};
+use qdev_core::{
+    serde_yaml, ExitCode, Interactivity, JsonEnvelope, JsonErrorEnvelope, QdevError,
+    CACHE_SCHEMA_VERSION,
+};
 use serde::Serialize;
 
 use cli::{is_json_requested, Cli, Commands, ConfigCommands, CreateCommands};
@@ -540,11 +543,11 @@ fn handle_init(
         println!("✔ docs/specs/{{prd,requirements,epics,stories,adrs,hazards}}");
         println!("✔ docs/state/{{sprints,releases,dw,decisions,scratch,evidence,baselines,soup}}");
         if result.cache_migrated {
-            println!("✔ cache schema migrated to v1");
+            println!("✔ cache schema migrated to v{}", CACHE_SCHEMA_VERSION);
         } else if result.already_initialized {
-            println!("✔ cache schema v1 up to date");
+            println!("✔ cache schema v{} up to date", CACHE_SCHEMA_VERSION);
         } else {
-            println!("✔ cache schema v1");
+            println!("✔ cache schema v{}", CACHE_SCHEMA_VERSION);
         }
     }
 

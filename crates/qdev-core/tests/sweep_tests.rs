@@ -1,0 +1,1383 @@
+//! Incremental hydration sweep tests (spec-1-7).
+//!
+//! Covers the I/O & edge-case matrix from the spec plus the warm-sweep benchmark bound.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+use tempfile::TempDir;
+
+use qdev_core::rusqlite;
+use qdev_core::store::{
+    ensure_cache, inspect_cache_schema, CacheSchemaStatus, EntityRecord, FindingRecord,
+    SqliteStore, Store, SweepSummary, ALL_TABLE_NAMES,
+};
+use qdev_core::StorageConfig;
+
+// ---------------------------------------------------------------------------
+// Fixtures / helpers
+// ---------------------------------------------------------------------------
+
+fn storage() -> StorageConfig {
+    StorageConfig::default()
+}
+
+/// Writes a minimal valid `qdev.toml` (plus optional gates TOML body) at the workspace root.
+fn write_qdev_toml(root: &Path, gates: &str) {
+    let body = if gates.is_empty() {
+        String::new()
+    } else {
+        format!("\n{gates}\n")
+    };
+    fs::write(
+        root.join("qdev.toml"),
+        format!("[project]\nname = \"SweepTest\"\n{body}"),
+    )
+    .unwrap();
+}
+
+/// Schema-valid story frontmatter + body.
+fn story_md(id: &str, title: &str) -> String {
+    format!(
+        r#"---
+id: {id}
+title: "{title}"
+status: draft
+version: 1
+created_by:
+  type: human
+  id: alice
+updated_by:
+  type: human
+  id: alice
+---
+Body for {id}
+"#
+    )
+}
+
+fn story_path(root: &Path, id: &str) -> PathBuf {
+    root.join("docs/specs/stories").join(format!("{id}.md"))
+}
+
+fn write_story(root: &Path, id: &str, title: &str) {
+    let path = story_path(root, id);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, story_md(id, title)).unwrap();
+}
+
+/// Builds a workspace: `qdev.toml` (no gates) plus the given story entities.
+fn make_workspace(root: &Path, stories: &[&str]) {
+    write_qdev_toml(root, "");
+    for id in stories {
+        write_story(root, id, &format!("Story {id}"));
+    }
+}
+
+fn cache_db(root: &Path) -> PathBuf {
+    root.join(".qdev/cache/cache.sqlite")
+}
+
+/// Directly reads a column from the `entities` table for assertions.
+fn entity_stale(store: &SqliteStore, id: &str) -> bool {
+    store.get_entity(id).unwrap().unwrap().stale
+}
+
+/// Dumps every table as sorted stringified rows. `findings.found_at` (second-resolution wall
+/// clock) is dropped so a rebuild and a sweep of the same tree compare equal.
+fn dump_tables(db_path: &Path) -> BTreeMap<String, Vec<Vec<String>>> {
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    let mut dump = BTreeMap::new();
+
+    for &table in ALL_TABLE_NAMES {
+        let mut stmt = match conn.prepare(&format!("SELECT * FROM \"{}\";", table)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let col_count = stmt.column_count();
+        let keep = if table == "findings" {
+            col_count - 1 // drop found_at
+        } else {
+            col_count
+        };
+        let rows = stmt
+            .query_map([], |row| {
+                let mut vals = Vec::new();
+                for i in 0..keep {
+                    let val: rusqlite::types::Value = row.get(i)?;
+                    vals.push(match val {
+                        rusqlite::types::Value::Null => "NULL".to_string(),
+                        rusqlite::types::Value::Integer(i) => i.to_string(),
+                        rusqlite::types::Value::Real(f) => format!("{:.4}", f),
+                        rusqlite::types::Value::Text(t) => t,
+                        rusqlite::types::Value::Blob(b) => format!("{:?}", b),
+                    });
+                }
+                Ok(vals)
+            })
+            .unwrap();
+        let mut row_list: Vec<Vec<String>> = rows.map(|r| r.unwrap()).collect();
+        row_list.sort();
+        dump.insert(table.to_string(), row_list);
+    }
+    dump
+}
+
+/// A story carrying two constraints and two relations, so re-parse can drop one of each.
+fn story_with_children(id: &str, constraints: &[&str], depends_on: &[&str]) -> String {
+    let mut s = format!("---\nid: {id}\ntitle: \"Story {id}\"\nstatus: draft\nversion: 1\n");
+    if !constraints.is_empty() {
+        s.push_str("constraints:\n");
+        for c in constraints {
+            s.push_str(&format!(
+                "  - id: {c}\n    kind: no_go\n    text: \"{c} text\"\n"
+            ));
+        }
+    }
+    if !depends_on.is_empty() {
+        let targets = depends_on
+            .iter()
+            .map(|t| format!("\"{t}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        s.push_str(&format!("relations:\n  depends_on: [{targets}]\n"));
+    }
+    s.push_str(
+        "created_by:\n  type: human\n  id: alice\nupdated_by:\n  type: human\n  id: alice\n---\nBody\n",
+    );
+    s
+}
+
+/// A sprint entity file with the given story assignments.
+fn sprint_md(id: &str, assignments: &[&str]) -> String {
+    let mut s = format!(
+        "---\nid: {id}\ntitle: \"Sprint\"\nstatus: active\nversion: 1\nstarted_at: \"2026-09-01T00:00:00Z\"\n"
+    );
+    if !assignments.is_empty() {
+        s.push_str("assignments:\n");
+        for a in assignments {
+            s.push_str(&format!(
+                "  - story_id: {a}\n    assigned_at: \"2026-09-01T00:00:00Z\"\n"
+            ));
+        }
+    }
+    s.push_str(
+        "created_by:\n  type: human\n  id: alice\nupdated_by:\n  type: human\n  id: alice\n---\nBody\n",
+    );
+    s
+}
+
+fn write_at(root: &Path, rel: &str, content: &str) {
+    let path = root.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, content).unwrap();
+}
+
+fn count_rows(root: &Path, sql: &str) -> i64 {
+    rusqlite::Connection::open(cache_db(root))
+        .unwrap()
+        .query_row(sql, [], |r| r.get(0))
+        .unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// Warm no-op boot
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_warm_noop_sweep_reparses_nothing() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1", "E1S2"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    let before: EntityRecord = store.get_entity("E1S1").unwrap().unwrap();
+
+    let summary: SweepSummary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(summary.parsed, 0, "warm sweep must not re-parse any file");
+    assert_eq!(summary.purged, 0, "warm sweep must not purge anything");
+    assert!(
+        summary.unchanged >= 2,
+        "scanned files should be reported unchanged (got {})",
+        summary.unchanged
+    );
+
+    let after = store.get_entity("E1S1").unwrap().unwrap();
+    assert_eq!(
+        after.content_hash, before.content_hash,
+        "row must be untouched"
+    );
+    assert!(!after.stale);
+}
+
+// ---------------------------------------------------------------------------
+// Single modified file
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_single_modified_file_reparsed() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1", "E1S2"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    // Change only E1S1 (a different-length title guarantees a size change).
+    fs::write(
+        story_path(root, "E1S1"),
+        story_md("E1S1", "A Much Longer Changed Title"),
+    )
+    .unwrap();
+
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(summary.parsed, 1, "only the modified file is re-parsed");
+    assert_eq!(summary.purged, 0);
+
+    let e1 = store.get_entity("E1S1").unwrap().unwrap();
+    assert_eq!(e1.title.as_deref(), Some("A Much Longer Changed Title"));
+    assert!(!e1.stale);
+
+    // The untouched file is not re-parsed and not stale.
+    let e2 = store.get_entity("E1S2").unwrap().unwrap();
+    assert!(!e2.stale);
+}
+
+// ---------------------------------------------------------------------------
+// Touch, same content (hash unchanged -> no re-parse)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_touch_same_content_no_reparsed() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    // Simulate a touch: corrupt the stored mtime so the meta check marks the file a
+    // candidate, while leaving content (and thus hash) unchanged.
+    {
+        let conn = rusqlite::Connection::open(cache_db(root)).unwrap();
+        conn.execute(
+            "UPDATE sync_state SET mtime = mtime + 999999 WHERE path = 'docs/specs/stories/E1S1.md';",
+            [],
+        )
+        .unwrap();
+    }
+
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        summary.parsed, 0,
+        "unchanged hash must not trigger a re-parse"
+    );
+    assert_eq!(summary.purged, 0);
+
+    let e = store.get_entity("E1S1").unwrap().unwrap();
+    assert!(!e.stale);
+
+    // sync_state mtime is restored to the real file mtime.
+    let stored_mtime: i64 = rusqlite::Connection::open(cache_db(root))
+        .unwrap()
+        .query_row(
+            "SELECT mtime FROM sync_state WHERE path = 'docs/specs/stories/E1S1.md';",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let actual_mtime = fs::metadata(story_path(root, "E1S1"))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    assert_eq!(
+        stored_mtime, actual_mtime,
+        "sync_state mtime refreshed to file mtime"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// In-place id edit (old-id cascade purged, no orphans)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_in_place_id_edit_purges_old_id() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    assert!(store.get_entity("E1S1").unwrap().is_some());
+
+    // Same file, new id in frontmatter (E1S2).
+    let path = story_path(root, "E1S1");
+    fs::write(&path, story_md("E1S2", "Re-identified")).unwrap();
+
+    store.sweep_workspace(root, &storage).unwrap();
+
+    assert!(
+        store.get_entity("E1S1").unwrap().is_none(),
+        "old id row must be purged"
+    );
+    assert!(
+        store.get_entity("E1S2").unwrap().is_some(),
+        "new id row must be upserted"
+    );
+    assert_eq!(
+        store.get_entity("E1S2").unwrap().unwrap().title.as_deref(),
+        Some("Re-identified")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Branch switch: add / change / remove
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_branch_switch_add_change_remove_purge() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1", "E1S2"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    assert!(store.get_entity("E1S1").unwrap().is_some());
+    assert!(store.get_entity("E1S2").unwrap().is_some());
+
+    // Change E1S1, add E1S3, remove E1S2.
+    fs::write(story_path(root, "E1S1"), story_md("E1S1", "Changed")).unwrap();
+    write_story(root, "E1S3", "Brand New");
+    fs::remove_file(story_path(root, "E1S2")).unwrap();
+
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(summary.parsed, 2, "changed + added files re-parsed");
+    assert_eq!(summary.purged, 1, "removed file purged");
+
+    assert_eq!(
+        store.get_entity("E1S1").unwrap().unwrap().title.as_deref(),
+        Some("Changed")
+    );
+    assert!(
+        store.get_entity("E1S3").unwrap().is_some(),
+        "added file present"
+    );
+    assert!(
+        store.get_entity("E1S2").unwrap().is_none(),
+        "removed file gone"
+    );
+
+    // Removed file's sync_state row is purged.
+    let n: i64 = rusqlite::Connection::open(cache_db(root))
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM sync_state WHERE path = 'docs/specs/stories/E1S2.md';",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 0, "removed file sync_state purged");
+}
+
+// ---------------------------------------------------------------------------
+// Merge conflict: finding + stale, others continue, non-fatal
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_merge_conflict_finding_and_stale() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1", "E1S2"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    assert!(store
+        .get_findings_for_path("docs/specs/stories/E1S1.md")
+        .unwrap()
+        .is_empty());
+
+    // Inject conflict markers into E1S1 (E1S2 stays valid).
+    let conflicted =
+        story_md("E1S1", "Story E1S1") + "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\n";
+    fs::write(story_path(root, "E1S1"), conflicted).unwrap();
+
+    // The sweep must succeed (findings are non-fatal).
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        summary.parsed, 0,
+        "a conflicted file is never parsed/upserted"
+    );
+    assert_eq!(summary.findings, 1, "one finding recorded");
+
+    let f1: Vec<FindingRecord> = store
+        .get_findings_for_path("docs/specs/stories/E1S1.md")
+        .unwrap();
+    assert_eq!(f1.len(), 1);
+    assert_eq!(f1[0].code, "merge_conflict");
+    assert_eq!(f1[0].severity, "error");
+
+    // The healthy file has no finding and is not stale.
+    assert!(store
+        .get_findings_for_path("docs/specs/stories/E1S2.md")
+        .unwrap()
+        .is_empty());
+    assert!(!entity_stale(&store, "E1S2"));
+
+    // E1S1's previous row is retained and flagged stale.
+    assert!(entity_stale(&store, "E1S1"));
+    assert_eq!(
+        store.get_entity("E1S1").unwrap().unwrap().title.as_deref(),
+        Some("Story E1S1")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Schema violation: finding + stale retained, cleared once fixed
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_schema_violation_finding_stale_and_cleared_on_fix() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    assert!(!entity_stale(&store, "E1S1"));
+
+    // Make frontmatter schema-invalid (version is not an integer).
+    let invalid = story_md("E1S1", "Story E1S1").replace("version: 1", "version: not-a-number");
+    fs::write(story_path(root, "E1S1"), invalid).unwrap();
+
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(summary.parsed, 0, "invalid file is not upserted");
+    assert_eq!(summary.findings, 1);
+
+    let f: Vec<FindingRecord> = store
+        .get_findings_for_path("docs/specs/stories/E1S1.md")
+        .unwrap();
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].code, "schema_violation");
+    assert!(f[0].message.as_deref().unwrap().contains("version"));
+    assert!(
+        entity_stale(&store, "E1S1"),
+        "previous row retained and flagged stale"
+    );
+
+    // Fix the file and re-boot: finding cleared, stale cleared.
+    fs::write(story_path(root, "E1S1"), story_md("E1S1", "Fixed Story")).unwrap();
+    let summary2 = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(summary2.parsed, 1, "fixed file re-parsed");
+    assert_eq!(summary2.findings, 0, "finding cleared once fixed");
+    assert!(store
+        .get_findings_for_path("docs/specs/stories/E1S1.md")
+        .unwrap()
+        .is_empty());
+    assert!(
+        !entity_stale(&store, "E1S1"),
+        "stale flag cleared on successful parse"
+    );
+    assert_eq!(
+        store.get_entity("E1S1").unwrap().unwrap().title.as_deref(),
+        Some("Fixed Story")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// qdev write (dirty) forces re-parse even when mtime/size match; row cleared
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_dirty_row_forced_reparsed_and_cleared() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    let before_hash: String = store
+        .get_entity("E1S1")
+        .unwrap()
+        .unwrap()
+        .content_hash
+        .clone();
+
+    // Simulate `qdev update`: mark the entity dirty (sync_state left intact so mtime/size
+    // match — the dirty flag alone must force a re-parse).
+    store
+        .mark_entity_dirty("E1S1", "2026-09-07T00:00:00Z")
+        .unwrap();
+    assert_eq!(store.get_dirty_entities().unwrap().len(), 1);
+
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        summary.parsed, 1,
+        "dirty entity re-parsed despite unchanged mtime/size"
+    );
+
+    // Dirty row cleared after consumption.
+    assert!(
+        store.get_dirty_entities().unwrap().is_empty(),
+        "consumed dirty row cleared"
+    );
+
+    // Content unchanged (same file), hash stable.
+    assert_eq!(
+        store.get_entity("E1S1").unwrap().unwrap().content_hash,
+        before_hash
+    );
+}
+
+#[test]
+fn test_dirty_row_with_deleted_sync_state_restored() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    // Mimic `qdev update` exactly: mark the entity dirty AND delete its sync_state row
+    // (the write path invalidates the row so the sweep must treat the file as new).
+    store
+        .mark_entity_dirty("E1S1", "2026-09-07T00:00:00Z")
+        .unwrap();
+    rusqlite::Connection::open(cache_db(root))
+        .unwrap()
+        .execute(
+            "DELETE FROM sync_state WHERE path = 'docs/specs/stories/E1S1.md';",
+            [],
+        )
+        .unwrap();
+
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        summary.parsed, 1,
+        "written entity re-parsed after write-path invalidation"
+    );
+    assert!(
+        store.get_dirty_entities().unwrap().is_empty(),
+        "consumed dirty row cleared"
+    );
+
+    // sync_state row restored with the file's current metadata and hash.
+    let row: Option<(i64, i64, Option<String>)> = rusqlite::Connection::open(cache_db(root))
+        .unwrap()
+        .query_row(
+            "SELECT mtime, size, content_hash FROM sync_state WHERE path = 'docs/specs/stories/E1S1.md';",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok();
+    let (stored_mtime, stored_size, stored_hash) = row.expect("sync_state row restored");
+    let md = fs::metadata(story_path(root, "E1S1")).unwrap();
+    let actual_mtime = md
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    assert_eq!(stored_mtime, actual_mtime, "restored mtime matches file");
+    assert_eq!(stored_size, md.len() as i64, "restored size matches file");
+    assert!(stored_hash.is_some(), "restored hash present");
+}
+
+// ---------------------------------------------------------------------------
+// Gates edited in qdev.toml are re-upserted on next boot
+// ---------------------------------------------------------------------------
+
+fn gate_count(root: &Path) -> i64 {
+    rusqlite::Connection::open(cache_db(root))
+        .unwrap()
+        .query_row("SELECT count(*) FROM gates;", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn gate_command(root: &Path, id: &str) -> Option<String> {
+    rusqlite::Connection::open(cache_db(root))
+        .unwrap()
+        .query_row(
+            "SELECT command FROM gates WHERE id = ?1;",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+        .ok()
+}
+
+#[test]
+fn test_gates_refresh_on_config_change() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    let storage = storage();
+
+    // Initial qdev.toml with one gate.
+    write_qdev_toml(root, "[[gates]]\nid = \"lint\"\ncommand = \"cargo clippy\"");
+    let store = ensure_cache(root, &storage).unwrap();
+
+    assert_eq!(gate_count(root), 1, "initial gate hydrated");
+    assert_eq!(gate_command(root, "lint"), Some("cargo clippy".to_string()));
+
+    // Add a second gate and change the first.
+    write_qdev_toml(
+        root,
+        "[[gates]]\nid = \"lint\"\ncommand = \"cargo clippy -- -D warnings\"\n\n[[gates]]\nid = \"test\"\ncommand = \"cargo test\"",
+    );
+
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(summary.parsed, 1, "qdev.toml re-processed");
+
+    assert_eq!(gate_count(root), 2, "both gates present after refresh");
+    assert_eq!(
+        gate_command(root, "lint"),
+        Some("cargo clippy -- -D warnings".to_string()),
+        "gate command updated"
+    );
+    assert_eq!(gate_command(root, "test"), Some("cargo test".to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// v1 cache auto-rebuilds losslessly to v2
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_v1_cache_auto_rebuilds_to_v2() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1", "E1S2"]);
+    let storage = storage();
+
+    // Pre-create a v1 cache (user_version/schema_version = 1).
+    let cache_dir = root.join(".qdev/cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    {
+        let conn = rusqlite::Connection::open(cache_db(root)).unwrap();
+        conn.execute_batch("PRAGMA user_version = 1; PRAGMA schema_version = 1;")
+            .unwrap();
+    }
+
+    // Any boot detects the mismatch and rebuilds to v2.
+    let store = ensure_cache(root, &storage).unwrap();
+
+    let conn = rusqlite::Connection::open(cache_db(root)).unwrap();
+    let user_ver: u32 = conn
+        .query_row("PRAGMA user_version;", [], |r| r.get(0))
+        .unwrap();
+    let schema_ver: u32 = conn
+        .query_row("PRAGMA schema_version;", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(user_ver, 2, "user_version rebuilt to 2");
+    assert_eq!(schema_ver, 2, "schema_version rebuilt to 2");
+
+    // 15 tables present.
+    let tables: Vec<String> = rusqlite::Connection::open(cache_db(root))
+        .unwrap()
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    assert_eq!(tables.len(), 15, "v2 cache has 15 tables");
+
+    // Lossless: entities rebuilt from files.
+    assert!(store.get_entity("E1S1").unwrap().is_some());
+    assert!(store.get_entity("E1S2").unwrap().is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Rebuild and sweep produce identical findings/stale state
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_rebuild_and_sweep_findings_equal() {
+    // The sweep must land exactly the cache state a full rebuild of the same tree produces -
+    // including findings, stale flags and every child table - after real changes to the tree.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_at(
+        root,
+        "docs/specs/stories/E1S1.md",
+        &story_with_children("E1S1", &["NG-1", "NG-2"], &["E1S0", "E1S9"]),
+    );
+    write_story(root, "E1S2", "Two");
+    write_story(root, "E1S3", "Three");
+    write_at(
+        root,
+        "docs/state/sprints/sprint-1.md",
+        &sprint_md("sprint-1", &["E1S1", "E1S2"]),
+    );
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    // Mutate: drop a constraint, a relation and an assignment; add a file; remove a file; add a
+    // conflicted file and a schema-invalid file (both new, so neither path has a previous row).
+    write_at(
+        root,
+        "docs/specs/stories/E1S1.md",
+        &story_with_children("E1S1", &["NG-1"], &["E1S0"]),
+    );
+    write_at(
+        root,
+        "docs/state/sprints/sprint-1.md",
+        &sprint_md("sprint-1", &["E1S1"]),
+    );
+    write_story(root, "E1S4", "Added");
+    fs::remove_file(story_path(root, "E1S3")).unwrap();
+    fs::write(
+        story_path(root, "E1S8"),
+        story_md("E1S8", "Conflicted") + "<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> b\n",
+    )
+    .unwrap();
+    fs::write(
+        story_path(root, "E1S9"),
+        story_md("E1S9", "Invalid").replace("version: 1", "version: bogus"),
+    )
+    .unwrap();
+
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert!(summary.parsed >= 3, "changed/added files must re-parse");
+    assert_eq!(summary.purged, 1, "the removed file must be purged");
+    let swept = dump_tables(&cache_db(root));
+
+    // A full rebuild of the very same tree must produce the same rows in every table.
+    store.reset_and_rebuild(root, &storage).unwrap();
+    let rebuilt = dump_tables(&cache_db(root));
+
+    for &table in ALL_TABLE_NAMES {
+        assert_eq!(
+            swept.get(table),
+            rebuilt.get(table),
+            "table '{table}' diverges between sweep and rebuild"
+        );
+    }
+
+    // Sanity: the mutation really did exercise the paths under test.
+    assert_eq!(
+        swept["constraints"].len(),
+        1,
+        "the dropped constraint must be gone, not merged"
+    );
+    assert_eq!(
+        swept["relations"].len(),
+        1,
+        "the dropped relation must be gone, not merged"
+    );
+    assert_eq!(
+        swept["sprint_assignments"].len(),
+        1,
+        "the dropped sprint assignment must be gone, not merged"
+    );
+    let codes: Vec<&str> = swept["findings"].iter().map(|r| r[1].as_str()).collect();
+    assert!(codes.contains(&"merge_conflict"), "codes: {codes:?}");
+    assert!(codes.contains(&"schema_violation"), "codes: {codes:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Re-parse replaces child rows
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_reparse_replaces_child_rows() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_at(
+        root,
+        "docs/specs/stories/E1S1.md",
+        &story_with_children("E1S1", &["NG-1", "NG-2"], &["E1S0", "E1S9"]),
+    );
+    write_at(
+        root,
+        "docs/state/sprints/sprint-1.md",
+        &sprint_md("sprint-1", &["E1S1", "E1S2"]),
+    );
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    assert_eq!(count_rows(root, "SELECT COUNT(*) FROM constraints;"), 2);
+    assert_eq!(count_rows(root, "SELECT COUNT(*) FROM relations;"), 2);
+    assert_eq!(
+        count_rows(root, "SELECT COUNT(*) FROM sprint_assignments;"),
+        2
+    );
+
+    // Drop one of each from the files.
+    write_at(
+        root,
+        "docs/specs/stories/E1S1.md",
+        &story_with_children("E1S1", &["NG-2"], &["E1S9"]),
+    );
+    write_at(
+        root,
+        "docs/state/sprints/sprint-1.md",
+        &sprint_md("sprint-1", &["E1S2"]),
+    );
+    store.sweep_workspace(root, &storage).unwrap();
+
+    assert_eq!(
+        count_rows(root, "SELECT COUNT(*) FROM constraints;"),
+        1,
+        "a constraint removed from the file must not survive the sweep"
+    );
+    assert_eq!(
+        count_rows(
+            root,
+            "SELECT COUNT(*) FROM constraints WHERE id = 'E1S1/NG-2';"
+        ),
+        1,
+        "the surviving constraint must be the one still declared"
+    );
+    assert_eq!(
+        count_rows(root, "SELECT COUNT(*) FROM relations;"),
+        1,
+        "a relation removed from the file must not survive the sweep"
+    );
+    assert_eq!(
+        count_rows(
+            root,
+            "SELECT COUNT(*) FROM relations WHERE target_id = 'E1S9';"
+        ),
+        1
+    );
+    assert_eq!(
+        count_rows(root, "SELECT COUNT(*) FROM sprint_assignments;"),
+        1,
+        "an assignment removed from the sprint file must not survive the sweep"
+    );
+    assert_eq!(
+        count_rows(
+            root,
+            "SELECT COUNT(*) FROM sprint_assignments WHERE story_id = 'E1S2';"
+        ),
+        1
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Removal purge covers every kind and file role
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_purge_removes_child_rows_for_every_kind() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "[[gates]]\nid = \"fmt\"\ncommand = \"cargo fmt\"\n");
+    write_at(
+        root,
+        "docs/state/sprints/sprint-1.md",
+        &sprint_md("sprint-1", &["E1S1"]),
+    );
+    write_at(
+        root,
+        "docs/state/dw/DW-1111.md",
+        r#"---
+id: DW-1111
+title: "DW One"
+status: open
+origin_story_id: E1S1
+target_module: foundation
+safety_risk: negligible
+version: 1
+created_by:
+  type: human
+  id: alice
+updated_by:
+  type: human
+  id: alice
+---
+"#,
+    );
+    write_at(
+        root,
+        "docs/state/decisions/DEC-2222.md",
+        r#"---
+id: DEC-2222
+title: "Decision One"
+status: done
+subject_id: E1S1
+decision_type: human_ruling
+topic: "Architecture"
+ruling: "Approved"
+version: 1
+created_by:
+  type: human
+  id: alice
+updated_by:
+  type: human
+  id: alice
+---
+"#,
+    );
+    write_at(
+        root,
+        "docs/state/soup/rusqlite@0.31.0.md",
+        r#"---
+id: rusqlite@0.31.0
+status: done
+name: rusqlite
+dependency_version: 0.31.0
+license: MIT
+cve_status: clean
+version: 1
+created_by:
+  type: human
+  id: alice
+updated_by:
+  type: human
+  id: alice
+---
+"#,
+    );
+    write_at(
+        root,
+        "docs/state/scratch/E1S1.jsonl",
+        "{\"seq\":1,\"at\":\"2026-09-07T00:00:00Z\",\"author_type\":\"human\",\"author_id\":\"alice\",\"kind\":\"note\",\"text\":\"Spike\"}\n",
+    );
+    write_at(
+        root,
+        "docs/state/evidence/E1S1/abc-fmt.json",
+        r#"{
+  "id": "abc-fmt",
+  "story_id": "E1S1",
+  "gate_id": "fmt",
+  "commit_sha": "abc",
+  "status": "pass",
+  "exit_code": 0,
+  "duration_ms": 100,
+  "summary": "Formatted"
+}"#,
+    );
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    for (table, sql) in [
+        ("sprints", "SELECT COUNT(*) FROM sprints;"),
+        (
+            "sprint_assignments",
+            "SELECT COUNT(*) FROM sprint_assignments;",
+        ),
+        ("deferred_work", "SELECT COUNT(*) FROM deferred_work;"),
+        ("decisions", "SELECT COUNT(*) FROM decisions;"),
+        (
+            "soup_dependencies",
+            "SELECT COUNT(*) FROM soup_dependencies;",
+        ),
+        (
+            "scratchpad_entries",
+            "SELECT COUNT(*) FROM scratchpad_entries;",
+        ),
+        ("gate_runs", "SELECT COUNT(*) FROM gate_runs;"),
+        ("gates", "SELECT COUNT(*) FROM gates;"),
+    ] {
+        assert!(
+            count_rows(root, sql) > 0,
+            "fixture must populate '{table}' before the removal"
+        );
+    }
+
+    // Remove every file, including qdev.toml, then sweep.
+    for rel in [
+        "docs/state/sprints/sprint-1.md",
+        "docs/state/dw/DW-1111.md",
+        "docs/state/decisions/DEC-2222.md",
+        "docs/state/soup/rusqlite@0.31.0.md",
+        "docs/state/scratch/E1S1.jsonl",
+        "docs/state/evidence/E1S1/abc-fmt.json",
+        "qdev.toml",
+    ] {
+        fs::remove_file(root.join(rel)).unwrap();
+    }
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(summary.purged, 7, "every removed file must be purged");
+
+    for (table, sql) in [
+        ("entities", "SELECT COUNT(*) FROM entities;"),
+        ("sprints", "SELECT COUNT(*) FROM sprints;"),
+        (
+            "sprint_assignments",
+            "SELECT COUNT(*) FROM sprint_assignments;",
+        ),
+        ("deferred_work", "SELECT COUNT(*) FROM deferred_work;"),
+        ("decisions", "SELECT COUNT(*) FROM decisions;"),
+        (
+            "soup_dependencies",
+            "SELECT COUNT(*) FROM soup_dependencies;",
+        ),
+        (
+            "scratchpad_entries",
+            "SELECT COUNT(*) FROM scratchpad_entries;",
+        ),
+        ("gate_runs", "SELECT COUNT(*) FROM gate_runs;"),
+        ("gates", "SELECT COUNT(*) FROM gates;"),
+        ("sync_state", "SELECT COUNT(*) FROM sync_state;"),
+    ] {
+        assert_eq!(
+            count_rows(root, sql),
+            0,
+            "'{table}' must be empty after every file was removed"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scratch (.jsonl) and evidence (.json) files are swept
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_scratch_and_evidence_files_swept() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    write_at(
+        root,
+        "docs/state/scratch/E1S1.jsonl",
+        "{\"seq\":1,\"at\":\"2026-09-07T00:00:00Z\",\"author_type\":\"human\",\"author_id\":\"alice\",\"kind\":\"note\",\"text\":\"One\"}\n",
+    );
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    assert_eq!(
+        count_rows(root, "SELECT COUNT(*) FROM scratchpad_entries;"),
+        1
+    );
+
+    // An unchanged scratch file must not be re-parsed and must not be purged.
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(summary.parsed, 0);
+    assert_eq!(summary.purged, 0);
+    assert_eq!(
+        count_rows(root, "SELECT COUNT(*) FROM scratchpad_entries;"),
+        1
+    );
+
+    // Appending a line and adding an evidence file must reach the cache on the next sweep.
+    write_at(
+        root,
+        "docs/state/scratch/E1S1.jsonl",
+        "{\"seq\":1,\"at\":\"2026-09-07T00:00:00Z\",\"author_type\":\"human\",\"author_id\":\"alice\",\"kind\":\"note\",\"text\":\"One\"}\n{\"seq\":2,\"at\":\"2026-09-07T00:01:00Z\",\"author_type\":\"human\",\"author_id\":\"alice\",\"kind\":\"note\",\"text\":\"Two\"}\n",
+    );
+    write_at(
+        root,
+        "docs/state/evidence/E1S1/abc-fmt.json",
+        r#"{
+  "id": "abc-fmt",
+  "story_id": "E1S1",
+  "gate_id": "fmt",
+  "commit_sha": "abc",
+  "status": "pass",
+  "exit_code": 0,
+  "duration_ms": 100,
+  "summary": "Formatted"
+}"#,
+    );
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(summary.parsed, 2, "the scratch and evidence files re-parse");
+    assert_eq!(
+        count_rows(root, "SELECT COUNT(*) FROM scratchpad_entries;"),
+        2,
+        "the appended scratchpad line must reach the cache"
+    );
+    assert_eq!(
+        count_rows(root, "SELECT COUNT(*) FROM gate_runs;"),
+        1,
+        "the new evidence file must reach the cache"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Unreadable file: recorded as a finding, dirty row retained
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_unreadable_file_records_finding_and_keeps_dirty() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    store
+        .mark_entity_dirty("E1S1", "2026-09-07T00:00:00Z")
+        .unwrap();
+
+    // Non-UTF-8 bytes make `read_to_string` fail.
+    fs::write(story_path(root, "E1S1"), [0xff, 0xfe, 0xfd]).unwrap();
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+
+    let findings = store
+        .get_findings_for_path("docs/specs/stories/E1S1.md")
+        .unwrap();
+    assert_eq!(findings.len(), 1, "one finding for the unreadable file");
+    assert_eq!(findings[0].code, "read_error");
+    assert_eq!(findings[0].severity, "error");
+    assert!(summary.findings >= 1);
+
+    assert!(
+        entity_stale(&store, "E1S1"),
+        "the retained row must be flagged stale"
+    );
+    assert_eq!(
+        count_rows(root, "SELECT COUNT(*) FROM dirty_entities;"),
+        1,
+        "a file that never parsed must not consume its dirty row"
+    );
+
+    // Restoring readable content clears the finding and the flags.
+    write_story(root, "E1S1", "Recovered");
+    store.sweep_workspace(root, &storage).unwrap();
+    assert!(store
+        .get_findings_for_path("docs/specs/stories/E1S1.md")
+        .unwrap()
+        .is_empty());
+    assert!(!entity_stale(&store, "E1S1"));
+    assert_eq!(count_rows(root, "SELECT COUNT(*) FROM dirty_entities;"), 0);
+}
+
+// ---------------------------------------------------------------------------
+// A real v1 cache (14 tables, no entities.stale)
+// ---------------------------------------------------------------------------
+
+/// Turns the v2 cache at `root` into a genuine v1 shape: 14 tables, `entities` without
+/// `stale`, pragmas at 1.
+fn downgrade_cache_to_v1(root: &Path) {
+    let conn = rusqlite::Connection::open(cache_db(root)).unwrap();
+    conn.execute_batch(
+        "DROP TABLE findings;
+         ALTER TABLE entities DROP COLUMN stale;
+         PRAGMA user_version = 1;
+         PRAGMA schema_version = 1;",
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_real_v1_cache_rebuilds_to_v2_and_matches_a_fresh_sweep() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_at(
+        root,
+        "docs/specs/stories/E1S1.md",
+        &story_with_children("E1S1", &["NG-1"], &["E1S0"]),
+    );
+    write_story(root, "E1S2", "Two");
+    write_at(
+        root,
+        "docs/state/sprints/sprint-1.md",
+        &sprint_md("sprint-1", &["E1S1"]),
+    );
+    let storage = storage();
+    drop(ensure_cache(root, &storage).unwrap());
+    downgrade_cache_to_v1(root);
+
+    assert_eq!(
+        inspect_cache_schema(&cache_db(root)).unwrap(),
+        CacheSchemaStatus::Mismatch,
+        "a v1 cache must be detected as a mismatch"
+    );
+    assert_eq!(
+        count_rows(
+            root,
+            "SELECT COUNT(*) FROM pragma_table_info('entities') WHERE name = 'stale';"
+        ),
+        0,
+        "the downgraded cache really lacks entities.stale"
+    );
+
+    // Any boot rebuilds it losslessly to v2.
+    let store = ensure_cache(root, &storage).unwrap();
+    let conn = rusqlite::Connection::open(cache_db(root)).unwrap();
+    let user_ver: u32 = conn
+        .query_row("PRAGMA user_version;", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(user_ver, 2);
+    let tables: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 15, "v2 cache has 15 tables");
+    assert_eq!(
+        count_rows(
+            root,
+            "SELECT COUNT(*) FROM pragma_table_info('entities') WHERE name = 'stale';"
+        ),
+        1,
+        "entities.stale is restored"
+    );
+    assert!(store.get_entity("E1S1").unwrap().is_some());
+    assert!(store.get_entity("sprint-1").unwrap().is_some());
+
+    // AC 6: the rebuilt state equals a fresh sweep of the same tree.
+    let rebuilt = dump_tables(&cache_db(root));
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(summary.parsed, 0, "the rebuilt cache is already current");
+    let swept = dump_tables(&cache_db(root));
+    for &table in ALL_TABLE_NAMES {
+        assert_eq!(
+            rebuilt.get(table),
+            swept.get(table),
+            "table '{table}' differs between the v1 rebuild and a fresh sweep"
+        );
+    }
+}
+
+#[test]
+fn test_half_migrated_v1_cache_is_reported_as_mismatch() {
+    // Running the v2 DDL over a v1 database creates `findings` and stamps the pragmas, but
+    // `CREATE TABLE IF NOT EXISTS` cannot add `entities.stale`. Such a cache must never be
+    // reported Valid, or every later sweep would fail on the missing column.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    let storage = storage();
+    drop(ensure_cache(root, &storage).unwrap());
+    downgrade_cache_to_v1(root);
+
+    let store = SqliteStore::open(cache_db(root)).unwrap();
+    store
+        .with_conn(|conn| {
+            qdev_core::store::create_schema_v2(conn).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    drop(store);
+
+    assert_eq!(
+        count_rows(
+            root,
+            "SELECT COUNT(*) FROM pragma_table_info('entities') WHERE name = 'stale';"
+        ),
+        0,
+        "the half-migrated cache still lacks entities.stale"
+    );
+    assert_eq!(
+        inspect_cache_schema(&cache_db(root)).unwrap(),
+        CacheSchemaStatus::Mismatch,
+        "a half-migrated cache must be rebuilt, not trusted"
+    );
+
+    // And a boot heals it.
+    let store = ensure_cache(root, &storage).unwrap();
+    assert!(store.get_entity("E1S1").unwrap().is_some());
+    assert_eq!(
+        inspect_cache_schema(&cache_db(root)).unwrap(),
+        CacheSchemaStatus::Valid
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: median warm sweep <= 30 ms, every run <= 500 ms (AD-6)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_benchmark_warm_sweep_bound() {
+    const N: usize = 1000;
+    const WARM_SWEEPS: usize = 25;
+    const MEDIAN_BUDGET_MS: u128 = 30;
+    const CEILING_MS: u128 = 500;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    for i in 0..N {
+        let id = format!("E1S{i}");
+        write_story(root, &id, &format!("Story {id}"));
+    }
+    let storage = storage();
+
+    // Warm-up: initial full rebuild.
+    let store = ensure_cache(root, &storage).unwrap();
+
+    // Repeated warm sweeps; time each.
+    let mut durations_ms: Vec<u128> = Vec::with_capacity(WARM_SWEEPS);
+    for _ in 0..WARM_SWEEPS {
+        let start = Instant::now();
+        let summary = store.sweep_workspace(root, &storage).unwrap();
+        durations_ms.push(start.elapsed().as_millis());
+        assert_eq!(summary.parsed, 0, "warm sweep must not re-parse");
+        assert_eq!(summary.purged, 0, "warm sweep must not purge");
+    }
+
+    let mut sorted = durations_ms.clone();
+    sorted.sort();
+    let median = sorted[sorted.len() / 2];
+    let max = *sorted.last().unwrap();
+
+    eprintln!(
+        "warm sweep benchmark (N={N}): median={median}ms max={max}ms runs={:?}",
+        durations_ms
+    );
+    assert!(
+        median <= MEDIAN_BUDGET_MS,
+        "median warm sweep {median}ms exceeds {MEDIAN_BUDGET_MS}ms bound"
+    );
+    assert!(
+        max <= CEILING_MS,
+        "a warm sweep {max}ms exceeds the {CEILING_MS}ms regression ceiling"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: 1,000 fixtures with one modified file (AC 1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_benchmark_one_modified_sweep_bound() {
+    const N: usize = 1000;
+    const RUNS: usize = 5;
+    const CEILING_MS: u128 = 500;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    for i in 0..N {
+        let id = format!("E1S{i}");
+        write_story(root, &id, &format!("Story {id}"));
+    }
+    let storage = storage();
+
+    // Warm-up: initial full rebuild, then one warm sweep so only the edit is outstanding.
+    let store = ensure_cache(root, &storage).unwrap();
+    store.sweep_workspace(root, &storage).unwrap();
+
+    let mut durations_ms: Vec<u128> = Vec::with_capacity(RUNS);
+    for run in 0..RUNS {
+        // Each run edits exactly one file, so exactly one file is hashed *and* re-parsed. The
+        // title grows by a character per run: successive runs land in the same wall-clock
+        // second, and mtime alone has 1-second granularity (spec Design Notes).
+        write_story(
+            root,
+            "E1S500",
+            &format!("Story E1S500 revision{}", "x".repeat(run + 1)),
+        );
+
+        let start = Instant::now();
+        let summary = store.sweep_workspace(root, &storage).unwrap();
+        durations_ms.push(start.elapsed().as_millis());
+
+        assert_eq!(
+            summary.parsed, 1,
+            "exactly the modified file must be re-parsed"
+        );
+        assert_eq!(summary.purged, 0);
+        assert_eq!(summary.unchanged, N, "every other file must be untouched");
+    }
+
+    let mut sorted = durations_ms.clone();
+    sorted.sort();
+    let median = sorted[sorted.len() / 2];
+    let max = *sorted.last().unwrap();
+    eprintln!(
+        "one-modified sweep benchmark (N={N}): median={median}ms max={max}ms runs={durations_ms:?}"
+    );
+
+    assert_eq!(
+        store.get_entity("E1S500").unwrap().unwrap().title.unwrap(),
+        format!("Story E1S500 revision{}", "x".repeat(RUNS)),
+        "the edit must be visible in the cache"
+    );
+    assert!(
+        max <= CEILING_MS,
+        "a one-modified sweep {max}ms exceeds the {CEILING_MS}ms regression ceiling"
+    );
+}
