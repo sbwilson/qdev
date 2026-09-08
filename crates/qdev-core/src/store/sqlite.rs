@@ -467,6 +467,10 @@ DELETE FROM findings;
                 let _ = hydrate_markdown_file(&tx, workspace_root, file_path, &content)?;
             }
 
+            // 2b. Whole-graph relation validation (kind pairs, dangling targets, depends_on
+            // cycles) now that every entity file has been parsed into `entities`/`relations`.
+            validate_relations_graph(&tx)?;
+
             // 3. Process scratchpad (.jsonl) files
             for file_path in &scratch_files {
                 let content = match fs::read_to_string(file_path) {
@@ -3025,6 +3029,12 @@ ON CONFLICT(path, code) DO UPDATE SET
                 }
             }
 
+            // 2b. Whole-graph relation validation (kind pairs, dangling targets, depends_on
+            // cycles). Runs every sweep against the full `entities`/`relations` tables, not just
+            // the files touched this pass, so an out-of-band edit anywhere (e.g. a target file
+            // deleted in a different edit) is caught the next time hydration runs.
+            validate_relations_graph(&tx)?;
+
             // 3. Clear consumed dirty rows: entities whose file actually re-parsed this pass,
             //    plus orphaned rows for entities that were purged. A file that was unreadable,
             //    conflicted or schema-invalid keeps its dirty row so the next boot retries.
@@ -3542,6 +3552,179 @@ ON CONFLICT(path, code) DO UPDATE SET
             format!("Failed to record finding '{}' for '{}': {}", code, path, e),
         )
     })
+}
+
+/// Whole-graph relation validation: recomputes `dangling_relation`, `invalid_relation_kind`,
+/// and `dependency_cycle` findings from scratch against the current `entities`/`relations`
+/// tables. Clears the three codes for every path first (a relation problem that no longer
+/// exists must stop being reported even for a file that was not itself reparsed this pass),
+/// then re-derives them:
+///   - a relation whose target isn't in `entities` -> `dangling_relation` on the source's path;
+///   - otherwise, a `(relation, source_kind, target_kind)` not in `dag::allowed_kind_pairs` ->
+///     `invalid_relation_kind` on the source's path;
+///   - a cycle in the `depends_on` subgraph -> `dependency_cycle` on every participant's path,
+///     naming the full cycle. Repeats after removing each found cycle's closing edge from the
+///     working edge list (not from storage) so multiple disjoint cycles are all found.
+fn validate_relations_graph(tx: &rusqlite::Transaction) -> Result<(), QdevError> {
+    tx.execute(
+        "DELETE FROM findings WHERE code IN ('dangling_relation', 'invalid_relation_kind', 'dependency_cycle');",
+        [],
+    )
+    .map_err(|e| {
+        QdevError::infrastructure_failure(
+            "sqlite_error",
+            format!("Failed to clear relation-validation findings: {}", e),
+        )
+    })?;
+
+    // id -> (kind, source_path)
+    let mut entity_info: HashMap<String, (EntityKind, String)> = HashMap::new();
+    {
+        let mut stmt = tx
+            .prepare("SELECT id, kind, source_path FROM entities;")
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!(
+                        "Failed to prepare entity lookup for relation validation: {}",
+                        e
+                    ),
+                )
+            })?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!("Failed to query entities for relation validation: {}", e),
+                )
+            })?;
+        for r in rows {
+            let (id, kind_str, path) = r.map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!("Failed to read entity row for relation validation: {}", e),
+                )
+            })?;
+            if let Ok(kind) = EntityKind::from_str_loose(&kind_str) {
+                entity_info.insert(id, (kind, path));
+            }
+        }
+    }
+
+    let mut relations: Vec<(String, String, String)> = Vec::new();
+    {
+        let mut stmt = tx
+            .prepare("SELECT source_id, relation, target_id FROM relations ORDER BY source_id, relation, target_id;")
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!("Failed to prepare relation query for validation: {}", e),
+                )
+            })?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!("Failed to query relations for validation: {}", e),
+                )
+            })?;
+        for r in rows {
+            relations.push(r.map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!("Failed to read relation row for validation: {}", e),
+                )
+            })?);
+        }
+    }
+
+    // Dangling target / invalid kind pair, per relation.
+    for (source_id, relation, target_id) in &relations {
+        let Some((source_kind, source_path)) = entity_info.get(source_id) else {
+            // The owning entity row is missing; relations are cleared alongside their source
+            // entity (purge and re-parse both clear owned relation rows first), so this should
+            // not normally happen. Nothing to attach a finding to.
+            continue;
+        };
+        match entity_info.get(target_id) {
+            None => {
+                record_finding(
+                    tx,
+                    source_path,
+                    "dangling_relation",
+                    "error",
+                    &format!(
+                        "Relation '{}' on '{}' targets '{}', which does not exist",
+                        relation, source_id, target_id
+                    ),
+                )?;
+            }
+            Some((target_kind, _)) => {
+                if !crate::dag::is_valid_kind_pair(relation, *source_kind, *target_kind) {
+                    record_finding(
+                        tx,
+                        source_path,
+                        "invalid_relation_kind",
+                        "error",
+                        &format!(
+                            "Relation '{}' from {} ({}) to {} ({}) is not an allowed kind pair",
+                            relation,
+                            source_id,
+                            source_kind.as_str(),
+                            target_id,
+                            target_kind.as_str()
+                        ),
+                    )?;
+                }
+            }
+        }
+    }
+
+    // depends_on cycles: whole-graph scan, repeated (breaking only the working edge list, never
+    // storage) until acyclic, so every disjoint cycle out-of-band edits may have introduced is
+    // found and reported, not just the first.
+    let mut depends_on_edges: Vec<(String, String)> = relations
+        .iter()
+        .filter(|(_, relation, _)| relation == "depends_on")
+        .map(|(source_id, _, target_id)| (source_id.clone(), target_id.clone()))
+        .collect();
+
+    while let Some(cycle) = crate::dag::find_dependency_cycle(&depends_on_edges) {
+        let message = format!("depends_on cycle: {}", cycle.join(" -> "));
+        let mut recorded: HashSet<&str> = HashSet::new();
+        for node in &cycle {
+            if !recorded.insert(node.as_str()) {
+                continue;
+            }
+            if let Some((_, path)) = entity_info.get(node) {
+                record_finding(tx, path, "dependency_cycle", "error", &message)?;
+            }
+        }
+        if cycle.len() < 2 {
+            break;
+        }
+        let (a, b) = (
+            cycle[cycle.len() - 2].clone(),
+            cycle[cycle.len() - 1].clone(),
+        );
+        depends_on_edges.retain(|(s, t)| !(*s == a && *t == b));
+    }
+
+    Ok(())
 }
 
 /// Flags every entity row owned by `source_path` as stale (previous state retained).

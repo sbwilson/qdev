@@ -1297,39 +1297,8 @@ pub fn apply_entity_update(options: &EntityUpdateOptions) -> Result<EntityUpdate
     let u_author = Some(options.author.clone());
 
     // Story fields
-    let (epic_id, seq, appetite, safety_class, target_modules) = if kind == EntityKind::Story {
-        let epic = updated_frontmatter
-            .get("epic_id")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .or_else(|| {
-                if let Ok(Identifier::Story { epic, .. }) = canonical_id.parse::<Identifier>() {
-                    Some(format!("E{}", epic))
-                } else {
-                    None
-                }
-            });
-        let s_num = if let Ok(Identifier::Story { story, .. }) = canonical_id.parse::<Identifier>()
-        {
-            Some(story)
-        } else {
-            None
-        };
-        let app = updated_frontmatter
-            .get("appetite")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let safe = updated_frontmatter
-            .get("safety_class")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let mods = updated_frontmatter
-            .get("target_modules")
-            .map(|v| v.to_string());
-        (epic, s_num, app, safe, mods)
-    } else {
-        (None, None, None, None, None)
-    };
+    let (epic_id, seq, appetite, safety_class, target_modules) =
+        story_detail_fields(kind, &canonical_id, &updated_frontmatter);
 
     let record = EntityRecord {
         id: canonical_id.clone(),
@@ -1365,5 +1334,370 @@ pub fn apply_entity_update(options: &EntityUpdateOptions) -> Result<EntityUpdate
         old_version,
         new_version,
         updated_frontmatter,
+    })
+}
+
+/// Derives the `stories` table detail fields (`epic_id`, `seq`, `appetite`, `safety_class`,
+/// `target_modules`) from updated frontmatter, falling back to the id's own grammar for
+/// `epic_id`/`seq` when the frontmatter omits them. Returns all-`None` for non-`Story` kinds.
+/// Shared by `apply_entity_update` and `apply_relation_change` so both agree on story details.
+/// `(epic_id, seq, appetite, safety_class, target_modules)`.
+type StoryDetailFields = (
+    Option<String>,
+    Option<u32>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn story_detail_fields(
+    kind: EntityKind,
+    canonical_id: &str,
+    updated_frontmatter: &serde_json::Value,
+) -> StoryDetailFields {
+    if kind != EntityKind::Story {
+        return (None, None, None, None, None);
+    }
+
+    let epic = updated_frontmatter
+        .get("epic_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            if let Ok(Identifier::Story { epic, .. }) = canonical_id.parse::<Identifier>() {
+                Some(format!("E{}", epic))
+            } else {
+                None
+            }
+        });
+    let s_num = if let Ok(Identifier::Story { story, .. }) = canonical_id.parse::<Identifier>() {
+        Some(story)
+    } else {
+        None
+    };
+    let app = updated_frontmatter
+        .get("appetite")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let safe = updated_frontmatter
+        .get("safety_class")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let mods = updated_frontmatter
+        .get("target_modules")
+        .map(|v| v.to_string());
+    (epic, s_num, app, safe, mods)
+}
+
+/// Options for applying a relation change (`qdev relate` / `qdev unrelate`).
+#[derive(Debug, Clone)]
+pub struct RelationChangeOptions {
+    pub workspace_root: PathBuf,
+    pub storage: Option<StorageConfig>,
+    pub entity_kind: Option<EntityKind>,
+    /// The source entity's id (relations are declared in the source entity's frontmatter).
+    pub entity_id: String,
+    pub relation: String,
+    pub target_id: String,
+    /// `true` adds `target_id` to `relation`'s target list (`relate`); `false` removes it
+    /// (`unrelate`).
+    pub add: bool,
+    /// Optimistic concurrency control; only meaningful when `add` is `true` and a write occurs.
+    pub if_version: Option<u64>,
+    pub author: Author,
+}
+
+/// Result returned from applying a relation change.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RelationChangeResult {
+    pub id: String,
+    pub kind: EntityKind,
+    pub path: PathBuf,
+    pub rel_path: String,
+    pub old_version: u64,
+    pub new_version: u64,
+    /// `false` when `unrelate` targeted an entry that was already absent: an idempotent no-op,
+    /// nothing was written and `new_version == old_version`.
+    pub changed: bool,
+    /// The full `relations:` map after the change (or the unchanged map, for a no-op).
+    pub relations: serde_json::Value,
+}
+
+/// Patches a source entity's `relations:` frontmatter map to add or remove one
+/// `relation -> target_id` edge, merging into the existing map (other relations and other
+/// targets of the same relation are preserved) rather than replacing it wholesale. Reuses
+/// `apply_entity_update`'s primitives: file resolution, the advisory write lock, the line-based
+/// `patch_frontmatter` engine, schema validation, the atomic write, and the cache upsert.
+///
+/// Callers (e.g. `qdev relate`) are responsible for pre-write validation (kind-pair, dangling
+/// target, would-be cycle) — this function only merges and writes; hydration is the backstop
+/// that catches relations edited outside `qdev`.
+pub fn apply_relation_change(
+    options: &RelationChangeOptions,
+) -> Result<RelationChangeResult, QdevError> {
+    options.author.validate()?;
+
+    if options.relation.trim().is_empty() {
+        return Err(QdevError::usage_error("Relation name cannot be empty"));
+    }
+    if options.target_id.trim().is_empty() {
+        return Err(QdevError::usage_error("Target entity ID cannot be empty"));
+    }
+
+    // 1. Resolve entity file
+    let (kind, id, file_path) = resolve_entity_file(
+        &options.workspace_root,
+        options.entity_kind,
+        &options.entity_id,
+        options.storage.as_ref(),
+    )?;
+
+    let rel_path = file_path
+        .strip_prefix(&options.workspace_root)
+        .unwrap_or(&file_path)
+        .to_string_lossy()
+        .to_string();
+
+    // 2. Acquire advisory write lock on write.lock with 5s timeout
+    let cache_dir_rel = options
+        .storage
+        .as_ref()
+        .map(|s| s.cache_dir.as_str())
+        .unwrap_or(".qdev/cache");
+    let lock_path = options
+        .workspace_root
+        .join(cache_dir_rel)
+        .join("write.lock");
+    let _lock_guard = acquire_write_lock(&lock_path, Duration::from_millis(5000))?;
+
+    // 3. Read existing file content
+    let existing_content = fs::read_to_string(&file_path).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "io_error",
+            format!(
+                "Failed to read entity file '{}': {}",
+                file_path.display(),
+                e
+            ),
+        )
+    })?;
+
+    // Parse the raw frontmatter YAML directly (rather than through `schema::extract_frontmatter`,
+    // whose `serde_json::Value` uses an unordered/sorted `Map`) so the `relations:` map's key
+    // order — and the order of other relation kinds within it — survives the round trip. A parse
+    // failure is propagated rather than swallowed: unlike `apply_entity_update`, this function
+    // actively reconstructs and overwrites the whole `relations:` block from the parsed value, so
+    // silently defaulting to an empty map here would drop every existing relation on write.
+    let (frontmatter_str, _) =
+        crate::schema::extract_frontmatter_str(&existing_content).map_err(|e| {
+            QdevError::logical_failure(
+                "missing_frontmatter",
+                format!(
+                    "Failed to locate frontmatter in '{}': {}",
+                    file_path.display(),
+                    e
+                ),
+            )
+        })?;
+    let old_frontmatter_yaml: serde_yaml::Value =
+        serde_yaml::from_str(frontmatter_str).map_err(|e| {
+            QdevError::logical_failure(
+                "yaml_parse_error",
+                format!(
+                    "Failed to parse frontmatter YAML in '{}': {}",
+                    file_path.display(),
+                    e
+                ),
+            )
+        })?;
+
+    let old_version = old_frontmatter_yaml
+        .get("version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    // 4. Merge into the existing relations map: read it, mutate only the one relation's target
+    // list, and write the whole map back — never construct a fresh map that drops other keys.
+    let mut relations_obj: serde_yaml::Mapping = old_frontmatter_yaml
+        .get("relations")
+        .and_then(|v| v.as_mapping())
+        .cloned()
+        .unwrap_or_default();
+
+    let relation_key = serde_yaml::Value::String(options.relation.clone());
+    let mut targets: Vec<String> = relations_obj
+        .get(&relation_key)
+        .and_then(|v| v.as_sequence())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let changed = if options.add {
+        if targets.iter().any(|t| t == &options.target_id) {
+            false
+        } else {
+            targets.push(options.target_id.clone());
+            relations_obj.insert(
+                relation_key.clone(),
+                serde_yaml::Value::Sequence(
+                    targets
+                        .iter()
+                        .cloned()
+                        .map(serde_yaml::Value::String)
+                        .collect(),
+                ),
+            );
+            true
+        }
+    } else {
+        let before = targets.len();
+        targets.retain(|t| t != &options.target_id);
+        let did_change = targets.len() != before;
+        if did_change {
+            if targets.is_empty() {
+                relations_obj.remove(&relation_key);
+            } else {
+                relations_obj.insert(
+                    relation_key.clone(),
+                    serde_yaml::Value::Sequence(
+                        targets
+                            .iter()
+                            .cloned()
+                            .map(serde_yaml::Value::String)
+                            .collect(),
+                    ),
+                );
+            }
+        }
+        did_change
+    };
+
+    // Idempotent no-op (unrelate of an absent entry): nothing to write.
+    if !changed {
+        let relations_out = serde_json::to_value(&relations_obj).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "serialize_error",
+                format!("Failed to serialize relations map: {}", e),
+            )
+        })?;
+        return Ok(RelationChangeResult {
+            id,
+            kind,
+            path: file_path,
+            rel_path,
+            old_version,
+            new_version: old_version,
+            changed: false,
+            relations: relations_out,
+        });
+    }
+
+    // 5. Line-based frontmatter patch: the whole `relations:` block is replaced with the merged
+    // map computed above, which already carries every relation and target the file had before,
+    // in its original key order.
+    let relations_yaml = serde_yaml::Value::Mapping(relations_obj);
+
+    let patch_opts = FrontmatterPatchOptions {
+        status: None,
+        title: None,
+        custom_fields: vec![("relations".to_string(), relations_yaml)],
+        author: Some(options.author.clone()),
+        if_version: options.if_version,
+    };
+
+    let (patched_content, new_version) = patch_frontmatter(&existing_content, &patch_opts)?;
+
+    // 6. Validate updated frontmatter against JSON Schema
+    validate_frontmatter(kind, &patched_content).map_err(|errs| {
+        QdevError::logical_failure(
+            "schema_validation_failed",
+            format!("Updated frontmatter failed schema validation: {:?}", errs),
+        )
+        .with_details(serde_json::json!({
+            "validation_errors": errs,
+        }))
+    })?;
+
+    // 7. Atomic write via tempfile rename
+    write_file_atomic(&file_path, &patched_content)?;
+
+    // 8. Extract updated frontmatter for cache and result
+    let updated_frontmatter =
+        crate::schema::extract_frontmatter(&patched_content).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "parse_error",
+                format!("Failed to parse updated frontmatter: {}", e),
+            )
+        })?;
+
+    let canonical_id = updated_frontmatter
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or(id);
+
+    // 9. Upsert cache and mark dirty (mirrors apply_entity_update step 9)
+    let content_hash = sha256_digest(patched_content.as_bytes());
+    let title_val = updated_frontmatter
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let status_val = updated_frontmatter
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let owners_val = updated_frontmatter.get("owners").map(|v| v.to_string());
+
+    let c_author = updated_frontmatter
+        .get("created_by")
+        .and_then(|v| serde_json::from_value::<Author>(v.clone()).ok());
+    let u_author = Some(options.author.clone());
+
+    let (epic_id, seq, appetite, safety_class, target_modules) =
+        story_detail_fields(kind, &canonical_id, &updated_frontmatter);
+
+    let record = EntityRecord {
+        id: canonical_id.clone(),
+        kind,
+        title: title_val,
+        status: status_val,
+        owners: owners_val,
+        source_path: rel_path.clone(),
+        content_hash,
+        version: new_version,
+        created_by: c_author,
+        updated_by: u_author,
+        updated_at: current_iso8601(),
+        stale: false,
+        epic_id,
+        seq,
+        appetite,
+        safety_class,
+        target_modules,
+    };
+
+    let cache_db_path = options
+        .workspace_root
+        .join(cache_dir_rel)
+        .join("cache.sqlite");
+    upsert_cache_and_mark_dirty(&cache_db_path, &record)?;
+
+    let relations_out = updated_frontmatter
+        .get("relations")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+
+    Ok(RelationChangeResult {
+        id: canonical_id,
+        kind,
+        path: file_path,
+        rel_path,
+        old_version,
+        new_version,
+        changed: true,
+        relations: relations_out,
     })
 }

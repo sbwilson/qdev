@@ -1,4 +1,5 @@
 pub mod config;
+pub mod dag;
 pub mod envelope;
 pub mod errors;
 pub mod id;
@@ -16,6 +17,8 @@ pub use store::{
     SoupRecord, SprintAssignmentRecord, SprintRecord, SqliteStore, Store, StoryRecord,
     SweepSummary, SyncStateRecord, ALL_TABLE_NAMES, BUSY_TIMEOUT_MS, CACHE_USER_VERSION,
 };
+
+pub use dag::{allowed_kind_pairs, find_dependency_cycle, is_valid_kind_pair, would_create_cycle};
 
 pub use config::{
     find_workspace_root, load_config, merge_configs, resolve_git_email, validate_config_table,
@@ -48,9 +51,10 @@ pub use schema::{
 };
 pub use serde_yaml;
 pub use write::{
-    acquire_write_lock, apply_entity_update, patch_frontmatter, replace_markdown_section,
-    resolve_entity_file, sha256_digest, upsert_cache_and_mark_dirty, write_file_atomic,
-    AdvisoryLockGuard, Author, EntityUpdateOptions, EntityUpdateResult, FrontmatterPatchOptions,
+    acquire_write_lock, apply_entity_update, apply_relation_change, patch_frontmatter,
+    replace_markdown_section, resolve_entity_file, sha256_digest, upsert_cache_and_mark_dirty,
+    write_file_atomic, AdvisoryLockGuard, Author, EntityUpdateOptions, EntityUpdateResult,
+    FrontmatterPatchOptions, RelationChangeOptions, RelationChangeResult,
 };
 
 use serde::{Deserialize, Serialize};

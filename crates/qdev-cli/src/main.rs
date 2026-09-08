@@ -7,7 +7,7 @@ use std::process::ExitCode as StdExitCode;
 
 use clap::Parser;
 use qdev_core::{
-    serde_yaml, ExitCode, Interactivity, JsonEnvelope, JsonErrorEnvelope, QdevError,
+    serde_yaml, ExitCode, Interactivity, JsonEnvelope, JsonErrorEnvelope, QdevError, Store,
     CACHE_SCHEMA_VERSION,
 };
 use serde::Serialize;
@@ -216,6 +216,16 @@ fn run(raw_args: &[String]) -> ExitCode {
         Some(Commands::List(ref list_args)) => {
             handle_list(list_args, &annotated_config, &cli, &output, &current_dir)
         }
+        Some(Commands::Relate(ref relate_args)) => {
+            handle_relate(relate_args, &annotated_config, &cli, &output, &current_dir)
+        }
+        Some(Commands::Unrelate(ref unrelate_args)) => handle_unrelate(
+            unrelate_args,
+            &annotated_config,
+            &cli,
+            &output,
+            &current_dir,
+        ),
         Some(Commands::Init(_)) => unreachable!(),
         Some(Commands::Schema(_)) => unreachable!(),
     }
@@ -1137,6 +1147,303 @@ fn handle_list(
             let _ = output.emit_error(&err);
             return ExitCode::InfrastructureFailure;
         }
+    }
+
+    ExitCode::Success
+}
+
+/// Resolves the active author attribution the same way `qdev update` does: explicit CLI flags,
+/// then `QDEV_AUTHOR_TYPE`/`QDEV_AUTHOR_ID`, then config identity, then the git email.
+fn resolve_author(
+    author_type: Option<&str>,
+    author_id: Option<&str>,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    root: &std::path::Path,
+) -> Result<qdev_core::Author, QdevError> {
+    let resolved_type = if let Some(at) = author_type {
+        if at != "human" && at != "agent" {
+            return Err(QdevError::usage_error(format!(
+                "Invalid author type '{}', must be 'human' or 'agent'",
+                at
+            )));
+        }
+        at.to_string()
+    } else if let Ok(env_at) = std::env::var("QDEV_AUTHOR_TYPE") {
+        if env_at == "human" || env_at == "agent" {
+            env_at
+        } else {
+            "human".to_string()
+        }
+    } else {
+        "human".to_string()
+    };
+
+    let resolved_id = if let Some(aid) = author_id {
+        aid.to_string()
+    } else if let Ok(env_aid) = std::env::var("QDEV_AUTHOR_ID") {
+        env_aid
+    } else if !annotated_config.config.identity.developer_id.is_empty() {
+        annotated_config.config.identity.developer_id.clone()
+    } else {
+        qdev_core::resolve_git_email(Some(root)).unwrap_or_else(|| "developer".to_string())
+    };
+
+    Ok(qdev_core::Author::new(resolved_type, resolved_id))
+}
+
+#[derive(Serialize)]
+struct RelatePayload {
+    id: String,
+    relation: String,
+    target_id: String,
+    version: u64,
+    changed: bool,
+    relations: serde_json::Value,
+}
+
+fn handle_relate(
+    relate_args: &cli::RelateArgs,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+) -> ExitCode {
+    let root = qdev_core::find_workspace_root(current_dir);
+
+    if let Err(e) = ensure_query_workspace(&root) {
+        let _ = output.emit_error(&e);
+        return e.exit_code();
+    }
+
+    let store = match open_query_store(&root, annotated_config) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    // Refuse before any write: wrong kind pair, dangling target, or a would-be depends_on cycle.
+    let source = match store.get_entity(&relate_args.source_id) {
+        Ok(Some(e)) => e,
+        Ok(None) => {
+            let err = QdevError::usage_error(format!(
+                "Source entity '{}' not found",
+                relate_args.source_id
+            ));
+            let _ = output.emit_error(&err);
+            return ExitCode::UsageError;
+        }
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    match store.get_entity(&relate_args.target_id) {
+        Ok(Some(target)) => {
+            if !qdev_core::is_valid_kind_pair(&relate_args.relation, source.kind, target.kind) {
+                let err = QdevError::logical_failure(
+                    "invalid_relation_kind",
+                    format!(
+                        "Relation '{}' from {} ({}) to {} ({}) is not an allowed kind pair",
+                        relate_args.relation,
+                        relate_args.source_id,
+                        source.kind,
+                        relate_args.target_id,
+                        target.kind
+                    ),
+                );
+                let _ = output.emit_error(&err);
+                return err.exit_code();
+            }
+        }
+        Ok(None) => {
+            let err = QdevError::logical_failure(
+                "dangling_relation",
+                format!("Target entity '{}' does not exist", relate_args.target_id),
+            );
+            let _ = output.emit_error(&err);
+            return err.exit_code();
+        }
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    }
+
+    if relate_args.relation == "depends_on" {
+        let existing_edges = match store.list_relations() {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|r| r.relation == "depends_on")
+                .map(|r| (r.source_id, r.target_id))
+                .collect::<Vec<_>>(),
+            Err(e) => {
+                let _ = output.emit_error(&e);
+                return e.exit_code();
+            }
+        };
+        if let Some(cycle) = qdev_core::would_create_cycle(
+            &existing_edges,
+            &relate_args.source_id,
+            &relate_args.target_id,
+        ) {
+            let err = QdevError::logical_failure(
+                "dependency_cycle",
+                format!(
+                    "Adding depends_on from '{}' to '{}' would create a cycle: {}",
+                    relate_args.source_id,
+                    relate_args.target_id,
+                    cycle.join(" -> ")
+                ),
+            );
+            let _ = output.emit_error(&err);
+            return err.exit_code();
+        }
+    }
+
+    let author = match resolve_author(
+        relate_args.author_type.as_deref(),
+        relate_args.author_id.as_deref(),
+        annotated_config,
+        &root,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let opts = qdev_core::RelationChangeOptions {
+        workspace_root: root,
+        storage: Some(annotated_config.config.storage.clone()),
+        entity_kind: None,
+        entity_id: relate_args.source_id.clone(),
+        relation: relate_args.relation.clone(),
+        target_id: relate_args.target_id.clone(),
+        add: true,
+        if_version: relate_args.if_version,
+        author,
+    };
+
+    let res = match qdev_core::apply_relation_change(&opts) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    if cli.json {
+        let envelope = JsonEnvelope::new(RelatePayload {
+            id: res.id.clone(),
+            relation: relate_args.relation.clone(),
+            target_id: relate_args.target_id.clone(),
+            version: res.new_version,
+            changed: res.changed,
+            relations: res.relations,
+        });
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit relate envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else if res.changed {
+        println!(
+            "Related {} --[{}]--> {} (version {}) at {}",
+            res.id, relate_args.relation, relate_args.target_id, res.new_version, res.rel_path
+        );
+    } else {
+        println!(
+            "No-op: {} already has a '{}' relation to '{}'",
+            res.id, relate_args.relation, relate_args.target_id
+        );
+    }
+
+    ExitCode::Success
+}
+
+fn handle_unrelate(
+    unrelate_args: &cli::UnrelateArgs,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+) -> ExitCode {
+    let root = qdev_core::find_workspace_root(current_dir);
+
+    if let Err(e) = ensure_query_workspace(&root) {
+        let _ = output.emit_error(&e);
+        return e.exit_code();
+    }
+
+    let author = match resolve_author(
+        unrelate_args.author_type.as_deref(),
+        unrelate_args.author_id.as_deref(),
+        annotated_config,
+        &root,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let opts = qdev_core::RelationChangeOptions {
+        workspace_root: root,
+        storage: Some(annotated_config.config.storage.clone()),
+        entity_kind: None,
+        entity_id: unrelate_args.source_id.clone(),
+        relation: unrelate_args.relation.clone(),
+        target_id: unrelate_args.target_id.clone(),
+        add: false,
+        if_version: None,
+        author,
+    };
+
+    // Unrelating an absent entry is an idempotent no-op (exit 0), matching `relate`/`unrelate`'s
+    // I/O contract; apply_relation_change already returns `changed: false` without writing.
+    let res = match qdev_core::apply_relation_change(&opts) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    if cli.json {
+        let envelope = JsonEnvelope::new(RelatePayload {
+            id: res.id.clone(),
+            relation: unrelate_args.relation.clone(),
+            target_id: unrelate_args.target_id.clone(),
+            version: res.new_version,
+            changed: res.changed,
+            relations: res.relations,
+        });
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit unrelate envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else if res.changed {
+        println!(
+            "Unrelated {} --[{}]--> {} (version {}) at {}",
+            res.id, unrelate_args.relation, unrelate_args.target_id, res.new_version, res.rel_path
+        );
+    } else {
+        println!(
+            "No-op: {} has no '{}' relation to '{}'",
+            res.id, unrelate_args.relation, unrelate_args.target_id
+        );
     }
 
     ExitCode::Success

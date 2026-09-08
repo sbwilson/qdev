@@ -42,6 +42,55 @@ pub enum Commands {
     Get(GetArgs),
     /// List and filter entities of one kind
     List(ListArgs),
+    /// Add a relation from a source entity to a target entity
+    Relate(RelateArgs),
+    /// Remove a relation from a source entity to a target entity
+    Unrelate(UnrelateArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct RelateArgs {
+    /// Source entity identifier (relations live in the source entity's frontmatter), e.g. E12S4
+    pub source_id: String,
+
+    /// Relation name (e.g. depends_on, extends, supersedes, traces_to, mitigates, closes_dw,
+    /// governed_by)
+    pub relation: String,
+
+    /// Target entity identifier, e.g. E12S1
+    pub target_id: String,
+
+    /// Optimistic concurrency control: expected existing source entity version
+    #[arg(long = "if-version")]
+    pub if_version: Option<u64>,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct UnrelateArgs {
+    /// Source entity identifier (relations live in the source entity's frontmatter), e.g. E12S4
+    pub source_id: String,
+
+    /// Relation name (e.g. depends_on)
+    pub relation: String,
+
+    /// Target entity identifier, e.g. E12S1
+    pub target_id: String,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
