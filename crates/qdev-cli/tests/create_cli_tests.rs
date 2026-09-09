@@ -310,7 +310,10 @@ fn test_create_story_file_conflict() {
     let stories_dir = root.join("docs/specs/stories");
     fs::create_dir_all(&stories_dir).unwrap();
     // Create E12S1.md as a directory so allocate_next_story_id skips it (not a file),
-    // allocates E12S1, but create_new(true) encounters AlreadyExists and returns Conflict (code 5)
+    // allocates E12S1, but the exclusive create finds the path occupied and returns Conflict
+    // (code 5). Unix reports that as AlreadyExists; Windows fails an exclusive create over a
+    // directory with ERROR_ACCESS_DENIED, so the handler confirms occupancy on the filesystem
+    // rather than trusting the error kind — asserted here so the platform split stays pinned.
     fs::create_dir_all(stories_dir.join("E12S1.md")).unwrap();
 
     let mut cmd = Command::cargo_bin("qdev").unwrap();
@@ -318,7 +321,9 @@ fn test_create_story_file_conflict() {
         .args(["create", "story", "E12"])
         .assert()
         .failure()
-        .code(5);
+        .code(5)
+        .stderr(predicate::str::contains("file_exists"))
+        .stderr(predicate::str::contains("already exists"));
 }
 
 /// A configured `[storage]` layout must be honoured everywhere, not just by the readers.

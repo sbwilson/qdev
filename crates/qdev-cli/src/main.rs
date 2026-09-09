@@ -857,10 +857,15 @@ fn handle_create_story(
         .open(&abs_path)
     {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+        // Something already occupies the path. `create_new` reports that as `AlreadyExists` on
+        // Unix whatever the existing entry is, but Windows fails an exclusive create over a
+        // *directory* with ERROR_ACCESS_DENIED, which maps to `PermissionDenied` — so the
+        // occupancy is confirmed against the filesystem rather than trusted to the error kind.
+        // Either way the answer is the same conflict, not an infrastructure failure.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists || abs_path.exists() => {
             let err = QdevError::conflict(
                 "file_exists",
-                format!("Story file already exists: {}", abs_path.display()),
+                format!("Story path already exists: {}", abs_path.display()),
             );
             let _ = output.emit_error(&err);
             return ExitCode::Conflict;
