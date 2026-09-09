@@ -229,6 +229,14 @@ fn run(raw_args: &[String]) -> ExitCode {
         Some(Commands::Graph(ref graph_args)) => {
             handle_graph(graph_args, &annotated_config, &cli, &output, &current_dir)
         }
+        Some(Commands::Validate(ref validate_args)) => handle_validate(
+            validate_args,
+            &annotated_config,
+            &cli,
+            &output,
+            &current_dir,
+            interactivity,
+        ),
         Some(Commands::Init(_)) => unreachable!(),
         Some(Commands::Schema(_)) => unreachable!(),
     }
@@ -1718,6 +1726,559 @@ fn render_list_text(rows: &[qdev_core::ListEntryProjection]) -> String {
     }
 
     out
+}
+
+#[derive(Serialize)]
+struct ValidatePayload {
+    findings: Vec<qdev_core::FindingRecord>,
+}
+
+/// Renders findings as a flat text table, one line per finding, sorted by path then code, so
+/// output is deterministic across runs against the same cache state.
+fn render_validate_text(findings: &[qdev_core::FindingRecord]) -> String {
+    if findings.is_empty() {
+        return "No findings.\n".to_string();
+    }
+    let mut out = String::new();
+    for f in findings {
+        out.push_str(&format!(
+            "[{}] {} {}{}\n",
+            f.severity,
+            f.code,
+            f.path,
+            f.message
+                .as_deref()
+                .map(|m| format!(" -- {}", m.replace(['\n', '\r'], " ")))
+                .unwrap_or_default()
+        ));
+    }
+    out
+}
+
+fn sort_findings(findings: &mut [qdev_core::FindingRecord]) {
+    findings.sort_by(|a, b| {
+        (a.path.as_str(), a.code.as_str()).cmp(&(b.path.as_str(), b.code.as_str()))
+    });
+}
+
+fn handle_validate(
+    validate_args: &cli::ValidateArgs,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+    interactivity: Interactivity,
+) -> ExitCode {
+    let root = qdev_core::find_workspace_root(current_dir);
+
+    if let Err(e) = ensure_query_workspace(&root) {
+        let _ = output.emit_error(&e);
+        return e.exit_code();
+    }
+
+    if validate_args.fix_ids {
+        if validate_args.changed {
+            let err = QdevError::usage_error(
+                "'--changed' is not supported with '--fix-ids': the guided renumber always \
+                 operates workspace-wide",
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::UsageError;
+        }
+        return handle_fix_ids(
+            &root,
+            annotated_config,
+            interactivity,
+            validate_args.yes,
+            cli,
+            output,
+        );
+    }
+
+    let store = match open_query_store(&root, annotated_config) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let mut findings = match qdev_core::run_validation(&store, &root, &annotated_config.config) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    if validate_args.changed {
+        let changed_paths = match qdev_core::git_changed_files(
+            &root,
+            &annotated_config.config.git.integration_branch,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = output.emit_error(&e);
+                return e.exit_code();
+            }
+        };
+        findings = qdev_core::filter_by_changed(findings, &changed_paths);
+    }
+
+    sort_findings(&mut findings);
+
+    let exit_code = if qdev_core::has_error_finding(&findings) {
+        ExitCode::LogicalFailure
+    } else {
+        ExitCode::Success
+    };
+
+    if cli.json {
+        let envelope = JsonEnvelope::new(ValidatePayload { findings });
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit validate envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else {
+        let text = render_validate_text(&findings);
+        if let Err(e) = output.emit_text(&text) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit validate output: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    }
+
+    exit_code
+}
+
+/// Guided duplicate-planning-id renumber for `qdev validate --fix-ids`. Gated exactly like
+/// `handle_init`'s non-interactive flag requirements: refuses with no writes unless the terminal
+/// is interactive or `--yes` was passed.
+fn handle_fix_ids(
+    root: &std::path::Path,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    interactivity: Interactivity,
+    yes: bool,
+    cli: &Cli,
+    output: &OutputEmitter,
+) -> ExitCode {
+    if !interactivity.is_interactive() && !yes {
+        let err = QdevError::policy_refusal(
+            "needs_confirmation",
+            "'--fix-ids' requires an interactive terminal or '--yes'; refusing without writing",
+        )
+        .with_details(serde_json::json!({ "flag": "--yes" }));
+        let _ = output.emit_error(&err);
+        return ExitCode::PolicyRefusal;
+    }
+
+    let storage = &annotated_config.config.storage;
+    let scan = match qdev_core::scan_duplicate_planning_ids(root, &storage.specs_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    if scan.groups.is_empty() {
+        if cli.json {
+            let envelope = JsonEnvelope::new(FixIdsPayload {
+                renumbered: Vec::new(),
+                skipped: Vec::new(),
+            });
+            let _ = output.emit_envelope(&envelope);
+        } else {
+            println!("No duplicate planning ids found.");
+        }
+        return ExitCode::Success;
+    }
+
+    let author = match resolve_author(None, None, annotated_config, root) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let mut used_ids = scan.all_ids.clone();
+    let mut renumbered: Vec<FixIdsEntry> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+
+    for (old_id, paths) in &scan.groups {
+        // The first (lexicographically sorted) path keeps the id; every other file declaring it
+        // is offered a renumber.
+        for path in paths.iter().skip(1) {
+            let old_identifier: qdev_core::Identifier = match old_id.parse() {
+                Ok(id) => id,
+                Err(_) => {
+                    skipped.push(path.clone());
+                    continue;
+                }
+            };
+
+            let new_identifier = match qdev_core::next_available_id(&old_identifier, &used_ids) {
+                Ok(id) => id,
+                Err(e) => {
+                    let _ = output.emit_error(&e);
+                    skipped.push(path.clone());
+                    continue;
+                }
+            };
+            let new_id = new_identifier.to_string();
+
+            if interactivity.is_interactive() && !yes {
+                let prompt = format!(
+                    "'{}' duplicates id '{}'. Renumber it to '{}'? [y/N]: ",
+                    path, old_id, new_id
+                );
+                match prompt_input(&prompt) {
+                    Ok(resp)
+                        if resp.eq_ignore_ascii_case("y") || resp.eq_ignore_ascii_case("yes") => {}
+                    Ok(_) => {
+                        skipped.push(path.clone());
+                        continue;
+                    }
+                    Err(e) => {
+                        let err = QdevError::infrastructure_failure(
+                            "io_error",
+                            format!("Failed to read renumber confirmation: {}", e),
+                        );
+                        let _ = output.emit_error(&err);
+                        return ExitCode::InfrastructureFailure;
+                    }
+                }
+            }
+
+            match renumber_duplicate_file(root, annotated_config, path, &new_id, &author) {
+                Ok(()) => {
+                    used_ids.insert(new_id.clone());
+                    if let Err(e) =
+                        rewrite_relations_to(root, annotated_config, old_id, &new_id, &author)
+                    {
+                        let _ = output.emit_error(&e);
+                        return e.exit_code();
+                    }
+                    let citations_rewritten = match rewrite_citations_under_modules(
+                        root,
+                        &annotated_config.config,
+                        old_id,
+                        &new_id,
+                    ) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            let _ = output.emit_error(&e);
+                            return e.exit_code();
+                        }
+                    };
+                    renumbered.push(FixIdsEntry {
+                        path: path.clone(),
+                        old_id: old_id.clone(),
+                        new_id: new_id.clone(),
+                        citations_rewritten,
+                    });
+                }
+                Err(e) => {
+                    let _ = output.emit_error(&e);
+                    return e.exit_code();
+                }
+            }
+        }
+    }
+
+    if cli.json {
+        let envelope = JsonEnvelope::new(FixIdsPayload {
+            renumbered,
+            skipped,
+        });
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit fix-ids envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else {
+        for entry in &renumbered {
+            println!(
+                "Renumbered {} ({} -> {}); {} citation(s) rewritten",
+                entry.path, entry.old_id, entry.new_id, entry.citations_rewritten
+            );
+        }
+        for path in &skipped {
+            println!("Skipped {}", path);
+        }
+    }
+
+    // Re-check the full validation surface (not just remaining duplicates), per the shared
+    // exit-code rule: exit 1 iff any error-severity finding survives anywhere.
+    let store = match open_query_store(root, annotated_config) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+    match qdev_core::run_validation(&store, root, &annotated_config.config) {
+        Ok(findings) if !qdev_core::has_error_finding(&findings) => ExitCode::Success,
+        Ok(_) => ExitCode::LogicalFailure,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            e.exit_code()
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct FixIdsEntry {
+    path: String,
+    old_id: String,
+    new_id: String,
+    citations_rewritten: usize,
+}
+
+#[derive(Serialize)]
+struct FixIdsPayload {
+    renumbered: Vec<FixIdsEntry>,
+    skipped: Vec<String>,
+}
+
+/// Rewrites one duplicate file's frontmatter `id`, bumping `version`/`updated_by` via the same
+/// line-based patch engine `qdev update` uses, then validates and atomically writes it, and
+/// upserts the cache the same way `apply_entity_update` does.
+fn renumber_duplicate_file(
+    root: &std::path::Path,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    rel_path: &str,
+    new_id: &str,
+    author: &qdev_core::Author,
+) -> Result<(), QdevError> {
+    let abs_path = root.join(rel_path);
+    let existing = std::fs::read_to_string(&abs_path).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "io_error",
+            format!("Failed to read '{}': {}", abs_path.display(), e),
+        )
+    })?;
+
+    // Reuse hydration's own kind-inference (frontmatter `kind:` -> directory convention ->
+    // identifier grammar -> `Story` default) so `--fix-ids` never diverges from how hydration
+    // would classify the same file.
+    let existing_frontmatter =
+        qdev_core::extract_frontmatter(&existing).unwrap_or(serde_json::Value::Null);
+    let existing_id = existing_frontmatter
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let kind = qdev_core::determine_entity_kind(&abs_path, existing_id, &existing_frontmatter);
+
+    let id_rewritten = qdev_core::rewrite_frontmatter_id(&existing, new_id)?;
+
+    let patch_opts = qdev_core::FrontmatterPatchOptions {
+        status: None,
+        title: None,
+        custom_fields: Vec::new(),
+        author: Some(author.clone()),
+        if_version: None,
+    };
+    let (patched, new_version) = qdev_core::patch_frontmatter(&id_rewritten, &patch_opts)?;
+
+    qdev_core::validate_frontmatter(kind, &patched).map_err(|errs| {
+        QdevError::logical_failure(
+            "schema_validation_failed",
+            format!(
+                "Renumbered frontmatter for '{}' failed schema validation: {:?}",
+                rel_path, errs
+            ),
+        )
+    })?;
+
+    qdev_core::write_file_atomic(&abs_path, &patched)?;
+
+    let updated_frontmatter = qdev_core::extract_frontmatter(&patched).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "parse_error",
+            format!("Failed to parse renumbered frontmatter: {}", e),
+        )
+    })?;
+
+    let content_hash = qdev_core::sha256_digest(patched.as_bytes());
+    let title_val = updated_frontmatter
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let status_val = updated_frontmatter
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let owners_val = updated_frontmatter.get("owners").map(|v| v.to_string());
+    let c_author = updated_frontmatter
+        .get("created_by")
+        .and_then(|v| serde_json::from_value::<qdev_core::Author>(v.clone()).ok());
+
+    let epic_id = if kind == qdev_core::EntityKind::Story {
+        match new_id.parse::<qdev_core::Identifier>() {
+            Ok(qdev_core::Identifier::Story { epic, .. }) => Some(format!("E{}", epic)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let seq = if kind == qdev_core::EntityKind::Story {
+        match new_id.parse::<qdev_core::Identifier>() {
+            Ok(qdev_core::Identifier::Story { story, .. }) => Some(story),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let appetite = updated_frontmatter
+        .get("appetite")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let safety_class = updated_frontmatter
+        .get("safety_class")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let target_modules = updated_frontmatter
+        .get("target_modules")
+        .map(|v| v.to_string());
+
+    let record = qdev_core::EntityRecord {
+        id: new_id.to_string(),
+        kind,
+        title: title_val,
+        status: status_val,
+        owners: owners_val,
+        source_path: rel_path.to_string(),
+        content_hash,
+        version: new_version,
+        created_by: c_author,
+        updated_by: Some(author.clone()),
+        updated_at: qdev_core::current_iso8601(),
+        stale: false,
+        epic_id,
+        seq,
+        appetite,
+        safety_class,
+        target_modules,
+    };
+
+    let cache_db_path = root
+        .join(&annotated_config.config.storage.cache_dir)
+        .join("cache.sqlite");
+    qdev_core::upsert_cache_and_mark_dirty(&cache_db_path, &record)
+}
+
+/// Rewrites every relation in the whole workspace that targets `old_id` to target `new_id`
+/// instead, via `apply_relation_change` (`qdev relate`/`qdev unrelate`'s own write path): an
+/// unrelate-from-old followed by a relate-to-new for each `(source, relation)` pair found via
+/// `list_relations`. The renumbered entity's own outgoing relations need no separate rewrite:
+/// its `source_id` is derived from its own frontmatter `id` at the next hydration sweep.
+fn rewrite_relations_to(
+    root: &std::path::Path,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    old_id: &str,
+    new_id: &str,
+    author: &qdev_core::Author,
+) -> Result<(), QdevError> {
+    let store = open_query_store(root, annotated_config)?;
+    let affected: Vec<qdev_core::RelationRecord> = store
+        .list_relations()?
+        .into_iter()
+        .filter(|r| r.target_id == old_id)
+        .collect();
+
+    for rel in affected {
+        // Add the new edge before removing the old one: if the second call fails, the source
+        // entity is left with an extra (safe, visible) edge instead of silently losing the
+        // relation entirely.
+        let add_opts = qdev_core::RelationChangeOptions {
+            workspace_root: root.to_path_buf(),
+            storage: Some(annotated_config.config.storage.clone()),
+            entity_kind: None,
+            entity_id: rel.source_id.clone(),
+            relation: rel.relation.clone(),
+            target_id: new_id.to_string(),
+            add: true,
+            if_version: None,
+            author: author.clone(),
+        };
+        qdev_core::apply_relation_change(&add_opts)?;
+
+        let remove_opts = qdev_core::RelationChangeOptions {
+            workspace_root: root.to_path_buf(),
+            storage: Some(annotated_config.config.storage.clone()),
+            entity_kind: None,
+            entity_id: rel.source_id.clone(),
+            relation: rel.relation.clone(),
+            target_id: old_id.to_string(),
+            add: false,
+            if_version: None,
+            author: author.clone(),
+        };
+        qdev_core::apply_relation_change(&remove_opts)?;
+    }
+
+    Ok(())
+}
+
+/// Rewrites bracket citations of `old_id` to `new_id` under the union of `config.modules[].paths`
+/// (skipped entirely when no `[[modules]]` are configured), using `config.hygiene.citation_pattern`
+/// (or the built-in default). Returns the number of citation occurrences rewritten.
+fn rewrite_citations_under_modules(
+    root: &std::path::Path,
+    config: &qdev_core::Config,
+    old_id: &str,
+    new_id: &str,
+) -> Result<usize, QdevError> {
+    let patterns = qdev_core::module_path_patterns(config);
+    if patterns.is_empty() {
+        return Ok(0);
+    }
+
+    let pattern_str = config
+        .hygiene
+        .citation_pattern
+        .clone()
+        .unwrap_or_else(|| qdev_core::DEFAULT_CITATION_PATTERN.to_string());
+    let regex = qdev_core::regex::Regex::new(&pattern_str).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "invalid_citation_pattern",
+            format!("Invalid hygiene.citation_pattern: {}", e),
+        )
+    })?;
+
+    let mut all_files = Vec::new();
+    qdev_core::collect_workspace_files(root, root, &mut all_files);
+
+    let mut total_rewritten = 0usize;
+    for rel_path in all_files {
+        if !patterns.iter().any(|p| qdev_core::glob_match(p, &rel_path)) {
+            continue;
+        }
+        let abs_path = root.join(&rel_path);
+        let content = match std::fs::read_to_string(&abs_path) {
+            Ok(c) => c,
+            Err(_) => continue, // binary or unreadable file; nothing to rewrite
+        };
+        let (rewritten, count) = qdev_core::rewrite_citations(&content, &regex, old_id, new_id);
+        if count > 0 {
+            qdev_core::write_file_atomic(&abs_path, &rewritten)?;
+            total_rewritten += count;
+        }
+    }
+
+    Ok(total_rewritten)
 }
 
 /// Truncates `s` to at most `max` characters, appending an ellipsis when truncated.

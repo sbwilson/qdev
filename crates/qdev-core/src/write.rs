@@ -771,7 +771,7 @@ pub fn replace_markdown_section(
 /// In-memory representation of an entity cache row to be upserted.
 pub use crate::store::EntityRecord;
 
-fn current_iso8601() -> String {
+pub fn current_iso8601() -> String {
     let now = SystemTime::now();
     let duration = now.duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = duration.as_secs();

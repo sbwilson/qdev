@@ -10,9 +10,9 @@ use crate::schema::EntityKind;
 use crate::write::Author;
 
 pub use sqlite::{
-    create_schema_v2, drop_all_user_tables, ensure_cache, inspect_cache_schema, CacheSchemaStatus,
-    SqliteStore, ALL_TABLE_NAMES, BUSY_TIMEOUT_MS, CACHE_SCHEMA_VERSION, CACHE_USER_VERSION,
-    SCHEMA_V2_DDL,
+    create_schema_v2, determine_entity_kind, drop_all_user_tables, ensure_cache,
+    inspect_cache_schema, CacheSchemaStatus, SqliteStore, ALL_TABLE_NAMES, BUSY_TIMEOUT_MS,
+    CACHE_SCHEMA_VERSION, CACHE_USER_VERSION, SCHEMA_V2_DDL,
 };
 
 /// Common entity record representing rows in the `entities` table.

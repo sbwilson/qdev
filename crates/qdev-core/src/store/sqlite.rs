@@ -4887,7 +4887,7 @@ ON CONFLICT(id) DO UPDATE SET
     Ok(())
 }
 
-fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) {
+pub(crate) fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) {
     if !dir.exists() || !dir.is_dir() {
         return;
     }
@@ -4927,7 +4927,11 @@ fn collect_files_with_ext(dir: &Path, extension: &str, files: &mut Vec<PathBuf>)
     }
 }
 
-fn determine_entity_kind(
+/// Infers an entity's kind from its `kind:` frontmatter field, its file path's directory
+/// convention, or (last resort) its identifier's own grammar — defaulting to `Story`. This is
+/// the single source of truth for kind inference; hydration and `qdev validate --fix-ids` both
+/// call it so a file's inferred kind never diverges between the two.
+pub fn determine_entity_kind(
     file_path: &Path,
     id: &str,
     frontmatter: &serde_json::Value,

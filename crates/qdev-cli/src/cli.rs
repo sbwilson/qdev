@@ -48,6 +48,24 @@ pub enum Commands {
     Unrelate(UnrelateArgs),
     /// Render the story dependency graph
     Graph(GraphArgs),
+    /// Surface cached and freshly computed integrity findings
+    Validate(ValidateArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ValidateArgs {
+    /// Restrict findings to those touching files changed since the merge-base with
+    /// `config.git.integration_branch`
+    #[arg(long = "changed")]
+    pub changed: bool,
+
+    /// Offer a guided renumber for duplicate planning ids
+    #[arg(long = "fix-ids")]
+    pub fix_ids: bool,
+
+    /// Automatically confirm the `--fix-ids` renumber in non-interactive mode
+    #[arg(short = 'y', long = "yes")]
+    pub yes: bool,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]

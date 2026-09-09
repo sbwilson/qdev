@@ -8,14 +8,16 @@ pub mod interactivity;
 pub mod query;
 pub mod schema;
 pub mod store;
+pub mod validate;
 pub mod write;
 
 pub use store::{
-    create_schema_v2, drop_all_user_tables, ensure_cache, inspect_cache_schema, CacheSchemaStatus,
-    ConstraintRecord, DecisionRecord, DeferredWorkRecord, DirtyEntityRecord, EntityFilter,
-    EntityRecord, FindingRecord, GateRecord, GateRunRecord, RelationRecord, ScratchpadRecord,
-    SoupRecord, SprintAssignmentRecord, SprintRecord, SqliteStore, Store, StoryRecord,
-    SweepSummary, SyncStateRecord, ALL_TABLE_NAMES, BUSY_TIMEOUT_MS, CACHE_USER_VERSION,
+    create_schema_v2, determine_entity_kind, drop_all_user_tables, ensure_cache,
+    inspect_cache_schema, CacheSchemaStatus, ConstraintRecord, DecisionRecord, DeferredWorkRecord,
+    DirtyEntityRecord, EntityFilter, EntityRecord, FindingRecord, GateRecord, GateRunRecord,
+    RelationRecord, ScratchpadRecord, SoupRecord, SprintAssignmentRecord, SprintRecord,
+    SqliteStore, Store, StoryRecord, SweepSummary, SyncStateRecord, ALL_TABLE_NAMES,
+    BUSY_TIMEOUT_MS, CACHE_USER_VERSION,
 };
 
 pub use dag::{allowed_kind_pairs, find_dependency_cycle, is_valid_kind_pair, would_create_cycle};
@@ -43,6 +45,7 @@ pub use query::{
     query_entity, query_list, ConstraintProjection, EntityProjection, GetResult,
     ListEntryProjection, ListQueryOptions, QueryOptions, ScratchEntryProjection,
 };
+pub use regex;
 pub use rusqlite;
 pub use schema::{
     extract_frontmatter, extract_frontmatter_str, validate_frontmatter,
@@ -50,11 +53,18 @@ pub use schema::{
     SchemaError, ValidationError,
 };
 pub use serde_yaml;
+pub use validate::{
+    collect_workspace_files, filter_by_changed, find_duplicate_planning_ids,
+    find_dw_missing_rationale, find_orphan_deferred_work, find_unregistered_target_modules,
+    git_changed_files, glob_match, has_error_finding, module_path_patterns, next_available_id,
+    rewrite_citations, rewrite_frontmatter_id, run_validation, scan_duplicate_planning_ids,
+    DuplicateIdScan,
+};
 pub use write::{
-    acquire_write_lock, apply_entity_update, apply_relation_change, patch_frontmatter,
-    replace_markdown_section, resolve_entity_file, sha256_digest, upsert_cache_and_mark_dirty,
-    write_file_atomic, AdvisoryLockGuard, Author, EntityUpdateOptions, EntityUpdateResult,
-    FrontmatterPatchOptions, RelationChangeOptions, RelationChangeResult,
+    acquire_write_lock, apply_entity_update, apply_relation_change, current_iso8601,
+    patch_frontmatter, replace_markdown_section, resolve_entity_file, sha256_digest,
+    upsert_cache_and_mark_dirty, write_file_atomic, AdvisoryLockGuard, Author, EntityUpdateOptions,
+    EntityUpdateResult, FrontmatterPatchOptions, RelationChangeOptions, RelationChangeResult,
 };
 
 use serde::{Deserialize, Serialize};
