@@ -218,8 +218,12 @@ pub struct UpdateArgs {
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
 pub struct SchemaArgs {
-    /// Entity schema kind (e.g. story, prd, epic, dw)
+    /// Entity schema kind (e.g. story, prd, epic, dw), or the literal "payload" to print a CLI
+    /// output-payload schema instead (see `name`)
     pub kind: String,
+
+    /// Payload name, only used when `kind` is "payload" (e.g. story, error, validate)
+    pub name: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]

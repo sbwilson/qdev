@@ -1,0 +1,144 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Story Payload Schema",
+  "description": "Output shape of `qdev get <kind> <id> --json` for an entity-id target (e.g. `qdev get story E12S4`). Does not cover the constraint-row form returned when the id names a constraint (e.g. `E12S4/NG-1`). Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "kind",
+    "blocked",
+    "owners",
+    "constraints",
+    "relations",
+    "version",
+    "stale"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "prd",
+        "requirement",
+        "epic",
+        "story",
+        "adr",
+        "hazard",
+        "sprint",
+        "release",
+        "dw",
+        "decision",
+        "scratchpad",
+        "soup",
+        "evidence"
+      ]
+    },
+    "epic_id": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "blocked": {
+      "type": "boolean",
+      "description": "Stories only: true if any depends_on target's cached status isn't done. Always false for kinds that never carry a depends_on relation."
+    },
+    "appetite": {
+      "type": "string"
+    },
+    "safety_class": {
+      "type": "string"
+    },
+    "owners": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "target_modules": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "text"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "inherited_from": {
+            "type": "string",
+            "description": "Set to the owning epic's id when this constraint was inherited rather than declared directly on the queried entity."
+          }
+        }
+      }
+    },
+    "relations": {
+      "type": "object",
+      "description": "Relation name -> ordered target ids.",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "stale": {
+      "type": "boolean",
+      "description": "True when the cached row is stale: the source file currently fails to parse and this is its last-known-good hydrated state."
+    },
+    "scratch": {
+      "type": "array",
+      "description": "Present only when --expand scratch is requested.",
+      "items": {
+        "type": "object",
+        "required": ["seq", "at"],
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "at": {
+            "type": "string"
+          },
+          "author_type": {
+            "type": "string"
+          },
+          "author_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

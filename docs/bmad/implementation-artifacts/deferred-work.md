@@ -26,3 +26,15 @@ Items deferred from reviews and implementation, kept out of the story they surfa
 - source_spec: `docs/bmad/implementation-artifacts/spec-1-12-qdev-sync-cache-diagnostics.md`
   summary: A plain `qdev sync` (no `--rebuild`) almost always reports `parsed=0`/everything `unchanged` in a real CLI invocation, because the boot-time `ensure_cache` sweep (spec-1-6/1-7) already runs and absorbs any on-disk changes before `handle_sync`'s own explicit `sweep_workspace` call gets a chance to see them.
   evidence: `crates/qdev-cli/src/main.rs` runs `qdev_core::ensure_cache(...)` unconditionally before command dispatch and discards its `SweepSummary`; `handle_sync` then calls `store.sweep_workspace(...)` again in the same process and finds nothing left outstanding. Verified end-to-end by `crates/qdev-cli/tests/sync_cli_tests.rs::test_sync_settles_to_all_unchanged_once_the_boot_time_sweep_has_run`. This is pre-existing architecture (not something spec-1-12 was scoped to change) but undermines `qdev sync`'s main diagnostic purpose ("see what just changed"); a real fix needs `ensure_cache` to surface its sweep summary for `handle_sync` to report directly, or to skip the boot sweep specifically for the `Sync` command.
+
+## Deferred from: spec-1-13-qdev-schema scope (2026-09-09)
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-1-13-qdev-schema.md`
+  summary: Hand-author and ship `qdev schema payload context` once `qdev context` (Epic 2/3 scope) has a live command to verify the schema against.
+  evidence: Spec 1.13 intentionally scoped payload schemas to `story`, `error`, and `validate` — the three payload kinds with a live command today. `context` has no command yet, so there is no real output to round-trip test against; hand-authoring it now would be unverifiable.
+- source_spec: `docs/bmad/implementation-artifacts/spec-1-13-qdev-schema.md`
+  summary: Hand-author and ship `qdev schema payload next` once `qdev next` (Epic 2/3 scope) has a live command to verify the schema against.
+  evidence: Same rationale as `context` above — `qdev next` is not implemented yet, so its payload schema cannot be round-trip verified and was deferred rather than hand-authored blind.
+- source_spec: `docs/bmad/implementation-artifacts/spec-1-13-qdev-schema.md`
+  summary: Hand-author and ship `qdev schema payload gate_run` (as an output payload, distinct from the existing `EntityKind::Evidence` frontmatter schema aliased to `gate_run`) once `qdev gate run` (Epic 3 scope) has a live command whose `--json` output payload can be verified.
+  evidence: Same rationale as `context`/`next` above — Story 1.13 only ships payload schemas with a real command to round-trip test against; `gate run`'s output-payload shape (as opposed to its evidence-record frontmatter, already schema-printable via `qdev schema gate_run`) is Epic 3 scope.

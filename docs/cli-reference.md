@@ -46,7 +46,8 @@ Universal reference resolution: any command that takes an ID accepts any entity 
 | `qdev doctor [--fix]` | Environment, cache, gates, skills, MCP, hooks |
 | `qdev validate [--fix-ids]` | Dangling relations, cycles, ID collisions, schema, orphan DW, missing rationale |
 | `qdev sync [--rebuild]` | Force hydration or rebuild the cache |
-| `qdev schema <payload>` | Print JSON Schema for a payload (`story`, `context`, `gate_run`, `error`, ...) |
+| `qdev schema <entity-kind>` | Print JSON Schema for an entity's frontmatter shape (`story`, `epic`, `dw`, ...) |
+| `qdev schema payload <name>` | Print JSON Schema for a command's output payload (`story`, `error`, `validate`; `context`/`next`/`gate_run` land with their commands) |
 | `qdev config show` | Effective merged configuration |
 | `qdev next [--sprint N] [--owner me]` | Deterministically select the next unblocked story |
 | `qdev context <id> --phase P [--budget N] [--stats]` | Token-budgeted projection for an agent phase |
@@ -159,6 +160,15 @@ Errors go to stdout in JSON mode, stderr in text mode:
 | 5 | Conflict: version mismatch, lease held by another holder, lock timeout |
 
 Schema changes follow semver on `schema_version`; additive fields do not bump the major.
+
+`qdev schema payload <name>` prints the JSON Schema for one of these output-payload shapes
+(currently `story`, `error`, `validate` — each schema's own `description` restates this semver
+policy):
+
+```
+$ qdev schema payload story
+$ qdev schema payload validate --json
+```
 
 ---
 

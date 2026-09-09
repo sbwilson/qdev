@@ -785,6 +785,7 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "jsonschema",
  "predicates",
  "qdev-core",
  "serde",

@@ -26,7 +26,7 @@ development_status:
   1-10-relations-dag-computed-blocked: review
   1-11-qdev-validate: review
   1-12-qdev-sync-cache-diagnostics: review
-  1-13-qdev-schema: backlog
+  1-13-qdev-schema: review
   epic-1-retrospective: optional
 
   epic-2: backlog

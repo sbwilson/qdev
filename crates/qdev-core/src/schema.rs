@@ -137,6 +137,101 @@ impl fmt::Display for EntityKind {
     }
 }
 
+/// The CLI output *payload* kinds with a live command today (Story 1.13): `qdev schema payload
+/// <name>` prints a hand-authored JSON Schema for a command's `--json` output envelope, distinct
+/// from `EntityKind`'s frontmatter schemas (`qdev schema <entity-kind>`, Story 1.4). Kept fully
+/// separate from `EntityKind` — never resolved by, or resolving via, `EntityKind::from_str_loose`.
+///
+/// `context`, `next`, and `gate_run`-as-a-payload have no live command yet and are deferred
+/// (Epic 2/3 scope); they are intentionally absent here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PayloadKind {
+    Story,
+    Error,
+    Validate,
+}
+
+impl PayloadKind {
+    /// Returns the raw JSON Schema embedded at compile-time.
+    pub fn schema_str(&self) -> &'static str {
+        match self {
+            PayloadKind::Story => include_str!("../schemas/payload-story.json"),
+            PayloadKind::Error => include_str!("../schemas/payload-error.json"),
+            PayloadKind::Validate => include_str!("../schemas/payload-validate.json"),
+        }
+    }
+
+    /// Returns the parsed JSON Schema as a `serde_json::Value`.
+    pub fn schema_json(&self) -> serde_json::Value {
+        serde_json::from_str(self.schema_str()).expect("embedded payload schema must be valid JSON")
+    }
+
+    /// Returns the pretty-printed JSON Schema string.
+    pub fn pretty_schema_str(&self) -> String {
+        serde_json::to_string_pretty(&self.schema_json())
+            .expect("embedded payload schema must be serializable")
+    }
+
+    /// Returns the canonical slug for this payload kind.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PayloadKind::Story => "story",
+            PayloadKind::Error => "error",
+            PayloadKind::Validate => "validate",
+        }
+    }
+
+    /// Returns an array of all currently-supported payload kinds.
+    pub const fn all() -> &'static [PayloadKind; 3] {
+        &[
+            PayloadKind::Story,
+            PayloadKind::Error,
+            PayloadKind::Validate,
+        ]
+    }
+
+    /// Comma-separated canonical slugs of every supported payload kind, for usage-error messages.
+    pub fn valid_names() -> String {
+        PayloadKind::all()
+            .iter()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Resolves a payload name loosely (case-insensitive, hyphens/underscores). Names deferred to
+    /// a future story (`context`, `next`, `gate_run`) are reported as unknown, same as any other
+    /// unrecognized name, until their command ships.
+    pub fn from_str_loose(s: &str) -> Result<PayloadKind, QdevError> {
+        let normalized = s.trim().to_lowercase().replace('-', "_");
+        match normalized.as_str() {
+            "story" | "stories" => Ok(PayloadKind::Story),
+            "error" | "errors" => Ok(PayloadKind::Error),
+            "validate" | "validation" => Ok(PayloadKind::Validate),
+            _ => Err(QdevError::usage_error(format!(
+                "Unknown payload name '{}'. Valid payload names: {}",
+                s,
+                PayloadKind::valid_names()
+            ))),
+        }
+    }
+}
+
+impl FromStr for PayloadKind {
+    type Err = QdevError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        PayloadKind::from_str_loose(s)
+    }
+}
+
+impl fmt::Display for PayloadKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Errors occurring during frontmatter extraction or schema handling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaError {
