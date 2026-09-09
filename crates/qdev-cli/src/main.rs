@@ -999,38 +999,19 @@ fn handle_update(
         return ExitCode::UsageError;
     }
 
-    // Resolve active author attribution
-    let author_type = if let Some(ref at) = update_args.author_type {
-        if at != "human" && at != "agent" {
-            let err = QdevError::usage_error(format!(
-                "Invalid author type '{}', must be 'human' or 'agent'",
-                at
-            ));
-            let _ = output.emit_error(&err);
-            return ExitCode::UsageError;
+    // Resolve active author attribution through the shared resolver — see `resolve_author`.
+    let author = match resolve_author(
+        update_args.author_type.as_deref(),
+        update_args.author_id.as_deref(),
+        annotated_config,
+        &root,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
         }
-        at.clone()
-    } else if let Ok(env_at) = std::env::var("QDEV_AUTHOR_TYPE") {
-        if env_at == "human" || env_at == "agent" {
-            env_at
-        } else {
-            "human".to_string()
-        }
-    } else {
-        "human".to_string()
     };
-
-    let author_id = if let Some(ref aid) = update_args.author_id {
-        aid.clone()
-    } else if let Ok(env_aid) = std::env::var("QDEV_AUTHOR_ID") {
-        env_aid
-    } else if !annotated_config.config.identity.developer_id.is_empty() {
-        annotated_config.config.identity.developer_id.clone()
-    } else {
-        qdev_core::resolve_git_email(Some(&root)).unwrap_or_else(|| "developer".to_string())
-    };
-
-    let author = qdev_core::Author::new(author_type, author_id);
 
     // Resolve section file path if provided
     let section_file = update_args.file.as_ref().map(|f| {
@@ -1451,28 +1432,35 @@ fn handle_graph(
     ExitCode::Success
 }
 
-/// Resolves the active author attribution the same way `qdev update` does: explicit CLI flags,
-/// then `QDEV_AUTHOR_TYPE`/`QDEV_AUTHOR_ID`, then config identity, then the git email.
+/// Resolves the active author attribution for every command that records one: explicit CLI
+/// flags, then `QDEV_AUTHOR_TYPE`/`QDEV_AUTHOR_ID`, then config identity, then the git email.
+///
+/// This is the only author-resolution path. `qdev update` used to carry an inline copy, which is
+/// how the two drifted: attribution is audited (AD-12), so a second copy is a second answer.
 fn resolve_author(
     author_type: Option<&str>,
     author_id: Option<&str>,
     annotated_config: &qdev_core::AnnotatedConfig,
     root: &std::path::Path,
 ) -> Result<qdev_core::Author, QdevError> {
-    let resolved_type = if let Some(at) = author_type {
-        if at != "human" && at != "agent" {
-            return Err(QdevError::usage_error(format!(
-                "Invalid author type '{}', must be 'human' or 'agent'",
-                at
-            )));
-        }
-        at.to_string()
-    } else if let Ok(env_at) = std::env::var("QDEV_AUTHOR_TYPE") {
-        if env_at == "human" || env_at == "agent" {
-            env_at
+    // An unrecognized value is refused wherever it comes from. Silently rewriting a bad
+    // `QDEV_AUTHOR_TYPE` to "human" wrote a wrong-but-plausible author into the audited
+    // attribution, with nothing to tell the user their environment was misconfigured.
+    let validate = |value: String, source: &str| -> Result<String, QdevError> {
+        if value == "human" || value == "agent" {
+            Ok(value)
         } else {
-            "human".to_string()
+            Err(QdevError::usage_error(format!(
+                "Invalid author type '{}' from {}, must be 'human' or 'agent'",
+                value, source
+            )))
         }
+    };
+
+    let resolved_type = if let Some(at) = author_type {
+        validate(at.to_string(), "--author-type")?
+    } else if let Ok(env_at) = std::env::var("QDEV_AUTHOR_TYPE") {
+        validate(env_at, "QDEV_AUTHOR_TYPE")?
     } else {
         "human".to_string()
     };

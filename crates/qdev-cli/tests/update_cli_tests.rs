@@ -1041,3 +1041,77 @@ Test.
         .failure()
         .code(2);
 }
+
+/// Author attribution is audited (AD-12), so an unrecognized author type is refused wherever it
+/// comes from — the flag *and* `QDEV_AUTHOR_TYPE`. The env var used to be silently rewritten to
+/// "human", which wrote a wrong-but-plausible author into the record with nothing to tell the
+/// user their environment was misconfigured.
+#[test]
+fn test_invalid_author_type_is_a_usage_error_from_flag_and_env() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let story = r#"---
+id: E12S4
+title: Attribution Story
+status: draft
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- One.
+"#;
+    create_sample_story(root, "E12S4", story);
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args([
+            "update",
+            "story",
+            "E12S4",
+            "--status",
+            "in-progress",
+            "--author-type",
+            "robot",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("--author-type"))
+        .stderr(predicate::str::contains("must be 'human' or 'agent'"));
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .env("QDEV_AUTHOR_TYPE", "robot")
+        .args(["update", "story", "E12S4", "--status", "in-progress"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("QDEV_AUTHOR_TYPE"))
+        .stderr(predicate::str::contains("must be 'human' or 'agent'"));
+
+    // The story is untouched by either refusal — both refuse before any write.
+    let content = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
+    assert!(content.contains("status: draft"), "got: {}", content);
+    assert!(content.contains("version: 1"));
+
+    // A valid env value still resolves, and is recorded as the author.
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .env("QDEV_AUTHOR_TYPE", "agent")
+        .env("QDEV_AUTHOR_ID", "claude-code")
+        .args(["update", "story", "E12S4", "--status", "in-progress"])
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
+    assert!(content.contains("type: agent"), "got: {}", content);
+    assert!(content.contains("id: claude-code"), "got: {}", content);
+}
