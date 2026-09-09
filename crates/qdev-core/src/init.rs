@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::config::StorageConfig;
 use crate::errors::QdevError;
 
 pub use crate::store::{
@@ -29,6 +30,89 @@ pub const STANDARD_DIRECTORIES: &[&str] = &[
 ];
 
 pub const GITIGNORE_ENTRIES: &[&str] = &[".qdev/cache/", ".qdev/leases/", ".qdev.local.toml"];
+
+/// The `[storage]` layout this workspace is configured for, or the default when no `qdev.toml`
+/// exists yet — the fresh-`init` case, where `init` is itself about to write one.
+///
+/// `init` scaffolds directories, writes `.gitignore` and opens the cache before the config
+/// loader is ever involved, so it needs its own minimal read of the layout. Without it, a
+/// workspace configured for a non-default layout gets its directories scaffolded, its cache
+/// created, and its `.gitignore` written against the *default* paths — leaving the real cache
+/// untracked-by-luck and a second, empty one committed.
+pub fn resolve_storage(root: &Path) -> StorageConfig {
+    let mut storage = StorageConfig::default();
+    let Ok(raw) = fs::read_to_string(root.join("qdev.toml")) else {
+        return storage;
+    };
+    let Ok(table) = raw.parse::<toml::Table>() else {
+        return storage;
+    };
+    let Some(section) = table.get("storage").and_then(|v| v.as_table()) else {
+        return storage;
+    };
+    for (key, slot) in [
+        ("specs_dir", &mut storage.specs_dir),
+        ("state_dir", &mut storage.state_dir),
+        ("cache_dir", &mut storage.cache_dir),
+    ] {
+        if let Some(v) = section.get(key).and_then(|v| v.as_str()) {
+            if !v.trim().is_empty() {
+                *slot = v.trim_end_matches('/').to_string();
+            }
+        }
+    }
+    storage
+}
+
+/// The directories `init` scaffolds, resolved against `storage`. `STANDARD_DIRECTORIES` is the
+/// same list for the default layout.
+pub fn standard_directories(storage: &StorageConfig) -> Vec<String> {
+    let specs = &storage.specs_dir;
+    let state = &storage.state_dir;
+    let cache = &storage.cache_dir;
+    let qdev_dir = Path::new(cache)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| ".qdev".to_string());
+    let mut dirs = vec![
+        cache.clone(),
+        format!("{}/gates", qdev_dir),
+        format!("{}/leases", qdev_dir),
+    ];
+    for sub in ["prd", "requirements", "epics", "stories", "adrs", "hazards"] {
+        dirs.push(format!("{}/{}", specs, sub));
+    }
+    for sub in [
+        "sprints",
+        "releases",
+        "dw",
+        "decisions",
+        "scratch",
+        "evidence",
+        "baselines",
+        "soup",
+    ] {
+        dirs.push(format!("{}/{}", state, sub));
+    }
+    dirs
+}
+
+/// The `.gitignore` entries `init` ensures, resolved against `storage`. The cache directory is
+/// derived from `storage.cache_dir` so a configured cache is never committed.
+pub fn gitignore_entries(storage: &StorageConfig) -> Vec<String> {
+    let cache = storage.cache_dir.trim_end_matches('/');
+    let qdev_dir = Path::new(cache)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| ".qdev".to_string());
+    vec![
+        format!("{}/", cache),
+        format!("{}/leases/", qdev_dir),
+        ".qdev.local.toml".to_string(),
+    ]
+}
 
 /// Options passed into the core `init` function.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +151,9 @@ pub struct InitResult {
 
 /// Inspect the existing SQLite cache database if present to determine its schema state.
 pub fn check_cache_status(root: &Path) -> Result<CacheStatus, QdevError> {
-    let cache_db_path = root.join(".qdev/cache/cache.sqlite");
+    let cache_db_path = root
+        .join(resolve_storage(root).cache_dir)
+        .join("cache.sqlite");
     if !cache_db_path.exists() {
         return Ok(CacheStatus::NotInitialized);
     }
@@ -186,9 +272,14 @@ pub fn init(options: &InitOptions) -> Result<InitResult, QdevError> {
         })?;
     }
 
+    // Resolved before anything is scaffolded, so a workspace already configured for a
+    // non-default layout has its directories, cache and .gitignore built against that layout
+    // rather than the default one.
+    let storage = resolve_storage(root);
+
     let qdev_toml_path = root.join("qdev.toml");
     let local_toml_path = root.join(".qdev.local.toml");
-    let cache_db_path = root.join(".qdev/cache/cache.sqlite");
+    let cache_db_path = root.join(&storage.cache_dir).join("cache.sqlite");
 
     let qdev_toml_existed = qdev_toml_path.exists();
     let local_toml_existed = local_toml_path.exists();
@@ -198,8 +289,8 @@ pub fn init(options: &InitOptions) -> Result<InitResult, QdevError> {
     let mut created_files = Vec::new();
 
     // 1. Create standard directory structure
-    for &dir in STANDARD_DIRECTORIES {
-        let dir_path = root.join(dir);
+    for dir in standard_directories(&storage) {
+        let dir_path = root.join(&dir);
         if !dir_path.exists() {
             fs::create_dir_all(&dir_path).map_err(|e| {
                 QdevError::infrastructure_failure(
@@ -207,7 +298,7 @@ pub fn init(options: &InitOptions) -> Result<InitResult, QdevError> {
                     format!("Failed to create directory {}: {}", dir_path.display(), e),
                 )
             })?;
-            created_directories.push(dir.to_string());
+            created_directories.push(dir);
         }
     }
 
@@ -248,7 +339,7 @@ pub fn init(options: &InitOptions) -> Result<InitResult, QdevError> {
     // 4. Update .gitignore at root
     let gitignore_path = root.join(".gitignore");
     let gitignore_existed = gitignore_path.exists();
-    let gitignore_updated = update_gitignore(&gitignore_path)?;
+    let gitignore_updated = update_gitignore(&gitignore_path, &storage)?;
     if !gitignore_existed && gitignore_path.exists() {
         created_files.push(".gitignore".to_string());
     }
@@ -274,10 +365,11 @@ pub fn init(options: &InitOptions) -> Result<InitResult, QdevError> {
     })
 }
 
-fn update_gitignore(gitignore_path: &Path) -> Result<bool, QdevError> {
+fn update_gitignore(gitignore_path: &Path, storage: &StorageConfig) -> Result<bool, QdevError> {
+    let required_entries = gitignore_entries(storage);
     if !gitignore_path.exists() {
         let mut content = String::new();
-        for &entry in GITIGNORE_ENTRIES {
+        for entry in &required_entries {
             content.push_str(entry);
             content.push('\n');
         }
@@ -301,13 +393,13 @@ fn update_gitignore(gitignore_path: &Path) -> Result<bool, QdevError> {
         s.trim_start_matches('/').trim_end_matches('/')
     }
 
-    for &required in GITIGNORE_ENTRIES {
+    for required in &required_entries {
         let req_norm = normalize_pattern(required);
         let found = existing_lines
             .iter()
             .any(|line| normalize_pattern(line) == req_norm);
         if !found {
-            missing_entries.push(required);
+            missing_entries.push(required.clone());
         }
     }
 
@@ -320,7 +412,7 @@ fn update_gitignore(gitignore_path: &Path) -> Result<bool, QdevError> {
         new_content.push('\n');
     }
     for entry in missing_entries {
-        new_content.push_str(entry);
+        new_content.push_str(&entry);
         new_content.push('\n');
     }
 

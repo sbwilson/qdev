@@ -321,16 +321,15 @@ fn test_create_story_file_conflict() {
         .code(5);
 }
 
-/// `[storage]` is aspirational in v1: the sweep and validation read it, but `init` scaffolding,
-/// the `.gitignore` entries and the DW/decision id allocators are still written against the
-/// default layout. A non-default value used to be accepted and then silently ignored by
-/// `create story`, which wrote to the default path while every read command looked at the
-/// configured one — the story was created, the command exited 0, and nothing could see it.
+/// A configured `[storage]` layout must be honoured everywhere, not just by the readers.
 ///
-/// v1 therefore refuses the value outright, naming the key and the file, rather than shipping
-/// half-support that loses data.
+/// The sweep, hydration and validation always read `StorageConfig`, but creation, id allocation,
+/// `init` scaffolding and the `.gitignore` entries were written against the default layout. With
+/// a non-default `[storage]`, `qdev create story` exited 0, reported a path under `docs/specs/`,
+/// wrote it there, and no read command could see it; id allocation scanned the same wrong
+/// directory so every create restarted at `E12S1`; and the live cache was not gitignored.
 #[test]
-fn test_non_default_storage_is_refused_with_a_clear_error() {
+fn test_create_story_honours_configured_specs_dir() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
 
@@ -354,26 +353,59 @@ fn test_non_default_storage_is_refused_with_a_clear_error() {
     fs::write(root.join("qdev.toml"), toml).unwrap();
 
     let mut create = Command::cargo_bin("qdev").unwrap();
-    create
+    let assert = create
         .current_dir(root)
-        .args(["create", "story", "E12"])
+        .args(["create", "story", "E12", "--json"])
         .assert()
-        .code(2)
-        .stderr(predicate::str::contains("storage.specs_dir"))
-        .stderr(predicate::str::contains("not configurable in this version"));
+        .success();
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
 
+    assert_eq!(val["path"], "planning/specs/stories/E12S1.md");
+    assert!(root.join("planning/specs/stories/E12S1.md").is_file());
     assert!(
-        !root.join("planning/specs/stories/E12S1.md").exists()
-            && !root.join("docs/specs/stories/E12S1.md").exists(),
-        "a refused configuration must not write a story anywhere"
+        !root.join("docs/specs/stories/E12S1.md").exists(),
+        "nothing may be written to the default layout"
     );
+
+    // Readable back through the cache — the check that actually failed before.
+    let mut list = Command::cargo_bin("qdev").unwrap();
+    let list_assert = list
+        .current_dir(root)
+        .args(["list", "stories", "--json"])
+        .assert()
+        .success();
+    let listed: Value = serde_json::from_slice(&list_assert.get_output().stdout).unwrap();
+    let ids: Vec<&str> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["E12S1"], "the created story must be readable");
+
+    // Allocation must continue from the configured directory, not restart at 1.
+    let mut second = Command::cargo_bin("qdev").unwrap();
+    let second_assert = second
+        .current_dir(root)
+        .args(["create", "story", "E12", "--json"])
+        .assert()
+        .success();
+    let second_val: Value = serde_json::from_slice(&second_assert.get_output().stdout).unwrap();
+    assert_eq!(second_val["id"], "E12S2");
 }
 
-/// The default layout is of course still accepted, written explicitly or omitted entirely.
+/// `init` run against a workspace already configured for a non-default layout must scaffold and
+/// gitignore *that* layout — otherwise the real cache is untracked only by luck and a second,
+/// empty one is committed.
 #[test]
-fn test_explicit_default_storage_is_accepted() {
+fn test_init_scaffolds_and_gitignores_the_configured_layout() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
+    fs::write(
+        root.join("qdev.toml"),
+        "[project]\nname = \"Pre\"\n\n[storage]\nspecs_dir = \"planning/specs\"\nstate_dir = \"planning/state\"\ncache_dir = \".qdev/altcache\"\n",
+    )
+    .unwrap();
 
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     cmd.current_dir(root)
@@ -390,15 +422,17 @@ fn test_explicit_default_storage_is_accepted() {
         .assert()
         .success();
 
-    let mut toml = fs::read_to_string(root.join("qdev.toml")).unwrap();
-    toml.push_str("\n[storage]\nspecs_dir = \"docs/specs\"\nstate_dir = \"docs/state\"\n");
-    fs::write(root.join("qdev.toml"), toml).unwrap();
+    assert!(root.join("planning/specs/stories").is_dir());
+    assert!(root.join("planning/state/dw").is_dir());
+    assert!(root.join(".qdev/altcache").is_dir());
+    assert!(
+        !root.join("docs/specs/stories").exists(),
+        "the default layout must not be scaffolded alongside the configured one"
+    );
 
-    let mut create = Command::cargo_bin("qdev").unwrap();
-    create
-        .current_dir(root)
-        .args(["create", "story", "E12", "--json"])
-        .assert()
-        .success();
-    assert!(root.join("docs/specs/stories/E12S1.md").is_file());
+    let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap();
+    assert!(
+        gitignore.lines().any(|l| l.trim() == ".qdev/altcache/"),
+        "the configured cache must be gitignored, got: {gitignore}"
+    );
 }

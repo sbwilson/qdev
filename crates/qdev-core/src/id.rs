@@ -625,9 +625,18 @@ pub fn allocate_deferred_work_id_with_rng<R: rand::Rng>(
     workspace_root: &Path,
     rng: &mut R,
 ) -> Identifier {
+    allocate_deferred_work_id_in_with_rng(workspace_root, &StorageConfig::default(), rng)
+}
+
+/// `allocate_deferred_work_id_with_rng`, scanning `storage.state_dir` rather than the default.
+pub fn allocate_deferred_work_id_in_with_rng<R: rand::Rng>(
+    workspace_root: &Path,
+    storage: &StorageConfig,
+    rng: &mut R,
+) -> Identifier {
     let hash = allocate_hex_id_with_rng(
         workspace_root,
-        &format!("{}/dw", StorageConfig::default().state_dir),
+        &format!("{}/dw", storage.state_dir),
         "DW",
         rng,
     );
@@ -647,9 +656,18 @@ pub fn allocate_decision_id_with_rng<R: rand::Rng>(
     workspace_root: &Path,
     rng: &mut R,
 ) -> Identifier {
+    allocate_decision_id_in_with_rng(workspace_root, &StorageConfig::default(), rng)
+}
+
+/// `allocate_decision_id_with_rng`, scanning `storage.state_dir` rather than the default.
+pub fn allocate_decision_id_in_with_rng<R: rand::Rng>(
+    workspace_root: &Path,
+    storage: &StorageConfig,
+    rng: &mut R,
+) -> Identifier {
     let hash = allocate_hex_id_with_rng(
         workspace_root,
-        &format!("{}/decisions", StorageConfig::default().state_dir),
+        &format!("{}/decisions", storage.state_dir),
         "DEC",
         rng,
     );

@@ -35,7 +35,8 @@ pub use config::{
 pub use envelope::{ErrorPayload, JsonEnvelope, JsonErrorEnvelope, SCHEMA_VERSION};
 pub use errors::{ExitCode, QdevError};
 pub use id::{
-    allocate_decision_id, allocate_decision_id_with_rng, allocate_deferred_work_id,
+    allocate_decision_id, allocate_decision_id_in_with_rng, allocate_decision_id_with_rng,
+    allocate_deferred_work_id, allocate_deferred_work_id_in_with_rng,
     allocate_deferred_work_id_with_rng, allocate_next_story_id, allocate_next_story_id_in,
     ConstraintKind, ConstraintOwner, IdParseError, Identifier, IdentifierKind,
 };

@@ -222,47 +222,6 @@ fn validate_storage_section(val: &toml::Value, filename: &str) -> Result<(), Qde
         }
     }
 
-    reject_non_default_storage(table, filename)
-}
-
-/// Refuses a `[storage]` value that differs from the default layout.
-///
-/// The layout is configurable in principle — the sweep, hydration and validation all read
-/// `StorageConfig` — but v1 does not honour it everywhere: `init`'s directory scaffolding, the
-/// `.gitignore` entries, and the deferred-work and decision id allocators are still written
-/// against the default paths. Half-support is the worst state to ship: a non-default value used
-/// to leave created stories somewhere no read command looked, silently, at exit 0.
-///
-/// So v1 rejects the value outright and says why, rather than accepting it and losing data.
-/// Lifting this means making every path listed above config-driven — see the epic 1
-/// retrospective's action item 4.
-fn reject_non_default_storage(table: &toml::Table, filename: &str) -> Result<(), QdevError> {
-    let defaults = crate::config::StorageConfig::default();
-    let expected = [
-        ("specs_dir", defaults.specs_dir.as_str()),
-        ("state_dir", defaults.state_dir.as_str()),
-        ("cache_dir", defaults.cache_dir.as_str()),
-    ];
-
-    for (key, default_value) in expected {
-        let Some(configured) = table.get(key).and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if configured.trim_end_matches('/') == default_value.trim_end_matches('/') {
-            continue;
-        }
-        return Err(QdevError::usage_error(format!(
-            "Schema violation in {}: 'storage.{}' is not configurable in this version \
-             (found '{}', only '{}' is supported)",
-            filename, key, configured, default_value
-        ))
-        .with_details(serde_json::json!({
-            "file": filename,
-            "key": format!("storage.{}", key),
-            "found": configured,
-            "supported": default_value,
-        })));
-    }
     Ok(())
 }
 

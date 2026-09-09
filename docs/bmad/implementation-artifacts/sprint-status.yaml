@@ -27,6 +27,7 @@ development_status:
   1-11-qdev-validate: done
   1-12-qdev-sync-cache-diagnostics: done
   1-13-qdev-schema: done
+  1-14-cache-version-stamp-hardening: backlog
   epic-1-retrospective: done
 
   epic-2: backlog
