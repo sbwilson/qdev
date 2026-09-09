@@ -70,7 +70,7 @@ Writing the cookie backwards is also documented by SQLite as unsafe: sibling con
 - [ ] `crates/qdev-core/src/store/sqlite.rs` -- `inspect_cache_schema` no longer reads the schema cookie
 - [ ] `crates/qdev-core/src/init.rs` -- `initialize_cache` stamps through the shared path
 - [ ] `crates/qdev-core/src/init.rs` + `sqlite.rs` -- one consistent rule for a newer-than-supported cache
-- [ ] tests -- remove cookie assertions; add the regression tests below
+- [ ] tests -- remove cookie assertions, including `store_tests.rs::test_schema_version_only_mismatch_triggers_rebuild` (added by story 1.6 to pin the behaviour this story removes); add the regression tests below
 - [ ] `docs/architecture.md` §10 -- state the cache version and that `user_version` alone carries it
 
 **Acceptance Criteria:**
@@ -85,10 +85,12 @@ Writing the cookie backwards is also documented by SQLite as unsafe: sibling con
 ## Spec Change Log
 
 - 2026-09-10 — Created from epic 1 retrospective action item 3 (Simon's decision: story-shaped, not a patch). Subsumes retrospective action item 1: finding B1 (`init` producing a cache the next command rebuilds) is a symptom of this misuse, so fixing the root cause closes both. Also closes the first `deferred-work.md` item recorded after the story 1.7 review.
+- 2026-09-10 — Story 1.6's intent contract amended by human renegotiation to remove the `PRAGMA schema_version` instruction and forbid it going forward, so this story no longer contradicts an approved boundary. Note the amendment leaves 1.6's Implementation Notes and Review Triage Log as historical record, including `test_schema_version_only_mismatch_triggers_rebuild` — this story removes that test.
 
 ## Design Notes
 
-- The reason this survived thirteen stories and every per-story review: `PRAGMA schema_version` is instructed by story 1.6's own frozen spec (`spec-1-6-*.md:23,30,84`), so each story implemented it faithfully. That frozen boundary needs renegotiating as part of this story, or a re-drive of 1.6 reintroduces the misuse.
+- The reason this survived thirteen stories and every per-story review: `PRAGMA schema_version` was instructed by story 1.6's own frozen intent contract, so each story implemented it faithfully and each per-story review judged it correct against the spec. Only a cross-story retrospective could see it.
+- **That boundary has already been renegotiated** (2026-09-10, Simon): `spec-1-6-*.md` now names `user_version` alone in its Approach, Boundaries and acceptance criteria, and carries a Boundaries "Never" forbidding any read or write of the cookie. A re-drive of story 1.6 will therefore not reintroduce the misuse, and this story is free to remove it from the code without contradicting an approved contract.
 - The table-presence and column checks in `inspect_cache_schema` are what actually detect a bad cache; the cookie comparison has only ever produced false negatives. Removing it strictly reduces spurious rebuilds.
 
 ## Verification

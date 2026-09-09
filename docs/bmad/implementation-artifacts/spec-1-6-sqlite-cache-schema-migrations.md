@@ -20,19 +20,22 @@ deferred: []
 
 **Problem:** The local SQLite cache serves as qdev's relational index over Git-tracked Markdown entity files, but commands currently lack automated boot-time cache initialization, versioned schema management with drop-and-rebuild semantics on schema mismatches, and a unified `Store` trait abstraction in `qdev-core`.
 
-**Approach:** Implement the `Store` trait and `SqliteStore` backend in `qdev-core::store` defining all 14 tables in `docs/architecture.md` §10 with WAL mode and `busy_timeout = 5000ms`, recording `PRAGMA user_version = 1` and `PRAGMA schema_version = 1`, and integrate boot-time cache verification so any command boots cleanly with an empty or missing cache, automatically rebuilding from Markdown entity files on schema mismatch or cache deletion.
+**Approach:** Implement the `Store` trait and `SqliteStore` backend in `qdev-core::store` defining all 14 tables in `docs/architecture.md` §10 with WAL mode and `busy_timeout = 5000ms`, recording the cache's schema version in `PRAGMA user_version`, and integrate boot-time cache verification so any command boots cleanly with an empty or missing cache, automatically rebuilding from Markdown entity files on schema mismatch or cache deletion.
+
+> **Amended 2026-09-10** (human renegotiation — see Spec Change Log). This story originally instructed recording `PRAGMA schema_version` alongside `user_version`. That instruction was wrong and is removed: `schema_version` is SQLite's *internal schema cookie*, incremented automatically on every DDL statement, not an application-controlled field. Story `1-14-cache-version-stamp-hardening` removes the resulting behaviour from the code.
 
 ## Boundaries & Constraints
 
 **Always:**
 - Create `cache.sqlite` inside the configured `cache_dir` (default `.qdev/cache/`) with the 14 tables from `docs/architecture.md` §10: `entities`, `stories`, `constraints`, `relations`, `sprints`, `sprint_assignments`, `decisions`, `deferred_work`, `scratchpad_entries`, `gates`, `gate_runs`, `soup_dependencies`, `sync_state`, and `dirty_entities`.
 - Configure SQLite connections with WAL mode (`PRAGMA journal_mode = WAL;`) and 5000ms busy timeout (`PRAGMA busy_timeout = 5000;`) per AD-4.
-- Record `PRAGMA user_version = 1;` and `PRAGMA schema_version = 1;`.
+- Record the cache schema version in `PRAGMA user_version` only (`CACHE_SCHEMA_VERSION`, which was `1` when this story shipped). This is the single application-owned version stamp.
 - On schema version mismatch during command boot, trigger a clean drop and rebuild from Markdown files, never an in-place migration of cache data.
 - Ensure deleting `.qdev/cache/` and re-running any command yields an identical cache, verified by a table-by-table comparison test.
 - Define `Store` trait in `qdev-core::store` exposing reads and writes for entities, stories, constraints, relations, sprints, sprint assignments, decisions, deferred work, scratchpad entries, gates, gate runs, soup dependencies, sync_state, and dirty_entities, with `SqliteStore` as the sole backend.
 - Keep `qdev-core` completely free of forbidden terminal and network dependencies (`clap`, `colored`, `reqwest`, etc.) and direct terminal I/O per AD-1.
 - Never write to or revert `sprint-status.yaml`.
+- **Never read or write `PRAGMA schema_version`.** It is SQLite's internal schema cookie, auto-incremented on every DDL statement and used by SQLite to invalidate other connections' prepared statements. It is not application-controlled, writing it backwards is documented as unsafe, and keying cache validity on it makes a healthy cache indistinguishable from a stale one. Cache validity is `user_version` plus the table-presence and column checks. If a second version dimension is ever wanted, it belongs in the `sync_meta` table as an ordinary row.
 
 **Never:**
 - Never perform in-place cache data migrations (`ALTER TABLE`, column alterations, data transformation scripts) when schema versions change; all schema updates rebuild from source files.
@@ -81,12 +84,51 @@ deferred: []
 
 **Acceptance Criteria:**
 - Given an empty `.qdev/cache/`, when any command boots in an initialized workspace, then `cache.sqlite` is created with the tables in `docs/architecture.md` §10, WAL mode, and `busy_timeout = 5000` per AD-4.
-- Given `cache.sqlite`, when inspected, then `schema_version` and `user_version` pragmas are recorded as 1; a mismatch triggers a rebuild from files, never an in-place migration of cache data.
+- Given `cache.sqlite`, when inspected, then the `user_version` pragma records the cache schema version (`1` as of this story) and `schema_version` is not consulted at all; a `user_version` mismatch triggers a rebuild from files, never an in-place migration of cache data.
 - Given a workspace with entity files, when deleting the `.qdev/cache/` directory and re-running any command, then an identical cache is created (verified by a table-by-table comparison test).
 - Given the `Store` trait in `qdev-core`, when tested, then it exposes every read and write used by later stories, with the SQLite implementation (`SqliteStore`) as the only backend.
 - Given the entire test suite, when running `cargo test`, then all unit, integration, architecture, and network tests pass with zero failures.
 
 ## Spec Change Log
+
+### 2026-09-10 — `PRAGMA schema_version` instruction removed (human renegotiation, Simon)
+
+**What changed.** Three places in the frozen intent contract instructed recording
+`PRAGMA schema_version` alongside `PRAGMA user_version`: the Approach paragraph, a Boundaries
+"Always" bullet, and an acceptance criterion. All three now name `user_version` alone, and a
+Boundaries "Never" bullet forbids reading or writing the cookie at all.
+
+**Why.** `PRAGMA schema_version` is not an application-controlled field. It is SQLite's internal
+schema cookie, incremented automatically on every DDL statement and used by SQLite to invalidate
+other connections' prepared statements; writing it backwards is documented as unsafe. Keying
+cache validity on it means the cache's health depends on a counter the application does not own.
+
+**Evidence this was harmful, not merely inelegant** (epic 1 retrospective, `epic-1-retro-2026-09-09.md`):
+
+- Finding B1, confirmed by reproduction: `qdev init` stamps only `user_version`, so a freshly
+  initialised cache reports `user_version=3 schema_version=16` (one increment per `CREATE TABLE`).
+  `inspect_cache_schema` requires both to match, declares the new cache invalid, and the next
+  command drops every table and rebuilds — while `init` has already printed `✔ cache schema v3`.
+  A marker table planted into the post-init cache does not survive the next command.
+- The story 1.7 review recorded the same misuse as deferred work on 2026-09-08, predicting that
+  "any future DDL touch would convert a healthy cache into a destructive full rebuild". That was
+  realised in the v2→v3 migration and mitigated only by splitting `create_schema` from
+  `stamp_cache_version`.
+
+**Why the instruction survived thirteen stories.** It was in this frozen contract, so every story
+implemented it faithfully and every per-story review judged it correct against the spec. Only a
+cross-story retrospective could see it. Amending the contract is what stops a re-drive of this
+story from reintroducing the behaviour.
+
+**Scope.** This amendment changes the contract only. The code change is story
+`1-14-cache-version-stamp-hardening` (`spec-1-14-*.md`). The Implementation Notes and Review
+Triage Log below are left as written — they are the historical record of what this story actually
+did, including `test_schema_version_only_mismatch_triggers_rebuild`, which story 1.14 removes.
+
+**Not changed, and still stale:** this contract says "14 tables" and version `1`. Both were true
+when the story shipped; the cache is now 16 tables at version 3. Those read as historical fact
+rather than a live instruction, so they were left alone rather than widening an amendment the
+human asked to be narrow. Retrospective action item 7 covers reconciling `architecture.md` §10.
 
 ## Review Triage Log
 
