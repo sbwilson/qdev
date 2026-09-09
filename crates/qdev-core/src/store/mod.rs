@@ -366,6 +366,10 @@ pub trait Store: Send + Sync {
     fn list_findings(&self) -> Result<Vec<FindingRecord>, QdevError>;
     fn delete_findings_for_path(&self, path: &str) -> Result<usize, QdevError>;
 
+    /// Returns the ISO8601 timestamp of the most recent successful sweep or rebuild, or `None`
+    /// if the cache has never been synced (a freshly created schema with an empty `sync_meta`).
+    fn get_last_synced_at(&self) -> Result<Option<String>, QdevError>;
+
     // Incremental sweep
     fn sweep_workspace(
         &self,

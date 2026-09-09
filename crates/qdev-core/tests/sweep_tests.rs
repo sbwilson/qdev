@@ -676,7 +676,12 @@ fn test_v1_cache_auto_rebuilds_to_v2() {
         .unwrap()
         .filter_map(|r| r.ok())
         .collect();
-    assert_eq!(tables.len(), 15, "v2 cache has 15 tables");
+    assert_eq!(
+        tables.len(),
+        ALL_TABLE_NAMES.len(),
+        "v2 cache has {} tables",
+        ALL_TABLE_NAMES.len()
+    );
 
     // Lossless: entities rebuilt from files.
     assert!(store.get_entity("E1S1").unwrap().is_some());
@@ -744,6 +749,11 @@ fn test_rebuild_and_sweep_findings_equal() {
     let rebuilt = dump_tables(&cache_db(root));
 
     for &table in ALL_TABLE_NAMES {
+        // `sync_meta` legitimately differs: it stamps *when* each pass ran, not the content it
+        // describes, so it is expected to advance between the sweep and the rebuild that follows.
+        if table == "sync_meta" {
+            continue;
+        }
         assert_eq!(
             swept.get(table),
             rebuilt.get(table),
@@ -1195,7 +1205,12 @@ fn test_real_v1_cache_rebuilds_to_v2_and_matches_a_fresh_sweep() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(tables, 15, "v2 cache has 15 tables");
+    assert_eq!(
+        tables,
+        ALL_TABLE_NAMES.len() as i64,
+        "v2 cache has {} tables",
+        ALL_TABLE_NAMES.len()
+    );
     assert_eq!(
         count_rows(
             root,
@@ -1380,4 +1395,91 @@ fn test_benchmark_one_modified_sweep_bound() {
         max <= CEILING_MS,
         "a one-modified sweep {max}ms exceeds the {CEILING_MS}ms regression ceiling"
     );
+}
+
+// ---------------------------------------------------------------------------
+// sync_meta / last_synced_at (spec-1-12)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_last_synced_at_none_on_freshly_created_schema() {
+    // A freshly created in-memory schema never goes through `sweep_workspace` or
+    // `rebuild_from_workspace`, so `sync_meta` must be empty and reported as `None`, not an error.
+    let store = SqliteStore::open_in_memory().unwrap();
+    assert_eq!(store.get_last_synced_at().unwrap(), None);
+}
+
+#[test]
+fn test_sync_meta_stamped_after_sweep() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "One");
+    let storage = storage();
+
+    let store = ensure_cache(root, &storage).unwrap();
+    // `ensure_cache` already performed the initial rebuild/sweep, which must have stamped it.
+    let first_stamp = store
+        .get_last_synced_at()
+        .unwrap()
+        .expect("sync_meta must be stamped after the boot-time rebuild");
+
+    // An explicit sweep (even a no-op one) refreshes the stamp.
+    store.sweep_workspace(root, &storage).unwrap();
+    let second_stamp = store
+        .get_last_synced_at()
+        .unwrap()
+        .expect("sync_meta must remain stamped after an explicit sweep");
+    assert!(
+        second_stamp >= first_stamp,
+        "the stamp must not go backwards across sweeps"
+    );
+}
+
+#[test]
+fn test_sync_meta_stamped_after_rebuild() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "One");
+    let storage = storage();
+
+    let store = ensure_cache(root, &storage).unwrap();
+    assert!(store.get_last_synced_at().unwrap().is_some());
+
+    store.reset_and_rebuild(root, &storage).unwrap();
+    assert!(
+        store.get_last_synced_at().unwrap().is_some(),
+        "sync_meta must be stamped inside reset_and_rebuild's own rebuild transaction"
+    );
+}
+
+#[test]
+fn test_sync_reports_summary_counts_matching_sweep_summary_shape() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "One");
+    write_story(root, "E1S2", "Two");
+    let storage = storage();
+
+    let store = ensure_cache(root, &storage).unwrap();
+
+    // Modify one file, leave the other untouched: a plain sync should report one parsed file and
+    // the rest unchanged (the untouched story plus qdev.toml itself), matching the `SweepSummary`
+    // shape used by `qdev sync`.
+    write_story(root, "E1S1", "One modified");
+    let summary: SweepSummary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(summary.parsed, 1);
+    assert_eq!(summary.unchanged, 2);
+    assert_eq!(summary.purged, 0);
+
+    // `--rebuild` drops and repopulates the cache from Markdown; counts must reflect the full
+    // re-parse of both entity files plus qdev.toml itself, matching the same "successfully
+    // parsed and upserted this pass" meaning `sweep_workspace` gives `parsed` (qdev.toml counts
+    // there too, via `SweepFileRole::Config`).
+    let rebuild_summary = store.reset_and_rebuild(root, &storage).unwrap();
+    assert_eq!(rebuild_summary.parsed, 3);
+    assert_eq!(rebuild_summary.unchanged, 0);
+    assert_eq!(rebuild_summary.purged, 0);
 }

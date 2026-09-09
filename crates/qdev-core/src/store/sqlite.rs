@@ -39,6 +39,7 @@ pub const ALL_TABLE_NAMES: &[&str] = &[
     "sync_state",
     "dirty_entities",
     "findings",
+    "sync_meta",
 ];
 
 pub const SCHEMA_V2_DDL: &str = r#"
@@ -193,6 +194,11 @@ CREATE TABLE IF NOT EXISTS findings (
     message TEXT,
     found_at TEXT NOT NULL,
     PRIMARY KEY (path, code)
+);
+
+CREATE TABLE IF NOT EXISTS sync_meta (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_synced_at TEXT NOT NULL
 );
 "#;
 
@@ -352,14 +358,14 @@ impl SqliteStore {
         &self,
         workspace_root: &Path,
         storage: &StorageConfig,
-    ) -> Result<(), QdevError> {
+    ) -> Result<SweepSummary, QdevError> {
         self.with_conn_mut(|conn| {
             drop_all_user_tables(conn)?;
             create_schema_v2(conn)?;
             Ok(())
         })?;
 
-        self.rebuild_from_workspace(workspace_root, storage)?;
+        let summary = self.rebuild_from_workspace(workspace_root, storage)?;
 
         // Ensure user_version and schema_version pragmas are 2 after rebuild
         self.with_conn(|conn| {
@@ -376,7 +382,7 @@ impl SqliteStore {
             Ok(())
         })?;
 
-        Ok(())
+        Ok(summary)
     }
 
     /// Scans the workspace specification and state directories and rebuilds all cache tables.
@@ -386,7 +392,7 @@ impl SqliteStore {
         &self,
         workspace_root: &Path,
         storage: &StorageConfig,
-    ) -> Result<(), QdevError> {
+    ) -> Result<SweepSummary, QdevError> {
         // Collect all file paths to parse in deterministic sorted order
         let mut entity_files = Vec::new();
 
@@ -439,6 +445,7 @@ DELETE FROM dirty_entities;
 DELETE FROM sync_state;
 DELETE FROM entities;
 DELETE FROM findings;
+DELETE FROM sync_meta;
 "#,
             )
             .map_err(|e| {
@@ -448,6 +455,10 @@ DELETE FROM findings;
                 )
             })?;
 
+            // `parsed` counts only confirmed successful reads + hydrations this pass, matching
+            // the meaning `sweep_workspace` gives `SweepSummary.parsed`.
+            let mut parsed = 0usize;
+
             // 1. Process gates from qdev.toml if present (and record its sync_state row)
             if config_path.exists() {
                 if let Ok(content) = fs::read_to_string(&config_path) {
@@ -455,6 +466,7 @@ DELETE FROM findings;
                     let content_hash = sha256_digest(content.as_bytes());
                     upsert_sync_state_row(&tx, "qdev.toml", mtime, size, &content_hash)?;
                     refresh_gates(&tx, &content)?;
+                    parsed += 1;
                 }
             }
 
@@ -464,7 +476,10 @@ DELETE FROM findings;
                     Ok(c) => c,
                     Err(_) => continue,
                 };
-                let _ = hydrate_markdown_file(&tx, workspace_root, file_path, &content)?;
+                let outcome = hydrate_markdown_file(&tx, workspace_root, file_path, &content)?;
+                if matches!(outcome, HydrateOutcome::Parsed { .. }) {
+                    parsed += 1;
+                }
             }
 
             // 2b. Whole-graph relation validation (kind pairs, dangling targets, depends_on
@@ -478,6 +493,7 @@ DELETE FROM findings;
                     Err(_) => continue,
                 };
                 hydrate_scratch_file(&tx, workspace_root, file_path, &content)?;
+                parsed += 1;
             }
 
             // 4. Process evidence JSON files
@@ -487,7 +503,32 @@ DELETE FROM findings;
                     Err(_) => continue,
                 };
                 hydrate_evidence_file(&tx, workspace_root, file_path, &content)?;
+                parsed += 1;
             }
+
+            // Stamp freshness for this rebuild pass, inside the same transaction as the rest of
+            // the rebuilt rows so `sync_meta` never observably lags the data it describes.
+            tx.execute(
+                "INSERT INTO sync_meta (id, last_synced_at) VALUES (1, ?1)
+                 ON CONFLICT(id) DO UPDATE SET last_synced_at = excluded.last_synced_at;",
+                rusqlite::params![crate::write::current_iso8601()],
+            )
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!("Failed to stamp sync_meta during rebuild: {}", e),
+                )
+            })?;
+
+            // Total finding rows remaining after this rebuild pass.
+            let findings: usize = tx
+                .query_row("SELECT COUNT(*) FROM findings;", [], |row| row.get(0))
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to count findings for rebuild summary: {}", e),
+                    )
+                })?;
 
             tx.commit().map_err(|e| {
                 QdevError::infrastructure_failure(
@@ -496,10 +537,13 @@ DELETE FROM findings;
                 )
             })?;
 
-            Ok(())
-        })?;
-
-        Ok(())
+            Ok(SweepSummary {
+                parsed,
+                unchanged: 0,
+                purged: 0,
+                findings,
+            })
+        })
     }
 }
 
@@ -2768,6 +2812,23 @@ ON CONFLICT(path, code) DO UPDATE SET
         })
     }
 
+    fn get_last_synced_at(&self) -> Result<Option<String>, QdevError> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT last_synced_at FROM sync_meta WHERE id = 1;",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!("Failed to read last_synced_at from sync_meta: {}", e),
+                )
+            })
+        })
+    }
+
     fn sweep_workspace(
         &self,
         workspace_root: &Path,
@@ -3090,6 +3151,21 @@ ON CONFLICT(path, code) DO UPDATE SET
                 QdevError::infrastructure_failure(
                     "sqlite_error",
                     format!("Failed to clear orphaned dirty entities: {}", e),
+                )
+            })?;
+
+            // Stamp freshness for this sweep pass, inside the same transaction as everything it
+            // just parsed, so every boot-time and explicit sweep records when the cache was
+            // last known consistent with disk.
+            tx.execute(
+                "INSERT INTO sync_meta (id, last_synced_at) VALUES (1, ?1)
+                 ON CONFLICT(id) DO UPDATE SET last_synced_at = excluded.last_synced_at;",
+                rusqlite::params![crate::write::current_iso8601()],
+            )
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!("Failed to stamp sync_meta during sweep: {}", e),
                 )
             })?;
 

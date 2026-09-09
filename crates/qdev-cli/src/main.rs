@@ -237,6 +237,10 @@ fn run(raw_args: &[String]) -> ExitCode {
             &current_dir,
             interactivity,
         ),
+        Some(Commands::Sync(ref sync_args)) => {
+            handle_sync(sync_args, &annotated_config, &cli, &output, &current_dir)
+        }
+        Some(Commands::Doctor) => handle_doctor(&annotated_config, &cli, &output, &current_dir),
         Some(Commands::Init(_)) => unreachable!(),
         Some(Commands::Schema(_)) => unreachable!(),
     }
@@ -1856,6 +1860,155 @@ fn handle_validate(
     }
 
     exit_code
+}
+
+/// Renders a `SweepSummary` as a one-line human-readable count summary.
+fn render_sync_text(summary: &qdev_core::SweepSummary) -> String {
+    format!(
+        "parsed={}, unchanged={}, purged={}, findings={}\n",
+        summary.parsed, summary.unchanged, summary.purged, summary.findings
+    )
+}
+
+/// Renders doctor section reports as a flat text block, one section per group of lines.
+fn render_doctor_text(sections: &[qdev_core::DoctorSectionReport]) -> String {
+    let mut out = String::new();
+    for section in sections {
+        out.push_str(&format!("[{}]\n", section.name));
+        for (key, value) in &section.fields {
+            let rendered = match value {
+                serde_json::Value::Null => "null".to_string(),
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            out.push_str(&format!("  {} = {}\n", key, rendered));
+        }
+    }
+    out
+}
+
+fn handle_sync(
+    sync_args: &cli::SyncArgs,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+) -> ExitCode {
+    let root = qdev_core::find_workspace_root(current_dir);
+
+    if let Err(e) = ensure_query_workspace(&root) {
+        let _ = output.emit_error(&e);
+        return e.exit_code();
+    }
+
+    let store = match open_query_store(&root, annotated_config) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let storage = &annotated_config.config.storage;
+    let summary = if sync_args.rebuild {
+        store.reset_and_rebuild(&root, storage)
+    } else {
+        store.sweep_workspace(&root, storage)
+    };
+
+    let summary = match summary {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    if cli.json {
+        let envelope = JsonEnvelope::new(summary);
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit sync envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else {
+        let text = render_sync_text(&summary);
+        if let Err(e) = output.emit_text(&text) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit sync output: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    }
+
+    ExitCode::Success
+}
+
+#[derive(Serialize)]
+struct DoctorPayload {
+    sections: Vec<qdev_core::DoctorSectionReport>,
+}
+
+fn handle_doctor(
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+) -> ExitCode {
+    let root = qdev_core::find_workspace_root(current_dir);
+
+    if let Err(e) = ensure_query_workspace(&root) {
+        let _ = output.emit_error(&e);
+        return e.exit_code();
+    }
+
+    let store = match open_query_store(&root, annotated_config) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let mut sections = Vec::new();
+    for section in qdev_core::default_doctor_sections() {
+        match section.run(&store) {
+            Ok(report) => sections.push(report),
+            Err(e) => {
+                let _ = output.emit_error(&e);
+                return e.exit_code();
+            }
+        }
+    }
+
+    if cli.json {
+        let envelope = JsonEnvelope::new(DoctorPayload { sections });
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit doctor envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else {
+        let text = render_doctor_text(&sections);
+        if let Err(e) = output.emit_text(&text) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit doctor output: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    }
+
+    ExitCode::Success
 }
 
 /// Guided duplicate-planning-id renumber for `qdev validate --fix-ids`. Gated exactly like

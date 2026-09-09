@@ -25,7 +25,7 @@ development_status:
   1-9-get-list-query-engine: review
   1-10-relations-dag-computed-blocked: review
   1-11-qdev-validate: review
-  1-12-qdev-sync-cache-diagnostics: backlog
+  1-12-qdev-sync-cache-diagnostics: review
   1-13-qdev-schema: backlog
   epic-1-retrospective: optional
 

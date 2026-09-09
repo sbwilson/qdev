@@ -50,6 +50,17 @@ pub enum Commands {
     Graph(GraphArgs),
     /// Surface cached and freshly computed integrity findings
     Validate(ValidateArgs),
+    /// Run or rebuild the incremental hydration sweep
+    Sync(SyncArgs),
+    /// Report structured cache and workspace diagnostics
+    Doctor,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct SyncArgs {
+    /// Drop and recreate the cache from Markdown before reporting counts
+    #[arg(long = "rebuild")]
+    pub rebuild: bool,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]

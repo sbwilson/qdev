@@ -15,7 +15,7 @@ use qdev_core::write::Author;
 use qdev_core::StorageConfig;
 
 #[test]
-fn test_schema_creation_and_all_15_tables_exist() {
+fn test_schema_creation_and_all_tables_exist() {
     let temp = TempDir::new().unwrap();
     let db_path = temp.path().join("test.sqlite");
     let store = SqliteStore::open(&db_path).unwrap();
@@ -36,7 +36,7 @@ fn test_schema_creation_and_all_15_tables_exist() {
             .filter_map(|r| r.ok())
             .collect();
 
-        assert_eq!(ALL_TABLE_NAMES.len(), 15);
+        assert_eq!(ALL_TABLE_NAMES.len(), 16);
         for &expected in ALL_TABLE_NAMES {
             assert!(
                 tables.contains(&expected.to_string()),
