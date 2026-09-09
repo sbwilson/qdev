@@ -141,6 +141,39 @@ The remaining 6 findings were rejected after verification (false claims, or real
 | 15 | `--fix-ids` always resolves the acting author via `resolve_author(None, None, ...)` with no CLI flag to override it, unlike `qdev update`/`relate` | low | Verified `ValidateArgs` has no `--author-type`/`--author-id` fields and the story's AC never mentions author override for `validate`. This is a feature request beyond the captured intent, not a bug in what was asked for. | reject (out of scope per intent) |
 | 16 | `find_orphan_deferred_work`/`find_dw_missing_rationale` (`validate.rs`) silently produce no finding when `store.get_entity(&dw.id)?` returns `None`, even though the DW row exists in `deferred_work` | false | Verified `delete_kind_detail_row` (`sqlite.rs:3775-3778`) deletes a DW's `deferred_work` row in the same purge transaction that removes its `entities` row, and both are inserted together during hydration — so a `deferred_work` row with no matching `entities` row is not reachable through any code path this story or the existing cache lifecycle touches. | reject |
 
+### 2026-09-09 — Cross-story review of stories 1.9-1.13 (bmad-review)
+
+**`--fix-ids` reference rewriting — reviewed, boundary reaffirmed, behaviour kept.**
+
+A cross-story review challenged Boundaries §"Always" — that the guided renumber rewrites "every
+relation referencing the old id (via the existing write path), and citations under the union of
+`config.modules[].paths`" — on the grounds that it is ambiguous in the duplicate case.
+
+The argument: the renumber keeps the duplicated id on the group's lexicographically-first file
+and renumbers the others, so a reference naming that id could have meant either file, and the
+keeper still holds it. Redirecting every reference to the new id therefore points references
+that meant the keeper at the renumbered entity instead. Nothing in the workspace records which
+file a given reference meant, so the tool cannot infer it.
+
+**Decision (human, 2026-09-09): keep the specified behaviour.** References follow the renumbered
+entity. This is the boundary as approved, and it is what a renumber means everywhere else in the
+tool. The ambiguity is real but unresolvable from the data, and the alternative (leaving
+references on the old id) silently strands the renumbered entity instead — a coin flip either
+way, so the specified behaviour stands.
+
+What that means in practice, now documented at every layer (`rewrite_relations_to`,
+`payload-fix-ids.json`, and the two CLI tests): after a renumber, incoming references point at
+the renumbered file, and the keeper — which still holds the original id — has none. A human who
+needs the other split reviews `renumbered[].relations_rewritten` and
+`renumbered[].citations_rewritten` in the payload and moves them back.
+
+Also changed in this pass, and *not* a boundary question: the renumber now takes the advisory
+write lock for each write (it took none), the reference rewriting runs outside that lock because
+`apply_relation_change` acquires it itself and it is not reentrant, the confirmation prompt is
+collected before any lock is taken, a partial failure reports what it already wrote inside the
+payload rather than as a second JSON document on stdout, and a reconciling sweep runs afterwards
+so the keeper's id is hydrated back into the cache.
+
 ## Design Notes
 
 - The duplicate-ID scan is independent of the cache (it re-reads every file under `specs_dir`), because the `entities.id` PRIMARY KEY means hydration's `ON CONFLICT(id) DO UPDATE` silently makes the last-processed file win — a second file declaring the same `id` leaves no trace in the cache to detect against.

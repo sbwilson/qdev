@@ -13,8 +13,8 @@ pub mod validate;
 pub mod write;
 
 pub use store::{
-    create_schema_v2, determine_entity_kind, drop_all_user_tables, ensure_cache,
-    inspect_cache_schema, CacheSchemaStatus, ConstraintRecord, DecisionRecord, DeferredWorkRecord,
+    create_schema, determine_entity_kind, drop_all_user_tables, ensure_cache, inspect_cache_schema,
+    stamp_cache_version, CacheSchemaStatus, ConstraintRecord, DecisionRecord, DeferredWorkRecord,
     DirtyEntityRecord, EntityFilter, EntityRecord, FindingRecord, GateRecord, GateRunRecord,
     RelationRecord, ScratchpadRecord, SoupRecord, SprintAssignmentRecord, SprintRecord,
     SqliteStore, Store, StoryRecord, SweepSummary, SyncStateRecord, ALL_TABLE_NAMES,
@@ -36,8 +36,8 @@ pub use envelope::{ErrorPayload, JsonEnvelope, JsonErrorEnvelope, SCHEMA_VERSION
 pub use errors::{ExitCode, QdevError};
 pub use id::{
     allocate_decision_id, allocate_decision_id_with_rng, allocate_deferred_work_id,
-    allocate_deferred_work_id_with_rng, allocate_next_story_id, ConstraintKind, ConstraintOwner,
-    IdParseError, Identifier, IdentifierKind,
+    allocate_deferred_work_id_with_rng, allocate_next_story_id, allocate_next_story_id_in,
+    ConstraintKind, ConstraintOwner, IdParseError, Identifier, IdentifierKind,
 };
 pub use init::{
     check_cache_status, init, CacheStatus, InitOptions, InitResult, CACHE_SCHEMA_VERSION,
@@ -57,17 +57,18 @@ pub use schema::{
 };
 pub use serde_yaml;
 pub use validate::{
-    collect_workspace_files, filter_by_changed, find_duplicate_planning_ids,
+    collect_workspace_files_matching, filter_by_changed, find_duplicate_planning_ids,
     find_dw_missing_rationale, find_orphan_deferred_work, find_unregistered_target_modules,
     git_changed_files, glob_match, has_error_finding, module_path_patterns, next_available_id,
     rewrite_citations, rewrite_frontmatter_id, run_validation, scan_duplicate_planning_ids,
-    DuplicateIdScan,
+    sort_findings, DuplicateIdScan,
 };
 pub use write::{
     acquire_write_lock, apply_entity_update, apply_relation_change, current_iso8601,
-    patch_frontmatter, replace_markdown_section, resolve_entity_file, sha256_digest,
-    upsert_cache_and_mark_dirty, write_file_atomic, AdvisoryLockGuard, Author, EntityUpdateOptions,
-    EntityUpdateResult, FrontmatterPatchOptions, RelationChangeOptions, RelationChangeResult,
+    iso8601_from_timestamp, patch_frontmatter, replace_markdown_section, resolve_entity_file,
+    sha256_digest, upsert_cache_and_mark_dirty, upsert_cache_with_relation, write_file_atomic,
+    AdvisoryLockGuard, Author, EntityUpdateOptions, EntityUpdateResult, FrontmatterPatchOptions,
+    RelationChangeOptions, RelationChangeResult, RelationRowChange,
 };
 
 use serde::{Deserialize, Serialize};

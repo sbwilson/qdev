@@ -218,3 +218,51 @@ fn test_sync_uninitialized_workspace_text_mode_exits_2() {
         stderr
     );
 }
+
+/// `--rebuild` drops and repopulates every table. `reset_and_rebuild` deliberately does not take
+/// the advisory write lock (`ensure_cache` calls it while already holding it), so this — its only
+/// other caller — must take it here, or a concurrent write can land in the middle of the
+/// drop-and-repopulate. Nothing else in the suite observes the acquisition.
+#[test]
+fn test_sync_rebuild_waits_on_the_advisory_write_lock() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    write_story(&root.join("docs/specs/stories"), "E1S1", "Story one");
+
+    let lock_path = root.join(".qdev/cache/write.lock");
+    let acquired = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let (acquired_c, release_c) = (acquired.clone(), release.clone());
+
+    let holder = std::thread::spawn(move || {
+        let _guard =
+            qdev_core::acquire_write_lock(&lock_path, Duration::from_millis(5000)).unwrap();
+        acquired_c.store(true, Ordering::SeqCst);
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_millis(6000) && !release_c.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    while !acquired.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["sync", "--rebuild", "--json"])
+        .timeout(Duration::from_secs(15))
+        .assert()
+        .failure()
+        .code(5);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["error"]["code"], "lock_timeout");
+
+    release.store(true, Ordering::SeqCst);
+    let _ = holder.join();
+}

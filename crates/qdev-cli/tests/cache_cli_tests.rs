@@ -468,6 +468,27 @@ updated_by:
 
     for (table, initial_rows) in &initial_dump {
         let rebuilt_rows = &rebuilt_dump[table];
+        // `sync_meta` records *when* each pass ran, not the content it describes, so it is
+        // expected to advance between the initial build and the rebuild — comparing its rows
+        // makes this test fail whenever the two straddle a second boundary. Its shape is
+        // asserted instead, so a pass that failed to stamp is still caught.
+        if table == "sync_meta" {
+            for (label, rows) in [("initial", initial_rows), ("rebuilt", rebuilt_rows)] {
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "{label} must leave exactly one sync_meta row"
+                );
+                let stamp = rows[0]
+                    .last()
+                    .expect("sync_meta row has a timestamp column");
+                assert!(
+                    stamp.len() == 20 && stamp.ends_with('Z') && stamp.contains('T'),
+                    "{label} stamped a malformed last_synced_at: {stamp:?}"
+                );
+            }
+            continue;
+        }
         assert_eq!(
             initial_rows, rebuilt_rows,
             "Table '{}' rows differ between initial build and rebuild!\nInitial: {:?}\nRebuilt: {:?}",

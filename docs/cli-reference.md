@@ -43,15 +43,15 @@ Universal reference resolution: any command that takes an ID accepts any entity 
 | --- | --- |
 | `qdev` | Pulse: environment, active sprints, what to do next |
 | `qdev init [--non-interactive --name --developer --team ...]` | Scaffold config, directories, cache, hooks |
-| `qdev doctor [--fix]` | Environment, cache, gates, skills, MCP, hooks |
-| `qdev validate [--fix-ids]` | Dangling relations, cycles, ID collisions, schema, orphan DW, missing rationale |
+| `qdev doctor` | Environment, cache, gates, skills, MCP, hooks |
+| `qdev validate [--changed] [--fix-ids] [--yes]` | Dangling relations, cycles, ID collisions, schema, orphan DW, missing rationale |
 | `qdev sync [--rebuild]` | Force hydration or rebuild the cache |
 | `qdev schema <entity-kind>` | Print JSON Schema for an entity's frontmatter shape (`story`, `epic`, `dw`, ...) |
-| `qdev schema payload <name>` | Print JSON Schema for a command's output payload (`story`, `error`, `validate`; `context`/`next`/`gate_run` land with their commands) |
+| `qdev schema payload <name>` | Print JSON Schema for a command's output payload (`story`, `error`, `validate`, `fix_ids`, `list`, `sync`, `doctor`; `context`/`next`/`gate_run` land with their commands) |
 | `qdev config show` | Effective merged configuration |
 | `qdev next [--sprint N] [--owner me]` | Deterministically select the next unblocked story |
 | `qdev context <id> --phase P [--budget N] [--stats]` | Token-budgeted projection for an agent phase |
-| `qdev graph [--dot] [--epic E12]` | Dependency DAG |
+| `qdev graph --dot [--epic E12]` | Dependency DAG (`--dot` is required; no other output format yet) |
 | `qdev impact <id>` | Affected stories, modules, requirements, and gates to re-run |
 
 ### Entities

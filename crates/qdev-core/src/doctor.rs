@@ -28,13 +28,29 @@ impl Serialize for DoctorSectionReport {
     where
         S: serde::Serializer,
     {
-        let mut map = serializer.serialize_map(Some(1 + self.fields.len()))?;
+        // A repeated key — whether it collides with the reserved "name" or with another field
+        // of the same section — would emit a duplicate JSON key, which strict consumers reject
+        // outright. `debug_assert` catches it while developing a new section; in release the
+        // later colliding field is dropped rather than corrupting the object.
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        seen.insert("name");
+        let emitted: Vec<&(String, serde_json::Value)> = self
+            .fields
+            .iter()
+            .filter(|(key, _)| {
+                let fresh = seen.insert(key.as_str());
+                debug_assert!(
+                    fresh,
+                    "DoctorSectionReport field key '{}' is duplicated or collides with the \
+                     reserved \"name\" key",
+                    key
+                );
+                fresh
+            })
+            .collect();
+        let mut map = serializer.serialize_map(Some(1 + emitted.len()))?;
         map.serialize_entry("name", &self.name)?;
-        for (key, value) in &self.fields {
-            debug_assert!(
-                key != "name",
-                "DoctorSectionReport field key collides with the reserved \"name\" key"
-            );
+        for (key, value) in emitted {
             map.serialize_entry(key, value)?;
         }
         map.end()
@@ -50,7 +66,10 @@ pub trait DoctorSection {
     fn run(&self, store: &dyn Store) -> Result<DoctorSectionReport, QdevError>;
 }
 
-/// Reports cache health: schema version, entity count, sync freshness, and finding count.
+/// Reports cache health: the schema version the cache database *actually* carries next to the
+/// one this binary expects, any tables missing from it, entity count, sync freshness, and
+/// finding count. Reading the observed version from the database rather than echoing the
+/// compiled-in constant is what lets this section detect a stale or half-migrated cache at all.
 pub struct CacheDoctorSection;
 
 impl DoctorSection for CacheDoctorSection {
@@ -59,20 +78,55 @@ impl DoctorSection for CacheDoctorSection {
     }
 
     fn run(&self, store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
-        let entity_count = store.list_entities(&EntityFilter::default())?.len();
-        let last_synced_at = store.get_last_synced_at()?;
-        let finding_count = store.list_findings()?.len();
+        let observed_schema_version = store.cache_schema_version()?;
+        let missing_tables = store.cache_missing_tables()?;
+
+        let schema_status =
+            if observed_schema_version == CACHE_SCHEMA_VERSION && missing_tables.is_empty() {
+                "ok"
+            } else {
+                "mismatch"
+            };
+
+        // The counts below read tables a half-migrated cache may not have. A diagnostic that
+        // fails on a broken cache is no diagnostic at all, so a failed read is reported as
+        // `null` beside the `schema_status` that explains it, rather than aborting the section.
+        let entity_count = store
+            .list_entities(&EntityFilter::default())
+            .map(|entities| entities.len())
+            .ok();
+        let last_synced_at = store.get_last_synced_at().unwrap_or(None);
+        let finding_count = store.list_findings().map(|findings| findings.len()).ok();
 
         Ok(DoctorSectionReport {
             name: self.name().to_string(),
             fields: vec![
+                // Named `cache_schema_version`, not `schema_version`: the envelope already
+                // has a `schema_version` (a string, the payload contract version), and a
+                // section field of the same name but a different type and meaning would be a
+                // trap for anything reading the payload generically.
                 (
-                    "schema_version".to_string(),
+                    "cache_schema_version".to_string(),
+                    serde_json::Value::from(observed_schema_version),
+                ),
+                (
+                    "expected_cache_schema_version".to_string(),
                     serde_json::Value::from(CACHE_SCHEMA_VERSION),
                 ),
                 (
+                    "schema_status".to_string(),
+                    serde_json::Value::from(schema_status),
+                ),
+                (
+                    "missing_tables".to_string(),
+                    serde_json::Value::from(missing_tables),
+                ),
+                (
                     "entity_count".to_string(),
-                    serde_json::Value::from(entity_count),
+                    match entity_count {
+                        Some(count) => serde_json::Value::from(count),
+                        None => serde_json::Value::Null,
+                    },
                 ),
                 (
                     "last_synced_at".to_string(),
@@ -83,7 +137,10 @@ impl DoctorSection for CacheDoctorSection {
                 ),
                 (
                     "finding_count".to_string(),
-                    serde_json::Value::from(finding_count),
+                    match finding_count {
+                        Some(count) => serde_json::Value::from(count),
+                        None => serde_json::Value::Null,
+                    },
                 ),
             ],
         })

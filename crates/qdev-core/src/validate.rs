@@ -105,6 +105,17 @@ pub fn find_duplicate_planning_ids(
     Ok(findings)
 }
 
+/// The source path to report a deferred-work finding against. A `deferred_work` row whose
+/// `entities` row is missing is itself a broken cache, but the finding must still be reported:
+/// dropping it would let `qdev validate` exit 0 on a workspace that has a real problem, so the
+/// id is named in a placeholder path instead.
+fn deferred_work_path(store: &dyn Store, dw_id: &str) -> Result<String, QdevError> {
+    Ok(match store.get_entity(dw_id)? {
+        Some(entity) => entity.source_path,
+        None => format!("(unknown path for {})", dw_id),
+    })
+}
+
 /// `orphan_deferred_work`: DW's `origin_story_id` is set but `get_entity` returns `None` for it.
 pub fn find_orphan_deferred_work(store: &dyn Store) -> Result<Vec<FindingRecord>, QdevError> {
     let found_at = current_iso8601();
@@ -117,9 +128,9 @@ pub fn find_orphan_deferred_work(store: &dyn Store) -> Result<Vec<FindingRecord>
         if store.get_entity(origin)?.is_some() {
             continue;
         }
-        if let Some(dw_entity) = store.get_entity(&dw.id)? {
+        {
             findings.push(FindingRecord {
-                path: dw_entity.source_path,
+                path: deferred_work_path(store, &dw.id)?,
                 code: "orphan_deferred_work".to_string(),
                 severity: ERROR_SEVERITY.to_string(),
                 message: Some(format!(
@@ -151,9 +162,9 @@ pub fn find_dw_missing_rationale(store: &dyn Store) -> Result<Vec<FindingRecord>
         if has_rationale {
             continue;
         }
-        if let Some(dw_entity) = store.get_entity(&dw.id)? {
+        {
             findings.push(FindingRecord {
-                path: dw_entity.source_path,
+                path: deferred_work_path(store, &dw.id)?,
                 code: "dw_missing_rationale".to_string(),
                 severity: ERROR_SEVERITY.to_string(),
                 message: Some(format!(
@@ -266,8 +277,21 @@ pub fn git_changed_files(
         ));
     }
 
+    // `--relative` makes git report paths relative to the working directory (the qdev
+    // workspace root) rather than to the repository root, and restricts the diff to that
+    // subtree — without it, a workspace living in a subdirectory of its repository gets paths
+    // that can never match a finding's workspace-relative `path`, and `--changed` silently
+    // reports nothing. `core.quotePath=false` stops git octal-escaping non-ASCII paths, which
+    // would likewise never match.
     let diff_output = Command::new("git")
-        .args(["diff", "--name-only", &merge_base])
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--name-only",
+            "--relative",
+            &merge_base,
+        ])
         .current_dir(workspace_root)
         .output()
         .map_err(|e| {
@@ -281,7 +305,7 @@ pub fn git_changed_files(
         return Err(QdevError::infrastructure_failure(
             "git_diff_failed",
             format!(
-                "'git diff --name-only {}' failed: {}",
+                "'git diff --name-only --relative {}' failed: {}",
                 merge_base,
                 String::from_utf8_lossy(&diff_output.stderr).trim()
             ),
@@ -298,8 +322,16 @@ pub fn git_changed_files(
     // `git diff --name-only` only reports tracked-file changes, so a file that was just
     // created and not yet `git add`ed would otherwise never appear in `--changed` — the most
     // common real trigger for a fresh `duplicate_planning_id`.
+    // `git ls-files` already reports paths relative to the working directory, so this only
+    // needs the quoting disabled to line up with the diff output above.
     let untracked_output = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+        ])
         .current_dir(workspace_root)
         .output()
         .map_err(|e| {
@@ -344,10 +376,14 @@ pub fn filter_by_changed(
 
     for finding in findings {
         if finding.code == "dependency_cycle" {
-            cycle_groups
-                .entry(finding.message.clone().unwrap_or_default())
-                .or_default()
-                .push(finding);
+            // A message-less cycle row cannot be grouped with any other row, so it gets a key
+            // unique to its own path: grouping every message-less row together would merge two
+            // unrelated cycles and report an untouched one as changed.
+            let key = match finding.message.clone() {
+                Some(message) => message,
+                None => format!("\u{0}nomsg\u{0}{}", finding.path),
+            };
+            cycle_groups.entry(key).or_default().push(finding);
         } else if changed_paths.contains(&finding.path) {
             kept.push(finding);
         }
@@ -359,10 +395,32 @@ pub fn filter_by_changed(
         }
     }
 
-    kept.sort_by(|a, b| {
-        (a.path.as_str(), a.code.as_str()).cmp(&(b.path.as_str(), b.code.as_str()))
-    });
+    sort_findings(&mut kept);
     kept
+}
+
+/// Total order over findings, so `qdev validate --json` is byte-identical across runs even when
+/// one path holds several findings of the same code. `(path, code)` alone is not a total order:
+/// since cache schema v3 a path can carry two `dangling_relation` rows, and the merge of cached
+/// and freshly computed findings can also produce same-key pairs. Every field of the record is
+/// in the key, so only genuinely identical findings compare equal.
+pub fn sort_findings(findings: &mut [FindingRecord]) {
+    findings.sort_by(|a, b| {
+        (
+            a.path.as_str(),
+            a.code.as_str(),
+            a.message.as_deref().unwrap_or(""),
+            a.severity.as_str(),
+            a.found_at.as_str(),
+        )
+            .cmp(&(
+                b.path.as_str(),
+                b.code.as_str(),
+                b.message.as_deref().unwrap_or(""),
+                b.severity.as_str(),
+                b.found_at.as_str(),
+            ))
+    });
 }
 
 /// Returns `true` iff any finding is `error`-severity, the exit-code decision rule shared by
@@ -452,6 +510,8 @@ pub fn rewrite_frontmatter_id(content: &str, new_id: &str) -> Result<String, Qde
         )
     })?;
 
+    // Only a delimiter at column 0 closes the frontmatter. A `---` inside a block scalar is
+    // necessarily indented past its key, so it cannot be mistaken for one.
     let mut close_idx = None;
     for (idx, &line) in all_lines.iter().enumerate().skip(open_line + 1) {
         let line_no_eol = line.trim_end_matches(['\r', '\n']);
@@ -467,15 +527,6 @@ pub fn rewrite_frontmatter_id(content: &str, new_id: &str) -> Result<String, Qde
         )
     })?;
 
-    let newline = if all_lines
-        .iter()
-        .any(|l| l.ends_with("\r\n") || l.contains("\r\n"))
-    {
-        "\r\n"
-    } else {
-        "\n"
-    };
-
     let mut found = false;
     let mut result_lines: Vec<String> = Vec::new();
     for &line in &all_lines[(open_line + 1)..close_line] {
@@ -483,9 +534,20 @@ pub fn rewrite_frontmatter_id(content: &str, new_id: &str) -> Result<String, Qde
         if !found && !trimmed.starts_with(' ') && !trimmed.starts_with('\t') {
             if let Some((key, value)) = trimmed.split_once(':') {
                 if key.trim() == "id" {
+                    // Take the line ending from the id line itself, not from the file as a
+                    // whole: deriving it from any CRLF anywhere would rewrite this one line
+                    // with CRLF in an otherwise-LF file, for pure diff noise.
+                    let newline = if line.ends_with("\r\n") {
+                        "\r\n"
+                    } else if line.ends_with('\n') {
+                        "\n"
+                    } else {
+                        ""
+                    };
                     // Preserve a trailing inline comment on the id line, if any, so a
                     // renumber doesn't silently discard it.
-                    let trailing_comment = value.find('#').map(|idx| value[idx..].trim_end());
+                    let trailing_comment =
+                        inline_comment_start(value).map(|idx| value[idx..].trim_end());
                     let new_line = match trailing_comment {
                         Some(comment) => format!("id: {} {}{}", new_id, comment, newline),
                         None => format!("id: {}{}", new_id, newline),
@@ -519,7 +581,36 @@ pub fn rewrite_frontmatter_id(content: &str, new_id: &str) -> Result<String, Qde
     Ok(final_content)
 }
 
-/// Rewrites bracket citations in `content` matching `pattern` from `old_id` to `new_id`,
+/// Index at which an inline `#` comment starts in a frontmatter scalar value, or `None`. Only a
+/// `#` that is outside any quoted scalar and preceded by whitespace opens a YAML comment: in
+/// `id: "AD-1#2"` the `#` is part of the value, and treating it as a comment would re-emit half
+/// the old value as a comment on the rewritten line.
+fn inline_comment_start(value: &str) -> Option<usize> {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut prev_is_space = true;
+    let mut escaped = false;
+    for (idx, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            prev_is_space = false;
+            continue;
+        }
+        match ch {
+            // Only double-quoted YAML scalars use backslash escapes; inside them a `\"` is a
+            // literal quote and must not flip the quote state.
+            '\\' if in_double => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '#' if !in_single && !in_double && prev_is_space => return Some(idx),
+            _ => {}
+        }
+        prev_is_space = ch.is_whitespace();
+    }
+    None
+}
+
+/// Rewrites citations in `content` matching `pattern` from `old_id` to `new_id`,
 /// touching only occurrences whose captured id (the pattern's first capture group) is exactly
 /// `old_id` — never every match of the citation pattern. Returns the rewritten content and the
 /// number of citations changed.
@@ -531,16 +622,21 @@ pub fn rewrite_citations(
 ) -> (String, usize) {
     let mut count = 0usize;
     let rewritten = pattern.replace_all(content, |caps: &regex::Captures| {
-        let captured = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-        if captured == old_id {
-            count += 1;
-            format!("[{}]", new_id)
-        } else {
-            caps.get(0)
-                .map(|m| m.as_str())
-                .unwrap_or_default()
-                .to_string()
-        }
+        let (whole, whole_start) = match caps.get(0) {
+            Some(m) => (m.as_str(), m.start()),
+            None => return String::new(),
+        };
+        let id_match = match caps.get(1) {
+            Some(m) if m.as_str() == old_id => m,
+            _ => return whole.to_string(),
+        };
+        count += 1;
+        // Substitute the id inside whatever delimiters the configured pattern matched rather
+        // than emitting a fixed `[NEWID]`: `config.hygiene.citation_pattern` is configurable,
+        // and a non-bracket citation syntax must survive the renumber intact.
+        let start = id_match.start() - whole_start;
+        let end = start + id_match.as_str().len();
+        format!("{}{}{}", &whole[..start], new_id, &whole[end..])
     });
     (rewritten.into_owned(), count)
 }
@@ -552,6 +648,17 @@ pub fn rewrite_citations(
 /// real paths rather than merely stored), so this is a minimal, dependency-free implementation
 /// rather than pulling in a glob crate for one call site.
 pub fn glob_match(pattern: &str, rel_path: &str) -> bool {
+    // A pattern with no glob metacharacters names a directory (or a single file): match the
+    // path itself and everything beneath it. Without this, the natural config value
+    // `paths = ["crates/qdev-core"]` is fully anchored and matches no file at all, so
+    // `--fix-ids` silently rewrites zero citations and reports that as "none to rewrite".
+    if !pattern.contains(['*', '?']) {
+        // A trailing slash is a natural way to write a directory, and must not change the
+        // meaning — `glob_literal_prefix` trims one too, so pruning and matching stay in step.
+        let dir = pattern.trim_end_matches('/');
+        return rel_path == dir || rel_path.starts_with(&format!("{}/", dir));
+    }
+
     let mut regex_str = String::from("^");
     let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0;
@@ -599,39 +706,97 @@ pub fn module_path_patterns(config: &Config) -> Vec<String> {
     patterns
 }
 
-/// Recursively lists every regular file under `dir` (workspace-relative paths, `/`-separated),
-/// skipping `.git`, `.qdev`, and symlinked directories so a citation-rewrite walk never follows
-/// out of the workspace or touches the gitignored cache.
-pub fn collect_workspace_files(workspace_root: &Path, dir: &Path, out: &mut Vec<String>) {
-    const SKIP_DIRS: [&str; 2] = [".git", ".qdev"];
-    if !dir.is_dir() {
-        return;
+/// The leading literal directory prefix of a glob — everything before the first `*` or `?`,
+/// truncated at the last `/`. `"crates/*/src/**"` yields `"crates"`; a pattern with no
+/// metacharacters is entirely literal.
+fn glob_literal_prefix(pattern: &str) -> &str {
+    match pattern.find(['*', '?']) {
+        Some(idx) => match pattern[..idx].rfind('/') {
+            Some(slash) => &pattern[..slash],
+            None => "",
+        },
+        None => pattern.trim_end_matches('/'),
     }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+}
+
+/// Whether any file under `dir_rel` could match one of `patterns` — a sound over-approximation
+/// used to prune the walk. Comparing literal prefixes never prunes a directory that could hold
+/// a match, and an empty `patterns` list means "no filtering", so everything is descended.
+fn could_contain_match(patterns: &[String], dir_rel: &str) -> bool {
+    if patterns.is_empty() || dir_rel.is_empty() {
+        return true;
+    }
+    patterns.iter().any(|pattern| {
+        let prefix = glob_literal_prefix(pattern);
+        prefix.is_empty()
+            || prefix == dir_rel
+            || prefix.starts_with(&format!("{}/", dir_rel))
+            || dir_rel.starts_with(&format!("{}/", prefix))
+    })
+}
+
+/// Lists every regular file under `dir` (workspace-relative paths, `/`-separated), skipping
+/// `.git`, `.qdev`, and symlinked directories so a workspace walk never follows out of the
+/// workspace or touches the gitignored cache, and pruned to the directories that could contain
+/// a match for one of `patterns` (empty = no pruning).
+///
+/// Pruning happens *during* the walk rather than as a filter afterwards: collecting first means
+/// enumerating `target/` and `node_modules/` in full before discarding them, which dominates
+/// the runtime of `--fix-ids` in any repo with build output.
+///
+/// The walk is iterative — a worklist rather than recursion — so a deeply nested tree cannot
+/// overflow the stack part-way through a renumber.
+pub fn collect_workspace_files_matching(
+    workspace_root: &Path,
+    dir: &Path,
+    patterns: &[String],
+    out: &mut Vec<String>,
+) {
+    const SKIP_DIRS: [&str; 2] = [".git", ".qdev"];
+    let appended_from = out.len();
+    let mut worklist: Vec<std::path::PathBuf> = vec![dir.to_path_buf()];
+
+    let relative_to_root = |path: &Path| -> String {
+        path.strip_prefix(workspace_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_symlink() {
+
+    while let Some(current) = worklist.pop() {
+        if !current.is_dir() {
             continue;
         }
-        if path.is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if SKIP_DIRS.contains(&name) {
+        let entries = match std::fs::read_dir(&current) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_symlink() {
+                continue;
+            }
+            if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if SKIP_DIRS.contains(&name) {
+                        continue;
+                    }
+                }
+                if !could_contain_match(patterns, &relative_to_root(&path)) {
                     continue;
                 }
+                worklist.push(path);
+            } else if path.is_file() {
+                out.push(relative_to_root(&path));
             }
-            collect_workspace_files(workspace_root, &path, out);
-        } else if path.is_file() {
-            let rel = path
-                .strip_prefix(workspace_root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            out.push(rel);
         }
     }
+
+    // `read_dir` order is filesystem-dependent and the worklist visits siblings in reverse
+    // discovery order, so the paths this call appends are sorted to make the result
+    // deterministic. Only this call's own entries are touched: a caller accumulating into a
+    // shared vector keeps whatever ordering it had already established.
+    out[appended_from..].sort();
 }
 
 #[cfg(test)]

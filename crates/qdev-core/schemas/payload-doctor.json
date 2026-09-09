@@ -1,0 +1,71 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Doctor Payload Schema",
+  "description": "Output shape of `qdev doctor --json`. Each section is a flat object whose fields are section-specific; only `name` is common to all of them, and later epics add sections without changing this envelope. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "type": "object",
+  "required": ["schema_version", "sections"],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Stable, short section name (e.g. \"cache\")."
+          },
+          "cache_schema_version": {
+            "type": "integer",
+            "description": "cache section: the version the cache database actually carries, read from it rather than reported back from this binary's own constant."
+          },
+          "expected_cache_schema_version": {
+            "type": "integer",
+            "description": "cache section: the version this binary was built for."
+          },
+          "schema_status": {
+            "type": "string",
+            "enum": ["ok", "mismatch"],
+            "description": "cache section: \"ok\" only when the observed version matches and no table is missing."
+          },
+          "missing_tables": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "cache section: expected tables absent from the database."
+          },
+          "entity_count": {
+            "type": ["integer", "null"],
+            "description": "cache section: null when the cache is too damaged to read, in which case schema_status explains why."
+          },
+          "last_synced_at": { "type": ["string", "null"] },
+          "finding_count": {
+            "type": ["integer", "null"],
+            "description": "cache section: null when the cache is too damaged to read."
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "name": { "const": "cache" } },
+              "required": ["name"]
+            },
+            "then": {
+              "required": [
+                "cache_schema_version",
+                "expected_cache_schema_version",
+                "schema_status",
+                "missing_tables",
+                "entity_count",
+                "last_synced_at",
+                "finding_count"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+}

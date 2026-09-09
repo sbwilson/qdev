@@ -11,7 +11,7 @@ use tempfile::TempDir;
 use qdev_core::rusqlite;
 use qdev_core::store::{
     ensure_cache, inspect_cache_schema, CacheSchemaStatus, EntityRecord, FindingRecord,
-    SqliteStore, Store, SweepSummary, ALL_TABLE_NAMES,
+    SqliteStore, Store, SweepSummary, ALL_TABLE_NAMES, CACHE_SCHEMA_VERSION, CACHE_USER_VERSION,
 };
 use qdev_core::StorageConfig;
 
@@ -639,7 +639,7 @@ fn test_gates_refresh_on_config_change() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_v1_cache_auto_rebuilds_to_v2() {
+fn test_v1_cache_auto_rebuilds_to_current_schema() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     make_workspace(root, &["E1S1", "E1S2"]);
@@ -654,7 +654,7 @@ fn test_v1_cache_auto_rebuilds_to_v2() {
             .unwrap();
     }
 
-    // Any boot detects the mismatch and rebuilds to v2.
+    // Any boot detects the mismatch and rebuilds to the current schema version.
     let store = ensure_cache(root, &storage).unwrap();
 
     let conn = rusqlite::Connection::open(cache_db(root)).unwrap();
@@ -664,10 +664,16 @@ fn test_v1_cache_auto_rebuilds_to_v2() {
     let schema_ver: u32 = conn
         .query_row("PRAGMA schema_version;", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(user_ver, 2, "user_version rebuilt to 2");
-    assert_eq!(schema_ver, 2, "schema_version rebuilt to 2");
+    assert_eq!(
+        user_ver, CACHE_USER_VERSION,
+        "user_version rebuilt to the current version"
+    );
+    assert_eq!(
+        schema_ver, CACHE_SCHEMA_VERSION,
+        "schema_version rebuilt to the current version"
+    );
 
-    // 15 tables present.
+    // Every table present.
     let tables: Vec<String> = rusqlite::Connection::open(cache_db(root))
         .unwrap()
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
@@ -679,7 +685,7 @@ fn test_v1_cache_auto_rebuilds_to_v2() {
     assert_eq!(
         tables.len(),
         ALL_TABLE_NAMES.len(),
-        "v2 cache has {} tables",
+        "rebuilt cache has {} tables",
         ALL_TABLE_NAMES.len()
     );
 
@@ -750,8 +756,25 @@ fn test_rebuild_and_sweep_findings_equal() {
 
     for &table in ALL_TABLE_NAMES {
         // `sync_meta` legitimately differs: it stamps *when* each pass ran, not the content it
-        // describes, so it is expected to advance between the sweep and the rebuild that follows.
+        // describes, so it is expected to advance between the sweep and the rebuild that
+        // follows. Its shape is still asserted below rather than skipped outright — a pass
+        // that failed to stamp, or wrongly cleared the table, must not slip through here.
         if table == "sync_meta" {
+            for (label, dump) in [("sweep", &swept), ("rebuild", &rebuilt)] {
+                let rows = dump.get(table).expect("sync_meta table must exist");
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "{label} must leave exactly one sync_meta row"
+                );
+                let stamp = rows[0]
+                    .last()
+                    .expect("sync_meta row has a timestamp column");
+                assert!(
+                    stamp.len() == 20 && stamp.ends_with('Z') && stamp.contains('T'),
+                    "{label} stamped a malformed last_synced_at: {stamp:?}"
+                );
+            }
             continue;
         }
         assert_eq!(
@@ -1158,7 +1181,7 @@ fn downgrade_cache_to_v1(root: &Path) {
 }
 
 #[test]
-fn test_real_v1_cache_rebuilds_to_v2_and_matches_a_fresh_sweep() {
+fn test_real_v1_cache_rebuilds_to_current_schema_and_matches_a_fresh_sweep() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     write_qdev_toml(root, "");
@@ -1191,13 +1214,13 @@ fn test_real_v1_cache_rebuilds_to_v2_and_matches_a_fresh_sweep() {
         "the downgraded cache really lacks entities.stale"
     );
 
-    // Any boot rebuilds it losslessly to v2.
+    // Any boot rebuilds it losslessly to the current schema version.
     let store = ensure_cache(root, &storage).unwrap();
     let conn = rusqlite::Connection::open(cache_db(root)).unwrap();
     let user_ver: u32 = conn
         .query_row("PRAGMA user_version;", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(user_ver, 2);
+    assert_eq!(user_ver, CACHE_USER_VERSION);
     let tables: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';",
@@ -1208,7 +1231,7 @@ fn test_real_v1_cache_rebuilds_to_v2_and_matches_a_fresh_sweep() {
     assert_eq!(
         tables,
         ALL_TABLE_NAMES.len() as i64,
-        "v2 cache has {} tables",
+        "rebuilt cache has {} tables",
         ALL_TABLE_NAMES.len()
     );
     assert_eq!(
@@ -1251,7 +1274,7 @@ fn test_half_migrated_v1_cache_is_reported_as_mismatch() {
     let store = SqliteStore::open(cache_db(root)).unwrap();
     store
         .with_conn(|conn| {
-            qdev_core::store::create_schema_v2(conn).unwrap();
+            qdev_core::store::create_schema(conn).unwrap();
             Ok(())
         })
         .unwrap();
@@ -1482,4 +1505,308 @@ fn test_sync_reports_summary_counts_matching_sweep_summary_shape() {
     assert_eq!(rebuild_summary.parsed, 3);
     assert_eq!(rebuild_summary.unchanged, 0);
     assert_eq!(rebuild_summary.purged, 0);
+}
+
+/// Removes `sync_meta` from an otherwise-current cache, leaving every other table, the
+/// `entities.stale` column, and both version pragmas exactly as a healthy cache has them. This
+/// is the shape a cache written by a pre-1.12 binary has, and the *only* thing that
+/// distinguishes it is the missing table.
+fn drop_sync_meta(root: &Path) {
+    let conn = rusqlite::Connection::open(cache_db(root)).unwrap();
+    conn.execute_batch("DROP TABLE IF EXISTS sync_meta;")
+        .unwrap();
+    // Both pragmas are restamped, not just `user_version`: `DROP TABLE` bumps SQLite's own
+    // schema cookie, and `inspect_cache_schema` compares that cookie *before* it looks at the
+    // table list. Leaving it bumped would let the test pass on the pragma check alone, so the
+    // table-presence check it exists to pin could be deleted with the test still green.
+    conn.execute_batch(&format!(
+        "PRAGMA writable_schema = ON;\nPRAGMA user_version = {};\nPRAGMA schema_version = {};\nPRAGMA writable_schema = OFF;",
+        CACHE_USER_VERSION, CACHE_SCHEMA_VERSION
+    ))
+    .unwrap();
+}
+
+/// A cache missing only `sync_meta` must be reported `Mismatch`, not `Valid`. The pragmas
+/// cannot catch this on their own — the older binary stamped them to its own current version
+/// after every rebuild, and sweeps issue DML only — so the table-presence check is the sole
+/// detector. If it stopped covering `sync_meta`, `ensure_cache` would take its healthy-boot
+/// branch and the sweep's `INSERT INTO sync_meta` would fail with `no such table`, leaving
+/// every qdev command in that workspace broken until the cache was deleted by hand.
+#[test]
+fn test_cache_missing_only_sync_meta_is_reported_as_mismatch_and_healed() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1", "E1S2"]);
+    let storage = storage();
+    drop(ensure_cache(root, &storage).unwrap());
+
+    drop_sync_meta(root);
+    assert_eq!(
+        count_rows(
+            root,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sync_meta';"
+        ),
+        0,
+        "fixture must actually remove the table"
+    );
+    {
+        let conn = rusqlite::Connection::open(cache_db(root)).unwrap();
+        let user_ver: u32 = conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))
+            .unwrap();
+        let schema_ver: u32 = conn
+            .query_row("PRAGMA schema_version;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(user_ver, CACHE_USER_VERSION);
+        assert_eq!(
+            schema_ver, CACHE_SCHEMA_VERSION,
+            "the fixture must look healthy to the pragma check, so that only the \
+             table-presence check can catch this cache"
+        );
+    }
+    assert_eq!(
+        inspect_cache_schema(&cache_db(root)).unwrap(),
+        CacheSchemaStatus::Mismatch,
+        "a cache with no sync_meta table must never be reported Valid"
+    );
+
+    // Booting heals it: the table is back, stamped, and the entities survive the rebuild.
+    let store = ensure_cache(root, &storage).unwrap();
+    assert!(
+        store.get_last_synced_at().unwrap().is_some(),
+        "the healed cache must carry a sync stamp"
+    );
+    assert_eq!(
+        inspect_cache_schema(&cache_db(root)).unwrap(),
+        CacheSchemaStatus::Valid
+    );
+    assert_eq!(store.list_entities(&Default::default()).unwrap().len(), 2);
+}
+
+/// `qdev doctor` reads the schema version off the database rather than echoing the binary's
+/// own constant, so it can actually tell a stale cache from a current one.
+#[test]
+fn test_cache_schema_introspection_reports_observed_state() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    assert_eq!(store.cache_schema_version().unwrap(), CACHE_USER_VERSION);
+    assert!(store.cache_missing_tables().unwrap().is_empty());
+    drop(store);
+
+    // Stamp an older version and drop a table behind the store's back; both must be observed.
+    let conn = rusqlite::Connection::open(cache_db(root)).unwrap();
+    conn.execute_batch("PRAGMA user_version = 1; DROP TABLE IF EXISTS sync_meta;")
+        .unwrap();
+    drop(conn);
+
+    let store = SqliteStore::open(cache_db(root)).unwrap();
+    assert_eq!(store.cache_schema_version().unwrap(), 1);
+    assert_eq!(
+        store.cache_missing_tables().unwrap(),
+        vec!["sync_meta".to_string()]
+    );
+}
+
+/// Opening a cache to write one entity must never mark an older database as current. The write
+/// path calls `create_schema` on whatever cache the workspace has; `CREATE TABLE IF NOT EXISTS`
+/// leaves an existing older table alone, so if that call also stamped the version pragmas, an
+/// unmigrated cache would start reporting Valid — `ensure_cache` would skip the rebuild and
+/// every later sweep would die on the missing column, with no recovery but deleting the file.
+#[test]
+fn test_writing_to_an_older_cache_does_not_stamp_it_as_current() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    let storage = storage();
+    drop(ensure_cache(root, &storage).unwrap());
+
+    // An older cache: the current tables minus the column v3 added, stamped with the old version.
+    {
+        let conn = rusqlite::Connection::open(cache_db(root)).unwrap();
+        conn.execute_batch(
+            "DROP TABLE findings;
+             CREATE TABLE findings (
+                 path TEXT NOT NULL,
+                 code TEXT NOT NULL,
+                 severity TEXT NOT NULL,
+                 message TEXT,
+                 found_at TEXT NOT NULL,
+                 PRIMARY KEY (path, code)
+             );
+             PRAGMA user_version = 2;
+             PRAGMA schema_version = 2;",
+        )
+        .unwrap();
+    }
+
+    let record = EntityRecord {
+        id: "E1S1".to_string(),
+        kind: qdev_core::EntityKind::Story,
+        title: Some("Story".to_string()),
+        status: Some("draft".to_string()),
+        owners: None,
+        source_path: "docs/specs/stories/E1S1.md".to_string(),
+        content_hash: "hash".to_string(),
+        version: 2,
+        created_by: None,
+        updated_by: None,
+        updated_at: "2026-09-09T00:00:00Z".to_string(),
+        stale: false,
+        epic_id: Some("E1".to_string()),
+        seq: Some(1),
+        appetite: None,
+        safety_class: None,
+        target_modules: None,
+    };
+    qdev_core::upsert_cache_and_mark_dirty(&cache_db(root), &record).unwrap();
+
+    assert_ne!(
+        rusqlite::Connection::open(cache_db(root))
+            .unwrap()
+            .query_row("PRAGMA user_version;", [], |r| r.get::<_, u32>(0))
+            .unwrap(),
+        CACHE_USER_VERSION,
+        "a write must not stamp the current version onto tables it did not migrate"
+    );
+    assert_eq!(
+        inspect_cache_schema(&cache_db(root)).unwrap(),
+        CacheSchemaStatus::Mismatch,
+        "the older cache must still be seen as needing a rebuild"
+    );
+
+    // And booting still heals it rather than dying on the missing column.
+    let store = ensure_cache(root, &storage).unwrap();
+    assert_eq!(
+        inspect_cache_schema(&cache_db(root)).unwrap(),
+        CacheSchemaStatus::Valid
+    );
+    assert!(store.sweep_workspace(root, &storage).is_ok());
+}
+
+/// The doctor cache section reports what the database says, not what the binary was compiled
+/// with. Exercised here rather than through the CLI: `ensure_cache` heals a mismatched cache at
+/// boot, so no CLI-level test can ever reach the section with a stale one — which means no CLI
+/// test can tell the observed read from an echo of the constant.
+#[test]
+fn test_doctor_cache_section_reports_a_stale_database() {
+    use qdev_core::doctor::{CacheDoctorSection, DoctorSection};
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    let storage = storage();
+    drop(ensure_cache(root, &storage).unwrap());
+
+    // Healthy first.
+    let store = SqliteStore::open(cache_db(root)).unwrap();
+    let fields = CacheDoctorSection.run(&store).unwrap().fields;
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(k, _)| k == name)
+            .unwrap_or_else(|| panic!("cache section must report '{name}'"))
+            .1
+            .clone()
+    };
+    assert_eq!(field("schema_status"), "ok");
+    assert_eq!(field("cache_schema_version"), CACHE_USER_VERSION);
+    assert_eq!(field("expected_cache_schema_version"), CACHE_SCHEMA_VERSION);
+    drop(store);
+
+    // Now a genuinely stale database: an older stamp and a missing table.
+    {
+        let conn = rusqlite::Connection::open(cache_db(root)).unwrap();
+        conn.execute_batch("PRAGMA user_version = 1; DROP TABLE IF EXISTS sync_meta;")
+            .unwrap();
+    }
+
+    let store = SqliteStore::open(cache_db(root)).unwrap();
+    let fields = CacheDoctorSection.run(&store).unwrap().fields;
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(k, _)| k == name)
+            .unwrap_or_else(|| panic!("cache section must report '{name}'"))
+            .1
+            .clone()
+    };
+    assert_eq!(
+        field("cache_schema_version"),
+        1,
+        "the section must report the version the database carries"
+    );
+    assert_eq!(field("expected_cache_schema_version"), CACHE_SCHEMA_VERSION);
+    assert_eq!(field("schema_status"), "mismatch");
+    assert_eq!(
+        field("missing_tables"),
+        serde_json::json!(["sync_meta"]),
+        "a missing table must be named, not just counted"
+    );
+}
+
+/// A file that was written through the write path and then deleted must still be purged.
+///
+/// The write path deletes the entity's `sync_state` row to invalidate it, and purge used to
+/// discover removed files only through that table — so a write-then-delete left the entity in
+/// the cache permanently, still queryable, with nothing on disk behind it. Deleting a file that
+/// was *not* written first was purged correctly, which is why no existing test caught this.
+#[test]
+fn test_entity_written_then_deleted_is_still_purged() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1", "E1S2"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    assert_eq!(store.list_entities(&Default::default()).unwrap().len(), 2);
+
+    // Write through the write path, which drops the file's sync_state row.
+    let record = EntityRecord {
+        id: "E1S2".to_string(),
+        kind: qdev_core::EntityKind::Story,
+        title: Some("Story".to_string()),
+        status: Some("ready".to_string()),
+        owners: None,
+        source_path: "docs/specs/stories/E1S2.md".to_string(),
+        content_hash: "rewritten".to_string(),
+        version: 2,
+        created_by: None,
+        updated_by: None,
+        updated_at: "2026-09-09T00:00:00Z".to_string(),
+        stale: false,
+        epic_id: Some("E1".to_string()),
+        seq: Some(2),
+        appetite: None,
+        safety_class: None,
+        target_modules: None,
+    };
+    qdev_core::upsert_cache_and_mark_dirty(&cache_db(root), &record).unwrap();
+    assert_eq!(
+        count_rows(
+            root,
+            "SELECT COUNT(*) FROM sync_state WHERE path = 'docs/specs/stories/E1S2.md';"
+        ),
+        0,
+        "the write path must have invalidated the sync_state row (fixture precondition)"
+    );
+
+    std::fs::remove_file(story_path(root, "E1S2")).unwrap();
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+
+    assert_eq!(summary.purged, 1, "the deleted file must be purged");
+    let remaining: Vec<String> = store
+        .list_entities(&Default::default())
+        .unwrap()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(
+        remaining,
+        vec!["E1S1".to_string()],
+        "a written-then-deleted entity must not survive as a ghost"
+    );
+    assert!(store.get_entity("E1S2").unwrap().is_none());
 }

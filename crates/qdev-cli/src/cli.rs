@@ -34,7 +34,8 @@ pub enum Commands {
     Init(InitArgs),
     /// Create planning and execution entities
     Create(CreateArgs),
-    /// Print JSON Schema for an entity kind
+    /// Print JSON Schema for an entity kind, or for a command's output payload
+    /// (`qdev schema payload <name>`)
     Schema(SchemaArgs),
     /// Update planning and execution entities
     Update(UpdateArgs),

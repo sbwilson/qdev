@@ -407,3 +407,137 @@ fn test_relate_preserves_existing_relation_key_order() {
         content
     );
 }
+
+// ---------------------------------------------------------------------------
+// --if-version, and the relations table on the write path
+// ---------------------------------------------------------------------------
+
+/// `--if-version` is optimistic concurrency control: a stale version must refuse the write.
+/// The check lives in `patch_frontmatter` and is exercised through `qdev update`, so nothing
+/// observed whether `qdev relate` actually plumbed the flag through to it.
+#[test]
+fn test_relate_with_stale_if_version_is_refused_and_writes_nothing() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    create_story(root, "E1S1", "");
+    create_story(root, "E1S2", "");
+
+    let before = fs::read_to_string(root.join("docs/specs/stories/E1S1.md")).unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["relate", "E1S1", "depends_on", "E1S2", "--if-version", "99"])
+        .assert()
+        .failure();
+
+    assert_eq!(
+        fs::read_to_string(root.join("docs/specs/stories/E1S1.md")).unwrap(),
+        before,
+        "a version conflict must leave the source file untouched"
+    );
+}
+
+#[test]
+fn test_relate_with_matching_if_version_succeeds() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    create_story(root, "E1S1", "");
+    create_story(root, "E1S2", "");
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["relate", "E1S1", "depends_on", "E1S2", "--if-version", "1"])
+        .assert()
+        .success();
+
+    assert!(fs::read_to_string(root.join("docs/specs/stories/E1S1.md"))
+        .unwrap()
+        .contains("depends_on"));
+}
+
+/// A `relate` that would close a cycle created by an earlier `relate` is refused. This runs the
+/// two commands as separate processes, so the second one's boot sweep re-hydrates the graph from
+/// frontmatter either way — the in-transaction relation write is covered at the library level by
+/// `write_tests::test_upsert_cache_with_relation_writes_the_relation_row`, which is the only
+/// place a second operation can observe the first without an intervening sweep.
+#[test]
+fn test_relate_refuses_a_cycle_closed_by_an_earlier_relate() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    create_story(root, "E1S1", "");
+    create_story(root, "E1S2", "");
+
+    let mut first = Command::cargo_bin("qdev").unwrap();
+    first
+        .current_dir(root)
+        .args(["relate", "E1S1", "depends_on", "E1S2"])
+        .assert()
+        .success();
+
+    // The reverse edge closes the cycle the first call created.
+    let mut second = Command::cargo_bin("qdev").unwrap();
+    second
+        .current_dir(root)
+        .args(["relate", "E1S2", "depends_on", "E1S1"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("dependency_cycle"));
+
+    assert!(
+        !fs::read_to_string(root.join("docs/specs/stories/E1S2.md"))
+            .unwrap()
+            .contains("depends_on"),
+        "the refused edge must not have been written"
+    );
+}
+
+/// A malformed `relations:` block is refused rather than silently rewritten away. The write
+/// path reconstructs the whole block from the parsed value, so defaulting an unexpected shape
+/// to an empty map deletes every existing edge and still reports success.
+#[test]
+fn test_relate_refuses_a_relations_block_that_is_not_a_mapping() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    create_story(root, "E1S2", "");
+
+    let dir = root.join("docs/specs/stories");
+    fs::write(
+        dir.join("E1S1.md"),
+        r#"---
+id: E1S1
+title: "Story E1S1"
+status: draft
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+relations:
+  - depends_on
+---
+
+## Acceptance Criteria
+- AC.
+"#,
+    )
+    .unwrap();
+    let before = fs::read_to_string(dir.join("E1S1.md")).unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["relate", "E1S1", "depends_on", "E1S2"])
+        .assert()
+        .failure();
+
+    assert_eq!(
+        fs::read_to_string(dir.join("E1S1.md")).unwrap(),
+        before,
+        "an unsupported relations shape must not be rewritten away"
+    );
+}

@@ -273,3 +273,96 @@ fn test_hydration_clears_relation_findings_once_fixed() {
         "dangling_relation finding should clear once the target exists"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Multiple cycles, and cycle detection on a deep chain
+// ---------------------------------------------------------------------------
+
+/// `validate_relations_graph` strips each cycle's closing edge and looks again, so two disjoint
+/// cycles both get reported. Every other cycle test in this file builds exactly one cycle, so
+/// the loop never iterates — collapse it to a single `find_dependency_cycle` call and nothing
+/// fails, while a workspace with a second live cycle quietly passes CI.
+#[test]
+fn test_hydration_records_every_disjoint_dependency_cycle() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root);
+    write_story(root, "E1S1", "  depends_on: [\"E1S2\"]\n");
+    write_story(root, "E1S2", "  depends_on: [\"E1S1\"]\n");
+    write_story(root, "E1S3", "  depends_on: [\"E1S4\"]\n");
+    write_story(root, "E1S4", "  depends_on: [\"E1S3\"]\n");
+
+    let store = ensure_cache(root, &storage()).unwrap();
+
+    let mut messages = Vec::new();
+    for id in ["E1S1", "E1S2", "E1S3", "E1S4"] {
+        let path = format!("docs/specs/stories/{}.md", id);
+        let cycle_findings: Vec<FindingRecord> = findings_for(&store, &path)
+            .into_iter()
+            .filter(|f| f.code == "dependency_cycle")
+            .collect();
+        assert!(
+            !cycle_findings.is_empty(),
+            "{} participates in a cycle but has no dependency_cycle finding",
+            id
+        );
+        messages.extend(cycle_findings.into_iter().filter_map(|f| f.message));
+    }
+
+    messages.sort();
+    messages.dedup();
+    assert_eq!(
+        messages.len(),
+        2,
+        "both disjoint cycles must be reported, got {:?}",
+        messages
+    );
+}
+
+/// A file can take part in two cycles at once. The `findings` primary key used to be
+/// `(path, code)`, which silently kept only whichever row was written last.
+#[test]
+fn test_hydration_keeps_both_cycles_a_single_story_participates_in() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root);
+    // E1S1 sits in two cycles: E1S1 -> E1S2 -> E1S1 and E1S1 -> E1S3 -> E1S1.
+    write_story(root, "E1S1", "  depends_on: [\"E1S2\", \"E1S3\"]\n");
+    write_story(root, "E1S2", "  depends_on: [\"E1S1\"]\n");
+    write_story(root, "E1S3", "  depends_on: [\"E1S1\"]\n");
+
+    let store = ensure_cache(root, &storage()).unwrap();
+
+    let cycle_findings: Vec<FindingRecord> = findings_for(&store, "docs/specs/stories/E1S1.md")
+        .into_iter()
+        .filter(|f| f.code == "dependency_cycle")
+        .collect();
+    assert_eq!(
+        cycle_findings.len(),
+        2,
+        "both cycles through E1S1 must survive, got {:?}",
+        cycle_findings
+    );
+}
+
+/// The cycle search walks the `depends_on` graph iteratively. A recursive walk would recurse
+/// once per link and blow the stack on a long chain, aborting the hydration sweep.
+#[test]
+fn test_find_dependency_cycle_handles_a_very_deep_chain() {
+    const DEPTH: usize = 60_000;
+
+    let mut edges: Vec<(String, String)> = (0..DEPTH)
+        .map(|n| (format!("E1S{}", n), format!("E1S{}", n + 1)))
+        .collect();
+    assert!(
+        find_dependency_cycle(&edges).is_none(),
+        "a {}-link chain is acyclic",
+        DEPTH
+    );
+
+    // Close it, and the same deep walk must find the cycle rather than overflow.
+    edges.push((format!("E1S{}", DEPTH), "E1S0".to_string()));
+    let cycle = find_dependency_cycle(&edges).expect("closing the chain creates a cycle");
+    assert_eq!(cycle.first(), cycle.last());
+    assert_eq!(cycle.len(), DEPTH + 2);
+}

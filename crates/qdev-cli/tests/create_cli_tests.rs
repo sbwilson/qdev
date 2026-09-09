@@ -320,3 +320,79 @@ fn test_create_story_file_conflict() {
         .failure()
         .code(5);
 }
+
+/// A configured `[storage] specs_dir` must be honoured by `create story` — both for where the
+/// file is written and for where the next id is allocated from.
+///
+/// The sweep, hydration and validation all read `storage.specs_dir`, but creation used to
+/// hardcode the default layout: with a non-default `[storage]` the command exited 0, reported a
+/// path under `docs/specs/`, and the created story was invisible to every read command. Id
+/// allocation scanned the same wrong directory, so every create restarted at 1.
+#[test]
+fn test_create_story_honours_configured_specs_dir() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args([
+            "init",
+            "--non-interactive",
+            "--name",
+            "TestProject",
+            "--developer",
+            "simon",
+            "--team",
+            "core-platform",
+        ])
+        .assert()
+        .success();
+
+    let mut toml = fs::read_to_string(root.join("qdev.toml")).unwrap();
+    toml.push_str("\n[storage]\nspecs_dir = \"planning/specs\"\n");
+    fs::write(root.join("qdev.toml"), toml).unwrap();
+
+    let mut create = Command::cargo_bin("qdev").unwrap();
+    let assert = create
+        .current_dir(root)
+        .args(["create", "story", "E12", "--json"])
+        .assert()
+        .success();
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+
+    assert_eq!(val["path"], "planning/specs/stories/E12S1.md");
+    assert!(
+        root.join("planning/specs/stories/E12S1.md").is_file(),
+        "the story must land under the configured specs_dir"
+    );
+    assert!(
+        !root.join("docs/specs/stories/E12S1.md").exists(),
+        "nothing may be written to the default layout"
+    );
+
+    // Readable back through the cache — the check that actually failed before.
+    let mut list = Command::cargo_bin("qdev").unwrap();
+    let list_assert = list
+        .current_dir(root)
+        .args(["list", "stories", "--json"])
+        .assert()
+        .success();
+    let listed: Value = serde_json::from_slice(&list_assert.get_output().stdout).unwrap();
+    let ids: Vec<&str> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["E12S1"], "the created story must be readable");
+
+    // Allocation must continue from the configured directory, not restart at 1.
+    let mut second = Command::cargo_bin("qdev").unwrap();
+    let second_assert = second
+        .current_dir(root)
+        .args(["create", "story", "E12", "--json"])
+        .assert()
+        .success();
+    let second_val: Value = serde_json::from_slice(&second_assert.get_output().stdout).unwrap();
+    assert_eq!(second_val["id"], "E12S2");
+}

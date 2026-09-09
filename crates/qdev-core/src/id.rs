@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::StorageConfig;
 use crate::errors::QdevError;
 
 /// Canonical classification kind for identifiers.
@@ -432,11 +433,24 @@ impl FromStr for Identifier {
     }
 }
 
-/// Allocates the next sequential story identifier for a given epic by scanning `docs/specs/stories/` directly on disk.
-/// Never reads the SQLite cache per AD-7.
+/// Allocates the next sequential story identifier for a given epic by scanning the configured
+/// stories directory directly on disk. Never reads the SQLite cache per AD-7.
 /// Takes `max(existing) + 1` (or 1 if none exist).
+///
+/// Uses the default `[storage]` layout; call `allocate_next_story_id_in` to honour a configured
+/// `specs_dir`. Allocating against a directory the sweep does not scan restarts numbering at 1
+/// on every invocation, silently minting duplicate ids.
 pub fn allocate_next_story_id(
     workspace_root: &Path,
+    epic_number: u32,
+) -> Result<Identifier, QdevError> {
+    allocate_next_story_id_in(workspace_root, &StorageConfig::default(), epic_number)
+}
+
+/// `allocate_next_story_id`, scanning `storage.specs_dir` rather than the default layout.
+pub fn allocate_next_story_id_in(
+    workspace_root: &Path,
+    storage: &StorageConfig,
     epic_number: u32,
 ) -> Result<Identifier, QdevError> {
     if epic_number == 0 {
@@ -445,7 +459,7 @@ pub fn allocate_next_story_id(
         ));
     }
 
-    let stories_dir = workspace_root.join("docs").join("specs").join("stories");
+    let stories_dir = workspace_root.join(&storage.specs_dir).join("stories");
     if !stories_dir.exists() {
         return Ok(Identifier::Story {
             epic: epic_number,
@@ -611,7 +625,12 @@ pub fn allocate_deferred_work_id_with_rng<R: rand::Rng>(
     workspace_root: &Path,
     rng: &mut R,
 ) -> Identifier {
-    let hash = allocate_hex_id_with_rng(workspace_root, "docs/state/dw", "DW", rng);
+    let hash = allocate_hex_id_with_rng(
+        workspace_root,
+        &format!("{}/dw", StorageConfig::default().state_dir),
+        "DW",
+        rng,
+    );
     Identifier::DeferredWork { hash }
 }
 
@@ -628,7 +647,12 @@ pub fn allocate_decision_id_with_rng<R: rand::Rng>(
     workspace_root: &Path,
     rng: &mut R,
 ) -> Identifier {
-    let hash = allocate_hex_id_with_rng(workspace_root, "docs/state/decisions", "DEC", rng);
+    let hash = allocate_hex_id_with_rng(
+        workspace_root,
+        &format!("{}/decisions", StorageConfig::default().state_dir),
+        "DEC",
+        rng,
+    );
     Identifier::Decision { hash }
 }
 

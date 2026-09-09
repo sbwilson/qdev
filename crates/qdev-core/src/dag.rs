@@ -34,7 +34,7 @@ pub fn is_valid_kind_pair(relation: &str, source: EntityKind, target: EntityKind
 }
 
 /// Finds one `depends_on` cycle in `edges` (a list of `(source_id, target_id)` pairs), if any.
-/// Uses a DFS with a recursion-stack guard, visiting nodes in sorted order for determinism.
+/// Uses an iterative DFS with an on-stack guard, visiting nodes in sorted order for determinism.
 /// Returns the cycle as an ordered list of ids where the first and last entries are equal
 /// (e.g. `["E1S1", "E1S2", "E1S1"]`), or `None` if the graph is acyclic.
 pub fn find_dependency_cycle(edges: &[(String, String)]) -> Option<Vec<String>> {
@@ -57,45 +57,55 @@ pub fn find_dependency_cycle(edges: &[(String, String)]) -> Option<Vec<String>> 
         if visited.contains(start) {
             continue;
         }
-        let mut stack: Vec<&str> = Vec::new();
-        let mut on_stack: HashSet<&str> = HashSet::new();
-        if let Some(cycle) = dfs_find_cycle(start, &graph, &mut visited, &mut stack, &mut on_stack)
-        {
+        if let Some(cycle) = dfs_find_cycle(start, &graph, &mut visited) {
             return Some(cycle.into_iter().map(str::to_string).collect());
         }
     }
     None
 }
 
+/// Depth-first search from `start`, iterative rather than recursive: a `depends_on` chain is as
+/// deep as the workspace is long, and a recursive walk would overflow the stack on a deeply
+/// chained repository (aborting the hydration sweep that calls this). `frames` holds
+/// `(node, next_child_index)`, `path` is the current root-to-node chain, and `on_stack` mirrors
+/// `path` for O(1) membership tests. Child visit order and the cycle returned are identical to
+/// the recursive formulation.
 fn dfs_find_cycle<'a>(
-    node: &'a str,
+    start: &'a str,
     graph: &HashMap<&'a str, Vec<&'a str>>,
     visited: &mut HashSet<&'a str>,
-    stack: &mut Vec<&'a str>,
-    on_stack: &mut HashSet<&'a str>,
 ) -> Option<Vec<&'a str>> {
-    visited.insert(node);
-    stack.push(node);
-    on_stack.insert(node);
+    let mut frames: Vec<(&'a str, usize)> = vec![(start, 0)];
+    let mut path: Vec<&'a str> = vec![start];
+    let mut on_stack: HashSet<&'a str> = HashSet::new();
+    on_stack.insert(start);
+    visited.insert(start);
 
-    if let Some(children) = graph.get(node) {
-        for &child in children {
-            if on_stack.contains(child) {
-                let pos = stack.iter().position(|&n| n == child).unwrap_or(0);
-                let mut cycle: Vec<&str> = stack[pos..].to_vec();
-                cycle.push(child);
-                return Some(cycle);
-            }
-            if !visited.contains(child) {
-                if let Some(cycle) = dfs_find_cycle(child, graph, visited, stack, on_stack) {
-                    return Some(cycle);
-                }
-            }
+    while let Some(&(node, idx)) = frames.last() {
+        let children: &[&'a str] = graph.get(node).map(Vec::as_slice).unwrap_or(&[]);
+        if idx >= children.len() {
+            frames.pop();
+            path.pop();
+            on_stack.remove(node);
+            continue;
+        }
+        if let Some(frame) = frames.last_mut() {
+            frame.1 += 1;
+        }
+        let child = children[idx];
+        if on_stack.contains(child) {
+            let pos = path.iter().position(|&n| n == child).unwrap_or(0);
+            let mut cycle: Vec<&'a str> = path[pos..].to_vec();
+            cycle.push(child);
+            return Some(cycle);
+        }
+        if visited.insert(child) {
+            path.push(child);
+            on_stack.insert(child);
+            frames.push((child, 0));
         }
     }
 
-    stack.pop();
-    on_stack.remove(node);
     None
 }
 

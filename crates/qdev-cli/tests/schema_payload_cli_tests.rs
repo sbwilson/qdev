@@ -359,3 +359,155 @@ fn test_round_trip_error_payload_against_real_error_output() {
 
     validate_against_schema(&schema, &instance);
 }
+
+// ---------------------------------------------------------------------------
+// Round-trips for the payloads added alongside their commands
+// ---------------------------------------------------------------------------
+
+/// `qdev validate --fix-ids --json` emits a renumber report, not a finding list — a different
+/// shape from the same command with the same flag. It gets its own schema, and this is the
+/// branch nothing exercised.
+#[test]
+fn test_round_trip_fix_ids_payload_against_fix_ids_output() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    write_story_fixture(root);
+
+    // A second file declaring E12S4's id, so the renumber branch has work to do.
+    let stories_dir = root.join("docs/specs/stories");
+    fs::write(
+        stories_dir.join("E12S4-dup.md"),
+        fs::read_to_string(stories_dir.join("E12S4.md")).unwrap(),
+    )
+    .unwrap();
+
+    let schema_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "fix_ids", "--json"])
+        .assert()
+        .success();
+    let schema: Value = serde_json::from_slice(&schema_assert.get_output().stdout).unwrap();
+
+    let fix_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args([
+            "validate",
+            "--fix-ids",
+            "--non-interactive",
+            "--yes",
+            "--json",
+        ])
+        .assert();
+    let instance: Value = serde_json::from_slice(&fix_assert.get_output().stdout).unwrap();
+
+    assert!(
+        !instance["renumbered"].as_array().unwrap().is_empty(),
+        "the fixture must actually renumber something, or the items subschema is vacuous"
+    );
+    validate_against_schema(&schema, &instance);
+}
+
+#[test]
+fn test_round_trip_list_payload_against_list_output() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    write_story_fixture(root);
+
+    let schema_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "list", "--json"])
+        .assert()
+        .success();
+    let schema: Value = serde_json::from_slice(&schema_assert.get_output().stdout).unwrap();
+
+    let list_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["list", "stories", "--json"])
+        .assert()
+        .success();
+    let instance: Value = serde_json::from_slice(&list_assert.get_output().stdout).unwrap();
+
+    assert!(
+        !instance["items"].as_array().unwrap().is_empty(),
+        "the fixture must list at least one story"
+    );
+    validate_against_schema(&schema, &instance);
+}
+
+#[test]
+fn test_round_trip_sync_payload_against_sync_output() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    write_story_fixture(root);
+
+    let schema_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "sync", "--json"])
+        .assert()
+        .success();
+    let schema: Value = serde_json::from_slice(&schema_assert.get_output().stdout).unwrap();
+
+    for args in [vec!["sync", "--json"], vec!["sync", "--rebuild", "--json"]] {
+        let sync_assert = Command::cargo_bin("qdev")
+            .unwrap()
+            .current_dir(root)
+            .args(&args)
+            .assert()
+            .success();
+        let instance: Value = serde_json::from_slice(&sync_assert.get_output().stdout).unwrap();
+        validate_against_schema(&schema, &instance);
+    }
+}
+
+#[test]
+fn test_round_trip_doctor_payload_against_doctor_output() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    write_story_fixture(root);
+
+    let schema_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "doctor", "--json"])
+        .assert()
+        .success();
+    let schema: Value = serde_json::from_slice(&schema_assert.get_output().stdout).unwrap();
+
+    let doctor_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["doctor", "--json"])
+        .assert()
+        .success();
+    let instance: Value = serde_json::from_slice(&doctor_assert.get_output().stdout).unwrap();
+
+    assert!(
+        !instance["sections"].as_array().unwrap().is_empty(),
+        "doctor must report at least the cache section"
+    );
+    validate_against_schema(&schema, &instance);
+}
+
+/// Every payload kind the binary advertises must have a schema that compiles. This is the
+/// invariant that keeps a newly shipped `--json` payload from being neither schematized nor
+/// recorded as deferred.
+#[test]
+fn test_every_advertised_payload_name_has_a_compilable_schema() {
+    for name in [
+        "story", "error", "validate", "fix_ids", "list", "sync", "doctor",
+    ] {
+        let assert = Command::cargo_bin("qdev")
+            .unwrap()
+            .args(["schema", "payload", name, "--json"])
+            .assert()
+            .success();
+        let schema: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+        jsonschema::validator_for(&schema)
+            .unwrap_or_else(|e| panic!("payload schema '{}' must compile: {}", name, e));
+    }
+}

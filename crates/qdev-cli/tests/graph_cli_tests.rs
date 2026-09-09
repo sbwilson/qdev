@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use assert_cmd::Command;
+use predicates::prelude::*;
 use tempfile::TempDir;
 
 fn setup_workspace(root: &Path) {
@@ -294,8 +295,11 @@ fn test_graph_dot_empty_workspace_emits_valid_empty_digraph() {
     assert_eq!(output.trim(), "digraph qdev {\n}");
 }
 
+/// Every `qdev graph` refusal is about the shape of the flags, so it exits 2 (usage error) like
+/// the binary's other flag rejections — not 3, which AD-13 reserves for policy refusals a human
+/// has to act on. A caller branching on the two must not be sent down the wrong path by a typo.
 #[test]
-fn test_graph_without_dot_flag_is_refused() {
+fn test_graph_without_dot_flag_is_a_usage_error() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     setup_workspace(root);
@@ -304,21 +308,26 @@ fn test_graph_without_dot_flag_is_refused() {
     cmd.current_dir(root)
         .args(["graph", "--json"])
         .assert()
-        .code(3);
+        .code(2)
+        .stdout(predicate::str::contains("usage_error"));
 }
 
 #[test]
-fn test_graph_bare_no_flags_is_refused() {
+fn test_graph_bare_no_flags_is_a_usage_error() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     setup_workspace(root);
 
     let mut cmd = Command::cargo_bin("qdev").unwrap();
-    cmd.current_dir(root).args(["graph"]).assert().code(3);
+    cmd.current_dir(root)
+        .args(["graph"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("usage_error"));
 }
 
 #[test]
-fn test_graph_dot_with_json_is_refused() {
+fn test_graph_dot_with_json_is_a_usage_error() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     setup_workspace(root);
@@ -327,5 +336,6 @@ fn test_graph_dot_with_json_is_refused() {
     cmd.current_dir(root)
         .args(["graph", "--dot", "--json"])
         .assert()
-        .code(3);
+        .code(2)
+        .stdout(predicate::str::contains("usage_error"));
 }

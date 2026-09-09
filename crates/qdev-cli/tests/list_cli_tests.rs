@@ -580,3 +580,30 @@ fn test_list_text_mode_does_not_truncate_long_id() {
     );
     assert!(!stdout.contains('…'));
 }
+
+/// An empty filter value is almost always an unset shell variable, not a request for entities
+/// with a blank owner. Matching it literally returns no rows and is indistinguishable from a
+/// legitimately empty result, so it is a usage error.
+#[test]
+fn test_list_rejects_empty_filter_values() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    write_story(
+        root,
+        "E1S1",
+        "E1",
+        "Story one",
+        "ready",
+        r#"["simon"]"#,
+        r#"["bridge"]"#,
+    );
+
+    for flag in ["--epic", "--status", "--owner", "--module"] {
+        let mut cmd = Command::cargo_bin("qdev").unwrap();
+        cmd.current_dir(root)
+            .args(["list", "stories", flag, ""])
+            .assert()
+            .code(2);
+    }
+}

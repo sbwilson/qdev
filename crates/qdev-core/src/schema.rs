@@ -142,6 +142,8 @@ impl fmt::Display for EntityKind {
 /// from `EntityKind`'s frontmatter schemas (`qdev schema <entity-kind>`, Story 1.4). Kept fully
 /// separate from `EntityKind` — never resolved by, or resolving via, `EntityKind::from_str_loose`.
 ///
+/// Every `--json` payload with a live command has a schema here — the invariant is that a
+/// shipped payload is either schematized or recorded in `deferred-work.md`, never neither.
 /// `context`, `next`, and `gate_run`-as-a-payload have no live command yet and are deferred
 /// (Epic 2/3 scope); they are intentionally absent here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -150,6 +152,10 @@ pub enum PayloadKind {
     Story,
     Error,
     Validate,
+    FixIds,
+    List,
+    Sync,
+    Doctor,
 }
 
 impl PayloadKind {
@@ -159,6 +165,10 @@ impl PayloadKind {
             PayloadKind::Story => include_str!("../schemas/payload-story.json"),
             PayloadKind::Error => include_str!("../schemas/payload-error.json"),
             PayloadKind::Validate => include_str!("../schemas/payload-validate.json"),
+            PayloadKind::FixIds => include_str!("../schemas/payload-fix-ids.json"),
+            PayloadKind::List => include_str!("../schemas/payload-list.json"),
+            PayloadKind::Sync => include_str!("../schemas/payload-sync.json"),
+            PayloadKind::Doctor => include_str!("../schemas/payload-doctor.json"),
         }
     }
 
@@ -179,15 +189,23 @@ impl PayloadKind {
             PayloadKind::Story => "story",
             PayloadKind::Error => "error",
             PayloadKind::Validate => "validate",
+            PayloadKind::FixIds => "fix_ids",
+            PayloadKind::List => "list",
+            PayloadKind::Sync => "sync",
+            PayloadKind::Doctor => "doctor",
         }
     }
 
     /// Returns an array of all currently-supported payload kinds.
-    pub const fn all() -> &'static [PayloadKind; 3] {
+    pub const fn all() -> &'static [PayloadKind; 7] {
         &[
             PayloadKind::Story,
             PayloadKind::Error,
             PayloadKind::Validate,
+            PayloadKind::FixIds,
+            PayloadKind::List,
+            PayloadKind::Sync,
+            PayloadKind::Doctor,
         ]
     }
 
@@ -209,6 +227,10 @@ impl PayloadKind {
             "story" | "stories" => Ok(PayloadKind::Story),
             "error" | "errors" => Ok(PayloadKind::Error),
             "validate" | "validation" => Ok(PayloadKind::Validate),
+            "fix_ids" | "fixids" => Ok(PayloadKind::FixIds),
+            "list" => Ok(PayloadKind::List),
+            "sync" => Ok(PayloadKind::Sync),
+            "doctor" => Ok(PayloadKind::Doctor),
             _ => Err(QdevError::usage_error(format!(
                 "Unknown payload name '{}'. Valid payload names: {}",
                 s,

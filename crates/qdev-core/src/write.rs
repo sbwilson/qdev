@@ -771,14 +771,15 @@ pub fn replace_markdown_section(
 /// In-memory representation of an entity cache row to be upserted.
 pub use crate::store::EntityRecord;
 
-pub fn current_iso8601() -> String {
-    let now = SystemTime::now();
-    let duration = now.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let secs = duration.as_secs();
-    let s = secs % 60;
-    let m = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
-    let mut days = (secs / 86400) as i64;
+/// The single civil-calendar conversion in the codebase: seconds since the Unix epoch to an
+/// ISO8601 `Z` timestamp. Every `found_at`, `updated_at`, and `dirty_at` in the cache goes
+/// through here, so two rows written by different code paths can never disagree about the
+/// calendar. `rem_euclid` keeps pre-epoch timestamps (from a file mtime) correct.
+pub fn iso8601_from_timestamp(secs: i64) -> String {
+    let s = (secs.rem_euclid(60)) as u64;
+    let m = ((secs / 60).rem_euclid(60)) as u64;
+    let h = ((secs / 3600).rem_euclid(24)) as u64;
+    let mut days = secs.div_euclid(86400);
     days += 719468;
     let era = (if days >= 0 { days } else { days - 146096 }) / 146097;
     let doe = (days - era * 146097) as u64;
@@ -795,11 +796,31 @@ pub fn current_iso8601() -> String {
     )
 }
 
+/// The current time as an ISO8601 `Z` timestamp.
+pub fn current_iso8601() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    iso8601_from_timestamp(secs)
+}
+
 /// Computes the sha256 hex digest of a byte slice.
 pub fn sha256_digest(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
     format!("{:x}", hasher.finalize())
+}
+
+/// One relation edge to apply to the cache's `relations` table in the same transaction as an
+/// entity upsert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationRowChange {
+    pub source_id: String,
+    pub relation: String,
+    pub target_id: String,
+    /// `true` inserts the edge, `false` deletes it.
+    pub add: bool,
 }
 
 /// Upserts an updated entity into the SQLite cache `entities` (and kind-specific) table,
@@ -809,11 +830,28 @@ pub fn upsert_cache_and_mark_dirty(
     cache_db_path: &Path,
     entity: &EntityRecord,
 ) -> Result<(), QdevError> {
+    upsert_cache_with_relation(cache_db_path, entity, None)
+}
+
+/// `upsert_cache_and_mark_dirty` plus, when `relation_change` is given, the matching
+/// insert/delete on the `relations` table — in the same transaction.
+///
+/// Without this the `relations` table only caught up at the next process's boot sweep, so every
+/// in-process reader (`qdev relate`'s own cycle pre-check, `query_entity`, `render_graph_dot`)
+/// saw pre-write state, and two relation operations in one process would validate the second
+/// against a graph that ignored the first.
+pub fn upsert_cache_with_relation(
+    cache_db_path: &Path,
+    entity: &EntityRecord,
+    relation_change: Option<&RelationRowChange>,
+) -> Result<(), QdevError> {
     let store = crate::store::SqliteStore::open(cache_db_path)?;
 
     // Ensure schema v2 exists
     store.with_conn(|conn| {
-        crate::store::create_schema_v2(conn)?;
+        // Create-only: this opens whatever cache the workspace already has, so it must never
+        // stamp a version onto tables it did not migrate.
+        crate::store::create_schema(conn)?;
         Ok(())
     })?;
 
@@ -913,7 +951,35 @@ ON CONFLICT(id) DO UPDATE SET
             }
         }
 
-        // 3. Mark row as dirty in dirty_entities
+        // 3. Apply the relation edge, if this write is a relate/unrelate.
+        if let Some(change) = relation_change {
+            if change.add {
+                tx.execute(
+                    r#"
+INSERT INTO relations (source_id, relation, target_id)
+VALUES (?1, ?2, ?3)
+ON CONFLICT(source_id, relation, target_id) DO NOTHING;
+"#,
+                    rusqlite::params![change.source_id, change.relation, change.target_id],
+                )
+            } else {
+                tx.execute(
+                    "DELETE FROM relations WHERE source_id = ?1 AND relation = ?2 AND target_id = ?3;",
+                    rusqlite::params![change.source_id, change.relation, change.target_id],
+                )
+            }
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!(
+                        "Failed to apply relation '{}' --[{}]--> '{}': {}",
+                        change.source_id, change.relation, change.target_id, e
+                    ),
+                )
+            })?;
+        }
+
+        // 4. Mark row as dirty in dirty_entities
         let dirty_at = current_iso8601();
         tx.execute(
             r#"
@@ -930,7 +996,7 @@ ON CONFLICT(id) DO UPDATE SET dirty_at = excluded.dirty_at;
             )
         })?;
 
-        // 4. Invalidate sync_state for this entity path
+        // 5. Invalidate sync_state for this entity path
         tx.execute(
             "DELETE FROM sync_state WHERE path = ?1;",
             rusqlite::params![entity.source_path],
@@ -1518,22 +1584,58 @@ pub fn apply_relation_change(
 
     // 4. Merge into the existing relations map: read it, mutate only the one relation's target
     // list, and write the whole map back — never construct a fresh map that drops other keys.
-    let mut relations_obj: serde_yaml::Mapping = old_frontmatter_yaml
-        .get("relations")
-        .and_then(|v| v.as_mapping())
-        .cloned()
-        .unwrap_or_default();
+    //
+    // An unexpected shape is refused rather than defaulted away. This function reconstructs and
+    // overwrites the whole `relations:` block, so falling back to an empty map (or silently
+    // skipping non-string entries) would rewrite the file with the existing edges deleted and
+    // report success — the same silent-drop class as swallowing the YAML parse error above.
+    let mut relations_obj: serde_yaml::Mapping = match old_frontmatter_yaml.get("relations") {
+        None | Some(serde_yaml::Value::Null) => serde_yaml::Mapping::new(),
+        Some(serde_yaml::Value::Mapping(map)) => map.clone(),
+        Some(_) => {
+            return Err(QdevError::logical_failure(
+                "unsupported_relations_shape",
+                format!(
+                    "Frontmatter 'relations' in '{}' is not a relation-name to target-list map",
+                    file_path.display()
+                ),
+            ))
+        }
+    };
 
     let relation_key = serde_yaml::Value::String(options.relation.clone());
-    let mut targets: Vec<String> = relations_obj
-        .get(&relation_key)
-        .and_then(|v| v.as_sequence())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut targets: Vec<String> = match relations_obj.get(&relation_key) {
+        None | Some(serde_yaml::Value::Null) => Vec::new(),
+        Some(serde_yaml::Value::Sequence(items)) => {
+            let mut parsed = Vec::with_capacity(items.len());
+            for item in items {
+                match item.as_str() {
+                    Some(target) => parsed.push(target.to_string()),
+                    None => {
+                        return Err(QdevError::logical_failure(
+                            "unsupported_relations_shape",
+                            format!(
+                                "Relation '{}' in '{}' has a non-string target entry",
+                                options.relation,
+                                file_path.display()
+                            ),
+                        ))
+                    }
+                }
+            }
+            parsed
+        }
+        Some(_) => {
+            return Err(QdevError::logical_failure(
+                "unsupported_relations_shape",
+                format!(
+                    "Relation '{}' in '{}' is not a list of target ids",
+                    options.relation,
+                    file_path.display()
+                ),
+            ))
+        }
+    };
 
     let changed = if options.add {
         if targets.iter().any(|t| t == &options.target_id) {
@@ -1683,7 +1785,18 @@ pub fn apply_relation_change(
         .workspace_root
         .join(cache_dir_rel)
         .join("cache.sqlite");
-    upsert_cache_and_mark_dirty(&cache_db_path, &record)?;
+    // The relation edge lands in the cache with the entity row, not at the next boot sweep, so
+    // anything reading the graph later in this same process sees the edge this write created.
+    upsert_cache_with_relation(
+        &cache_db_path,
+        &record,
+        Some(&RelationRowChange {
+            source_id: canonical_id.clone(),
+            relation: options.relation.clone(),
+            target_id: options.target_id.clone(),
+            add: options.add,
+        }),
+    )?;
 
     let relations_out = updated_frontmatter
         .get("relations")

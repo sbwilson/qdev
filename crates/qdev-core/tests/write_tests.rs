@@ -4,10 +4,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use qdev_core::store::{SqliteStore, Store};
 use qdev_core::{
     acquire_write_lock, apply_entity_update, patch_frontmatter, replace_markdown_section,
-    sha256_digest, upsert_cache_and_mark_dirty, write_file_atomic, Author, EntityKind,
-    EntityRecord, EntityUpdateOptions, ExitCode, FrontmatterPatchOptions,
+    sha256_digest, upsert_cache_and_mark_dirty, upsert_cache_with_relation, write_file_atomic,
+    Author, EntityKind, EntityRecord, EntityUpdateOptions, ExitCode, FrontmatterPatchOptions,
+    RelationRowChange,
 };
 use tempfile::TempDir;
 
@@ -888,4 +890,64 @@ fn test_upsert_cache_clears_stale_flag() {
         })
         .unwrap();
     assert_eq!(stale, 0, "a successful write must clear the stale flag");
+}
+
+/// A relation change lands in the `relations` table inside the same transaction as the entity
+/// upsert, not at the next process's boot sweep. Every in-process reader of the graph — the
+/// `qdev relate` cycle pre-check, `query_entity`, the graph renderer — otherwise sees pre-write
+/// state, so two relation operations in one run validate the second against a graph that
+/// ignores the first.
+#[test]
+fn test_upsert_cache_with_relation_writes_the_relation_row() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".qdev/cache/cache.sqlite");
+    fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+    let record = EntityRecord {
+        id: "E1S1".to_string(),
+        kind: EntityKind::Story,
+        title: Some("Source".to_string()),
+        status: Some("draft".to_string()),
+        owners: None,
+        source_path: "docs/specs/stories/E1S1.md".to_string(),
+        content_hash: sha256_digest(b"content"),
+        version: 2,
+        created_by: Some(Author::new("human", "simon")),
+        updated_by: Some(Author::new("human", "simon")),
+        updated_at: "2026-09-07T00:00:00Z".to_string(),
+        stale: false,
+        epic_id: Some("E1".to_string()),
+        seq: Some(1),
+        appetite: None,
+        safety_class: None,
+        target_modules: None,
+    };
+
+    let add = RelationRowChange {
+        source_id: "E1S1".to_string(),
+        relation: "depends_on".to_string(),
+        target_id: "E1S2".to_string(),
+        add: true,
+    };
+    upsert_cache_with_relation(&db_path, &record, Some(&add)).unwrap();
+
+    let store = SqliteStore::open(&db_path).unwrap();
+    let rows = store.get_relations_for_source("E1S1").unwrap();
+    assert_eq!(rows.len(), 1, "the edge must be visible without a sweep");
+    assert_eq!(rows[0].relation, "depends_on");
+    assert_eq!(rows[0].target_id, "E1S2");
+    drop(store);
+
+    // Removing it is applied the same way.
+    let remove = RelationRowChange {
+        add: false,
+        ..add.clone()
+    };
+    upsert_cache_with_relation(&db_path, &record, Some(&remove)).unwrap();
+
+    let store = SqliteStore::open(&db_path).unwrap();
+    assert!(
+        store.get_relations_for_source("E1S1").unwrap().is_empty(),
+        "the edge must be gone without a sweep"
+    );
 }

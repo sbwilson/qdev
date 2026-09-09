@@ -2,7 +2,8 @@ use std::fs;
 use tempfile::TempDir;
 
 use qdev_core::{
-    check_cache_status, init, CacheStatus, ExitCode, InitOptions, STANDARD_DIRECTORIES,
+    check_cache_status, init, CacheStatus, ExitCode, InitOptions, CACHE_SCHEMA_VERSION,
+    STANDARD_DIRECTORIES,
 };
 
 #[test]
@@ -20,7 +21,7 @@ fn test_init_fresh_workspace_scaffolding() {
 
     let result = init(&options).expect("init should succeed on fresh directory");
 
-    assert_eq!(result.cache_schema_version, 2);
+    assert_eq!(result.cache_schema_version, CACHE_SCHEMA_VERSION);
     assert!(!result.cache_migrated);
     assert!(result.gitignore_updated);
     assert!(result.created_files.contains(&"qdev.toml".to_string()));
@@ -76,7 +77,7 @@ fn test_init_fresh_workspace_scaffolding() {
     let user_version: u32 = conn
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 2);
+    assert_eq!(user_version, CACHE_SCHEMA_VERSION);
 
     // Verify WAL mode
     let journal_mode: String = conn
@@ -207,7 +208,7 @@ fn test_cache_migration_refused_without_confirmation() {
         status,
         CacheStatus::NeedsMigration {
             current_version: 0,
-            target_version: 2
+            target_version: CACHE_SCHEMA_VERSION
         }
     );
 
@@ -255,14 +256,14 @@ fn test_cache_migration_succeeds_with_confirmation_and_drops_old_tables() {
     };
 
     let result = init(&options).expect("Migration should succeed with allow_migration=true");
-    assert_eq!(result.cache_schema_version, 2);
+    assert_eq!(result.cache_schema_version, CACHE_SCHEMA_VERSION);
     assert!(result.cache_migrated);
 
     let conn = rusqlite::Connection::open(&cache_file).unwrap();
     let user_version: u32 = conn
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 2);
+    assert_eq!(user_version, CACHE_SCHEMA_VERSION);
 
     // Outdated table must be dropped
     let count: u32 = conn
@@ -276,7 +277,12 @@ fn test_cache_migration_succeeds_with_confirmation_and_drops_old_tables() {
 
     // After migration, status is UpToDate
     let status = check_cache_status(&root).unwrap();
-    assert_eq!(status, CacheStatus::UpToDate { version: 2 });
+    assert_eq!(
+        status,
+        CacheStatus::UpToDate {
+            version: CACHE_SCHEMA_VERSION
+        }
+    );
 }
 
 #[test]
@@ -289,7 +295,11 @@ fn test_check_cache_status_future_version_conflict() {
     let cache_file = cache_dir.join("cache.sqlite");
     {
         let conn = rusqlite::Connection::open(&cache_file).unwrap();
-        conn.execute_batch("PRAGMA user_version = 3;").unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {};",
+            CACHE_SCHEMA_VERSION + 1
+        ))
+        .unwrap();
     }
 
     let err = check_cache_status(&root).unwrap_err();
@@ -361,14 +371,14 @@ fn test_idempotent_rerun_schema_v2() {
 
     // First run: initializes
     let res1 = init(&options).unwrap();
-    assert_eq!(res1.cache_schema_version, 2);
+    assert_eq!(res1.cache_schema_version, CACHE_SCHEMA_VERSION);
     assert!(!res1.cache_migrated);
     assert!(res1.created_files.contains(&"qdev.toml".to_string()));
     assert!(res1.created_files.contains(&".qdev.local.toml".to_string()));
 
     // Second run: idempotent re-run
     let res2 = init(&options).unwrap();
-    assert_eq!(res2.cache_schema_version, 2);
+    assert_eq!(res2.cache_schema_version, CACHE_SCHEMA_VERSION);
     assert!(!res2.cache_migrated);
     assert!(res2.created_files.is_empty());
     assert!(!res2.gitignore_updated);
@@ -470,14 +480,14 @@ fn test_cache_migration_drops_views_triggers_and_escaped_tables() {
 
     let result =
         init(&options).expect("Migration should drop triggers, views, and escaped tables cleanly");
-    assert_eq!(result.cache_schema_version, 2);
+    assert_eq!(result.cache_schema_version, CACHE_SCHEMA_VERSION);
     assert!(result.cache_migrated);
 
     let conn = rusqlite::Connection::open(&cache_file).unwrap();
     let user_version: u32 = conn
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 2);
+    assert_eq!(user_version, CACHE_SCHEMA_VERSION);
 
     // Verify all legacy objects are gone
     let legacy_tables: u32 = conn

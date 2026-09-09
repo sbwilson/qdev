@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
@@ -19,8 +19,12 @@ use crate::store::{
 };
 use crate::write::Author;
 
-pub const CACHE_SCHEMA_VERSION: u32 = 2;
-pub const CACHE_USER_VERSION: u32 = 2;
+// v3 widened the `findings` primary key from (path, code) to (path, code, message_key): the
+// narrower key silently collapsed a path's several dangling relations, or its membership in
+// two disjoint dependency cycles, down to whichever row was written last. A v2 cache is
+// therefore rebuilt on first open rather than migrated in place.
+pub const CACHE_SCHEMA_VERSION: u32 = 3;
+pub const CACHE_USER_VERSION: u32 = 3;
 pub const BUSY_TIMEOUT_MS: u64 = 5000;
 
 pub const ALL_TABLE_NAMES: &[&str] = &[
@@ -42,7 +46,7 @@ pub const ALL_TABLE_NAMES: &[&str] = &[
     "sync_meta",
 ];
 
-pub const SCHEMA_V2_DDL: &str = r#"
+pub const SCHEMA_DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS entities (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -192,8 +196,9 @@ CREATE TABLE IF NOT EXISTS findings (
     code TEXT NOT NULL,
     severity TEXT NOT NULL,
     message TEXT,
+    message_key TEXT NOT NULL,
     found_at TEXT NOT NULL,
-    PRIMARY KEY (path, code)
+    PRIMARY KEY (path, code, message_key)
 );
 
 CREATE TABLE IF NOT EXISTS sync_meta (
@@ -305,7 +310,9 @@ impl SqliteStore {
                 )
             })?;
 
-        create_schema_v2(&conn)?;
+        // A brand-new in-memory database, so stamping is safe.
+        create_schema(&conn)?;
+        stamp_cache_version(&conn)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -352,8 +359,14 @@ impl SqliteStore {
         f(&mut conn)
     }
 
-    /// Drops all existing tables and triggers, recreates schema v2, rebuilds all cache rows from
-    /// Markdown entity files in the workspace, and sets user_version = 2 and schema_version = 2.
+    /// Drops every table and trigger, recreates the schema, repopulates the cache rows from the
+    /// workspace's Markdown entity files, and stamps both version pragmas to
+    /// `CACHE_USER_VERSION` / `CACHE_SCHEMA_VERSION`.
+    ///
+    /// Deliberately does **not** take the advisory write lock: `ensure_cache` already holds it
+    /// when it calls this on a mismatched cache, so acquiring it here would deadlock. Any
+    /// caller reaching this without that guard — `qdev sync --rebuild` is the only one — must
+    /// take the lock itself, or the drop-and-repopulate can interleave with a concurrent write.
     pub fn reset_and_rebuild(
         &self,
         workspace_root: &Path,
@@ -361,7 +374,7 @@ impl SqliteStore {
     ) -> Result<SweepSummary, QdevError> {
         self.with_conn_mut(|conn| {
             drop_all_user_tables(conn)?;
-            create_schema_v2(conn)?;
+            create_schema(conn)?;
             Ok(())
         })?;
 
@@ -2646,9 +2659,9 @@ ON CONFLICT(id) DO UPDATE SET dirty_at = excluded.dirty_at;
         self.with_conn(|conn| {
             conn.execute(
                 r#"
-INSERT INTO findings (path, code, severity, message, found_at)
-VALUES (?1, ?2, ?3, ?4, ?5)
-ON CONFLICT(path, code) DO UPDATE SET
+INSERT INTO findings (path, code, severity, message, message_key, found_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+ON CONFLICT(path, code, message_key) DO UPDATE SET
     severity = excluded.severity,
     message = excluded.message,
     found_at = excluded.found_at;
@@ -2658,6 +2671,10 @@ ON CONFLICT(path, code) DO UPDATE SET
                     finding.code,
                     finding.severity,
                     finding.message,
+                    // `message_key` cannot distinguish a NULL message from an empty one, so
+                    // `message` stays in the update list: without it the first of the two
+                    // written would win permanently and could never be corrected.
+                    finding.message.as_deref().unwrap_or(""),
                     finding.found_at,
                 ],
             )
@@ -2678,7 +2695,7 @@ ON CONFLICT(path, code) DO UPDATE SET
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT path, code, severity, message, found_at FROM findings WHERE path = ?1 AND code = ?2;",
+                    "SELECT path, code, severity, message, found_at FROM findings WHERE path = ?1 AND code = ?2 ORDER BY message_key ASC LIMIT 1;",
                 )
                 .map_err(|e| {
                     QdevError::infrastructure_failure(
@@ -2717,7 +2734,7 @@ ON CONFLICT(path, code) DO UPDATE SET
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT path, code, severity, message, found_at FROM findings WHERE path = ?1 ORDER BY code ASC;",
+                    "SELECT path, code, severity, message, found_at FROM findings WHERE path = ?1 ORDER BY code ASC, message_key ASC;",
                 )
                 .map_err(|e| {
                     QdevError::infrastructure_failure(
@@ -2758,7 +2775,7 @@ ON CONFLICT(path, code) DO UPDATE SET
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT path, code, severity, message, found_at FROM findings ORDER BY path ASC, code ASC;",
+                    "SELECT path, code, severity, message, found_at FROM findings ORDER BY path ASC, code ASC, message_key ASC;",
                 )
                 .map_err(|e| {
                     QdevError::infrastructure_failure(
@@ -2826,6 +2843,55 @@ ON CONFLICT(path, code) DO UPDATE SET
                     format!("Failed to read last_synced_at from sync_meta: {}", e),
                 )
             })
+        })
+    }
+
+    fn cache_schema_version(&self) -> Result<u32, QdevError> {
+        self.with_conn(|conn| {
+            conn.query_row("PRAGMA user_version;", [], |row| row.get(0))
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to read user_version pragma: {}", e),
+                    )
+                })
+        })
+    }
+
+    fn cache_missing_tables(&self) -> Result<Vec<String>, QdevError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table';")
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to prepare sqlite_master query: {}", e),
+                    )
+                })?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to list cache tables: {}", e),
+                    )
+                })?;
+            let mut present = HashSet::new();
+            for row in rows {
+                present.insert(row.map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to read cache table name: {}", e),
+                    )
+                })?);
+            }
+            let mut missing: Vec<String> = ALL_TABLE_NAMES
+                .iter()
+                .filter(|t| !present.contains(**t))
+                .map(|t| (*t).to_string())
+                .collect();
+            missing.sort();
+            Ok(missing)
         })
     }
 
@@ -3004,12 +3070,49 @@ ON CONFLICT(path, code) DO UPDATE SET
             // Paths whose hydration succeeded this pass. Only these consume a dirty row.
             let mut parsed_paths: HashSet<String> = HashSet::new();
 
-            // 1. Purge removed files (present in sync_state but absent on disk)
-            for path in sync_map.keys() {
-                if !disk_paths.contains(path) {
-                    purge_removed_path(&tx, path)?;
-                    purged += 1;
+            // 1. Purge removed files: any path the cache knows about that is no longer on disk.
+            //
+            // The known set is the union of `sync_state` and every `entities.source_path`, not
+            // `sync_state` alone. The write path deletes a file's `sync_state` row to invalidate
+            // it, so an entity that was written and then deleted has no `sync_state` row at all —
+            // driving purge from that table by itself left it in the cache permanently, still
+            // queryable, with no file behind it.
+            let mut known_paths: HashSet<String> = sync_map.keys().cloned().collect();
+            {
+                let mut stmt = tx
+                    .prepare("SELECT DISTINCT source_path FROM entities;")
+                    .map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to prepare entity source_path scan: {}", e),
+                        )
+                    })?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to scan entity source paths: {}", e),
+                        )
+                    })?;
+                for r in rows {
+                    known_paths.insert(r.map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to read entity source path: {}", e),
+                        )
+                    })?);
                 }
+            }
+
+            let mut removed: Vec<&String> = known_paths
+                .iter()
+                .filter(|p| !disk_paths.contains(*p))
+                .collect();
+            removed.sort();
+            for path in removed {
+                purge_removed_path(&tx, path)?;
+                purged += 1;
             }
 
             // 2. Sweep each on-disk file
@@ -3196,15 +3299,32 @@ ON CONFLICT(path, code) DO UPDATE SET
     }
 }
 
-/// Creates all 15 schema tables if not present and sets PRAGMA user_version = 2 and PRAGMA schema_version = 2.
-pub fn create_schema_v2(conn: &rusqlite::Connection) -> Result<(), QdevError> {
-    conn.execute_batch(SCHEMA_V2_DDL).map_err(|e| {
+/// Creates every table in `ALL_TABLE_NAMES` that is not already present.
+///
+/// Deliberately does **not** stamp the version pragmas. `CREATE TABLE IF NOT EXISTS` leaves an
+/// existing table alone even when its columns are from an older schema, so stamping here would
+/// mark an unmigrated database as current: `inspect_cache_schema` would then report it Valid,
+/// `ensure_cache` would skip the rebuild, and every sweep would die on the missing column with
+/// no way out but deleting the cache by hand. Only callers that have just dropped the tables
+/// (or created the database) may stamp — see `stamp_cache_version`.
+pub fn create_schema(conn: &rusqlite::Connection) -> Result<(), QdevError> {
+    conn.execute_batch(SCHEMA_DDL).map_err(|e| {
         QdevError::infrastructure_failure(
             "sqlite_error",
-            format!("Failed to create SQLite cache schema v2: {}", e),
+            format!(
+                "Failed to create SQLite cache schema v{}: {}",
+                CACHE_SCHEMA_VERSION, e
+            ),
         )
     })?;
 
+    Ok(())
+}
+
+/// Stamps `PRAGMA user_version` and `PRAGMA schema_version` to this binary's current cache
+/// version. Only safe on a database whose tables are known to match `SCHEMA_DDL` — a freshly
+/// created one, or one whose tables were just dropped and recreated.
+pub fn stamp_cache_version(conn: &rusqlite::Connection) -> Result<(), QdevError> {
     conn.execute_batch(&format!(
         "PRAGMA user_version = {};\nPRAGMA schema_version = {};\n",
         CACHE_USER_VERSION, CACHE_SCHEMA_VERSION
@@ -3217,9 +3337,7 @@ pub fn create_schema_v2(conn: &rusqlite::Connection) -> Result<(), QdevError> {
                 e
             ),
         )
-    })?;
-
-    Ok(())
+    })
 }
 
 /// Drops all triggers, views, and tables in the database (disabling foreign keys during drop).
@@ -3435,9 +3553,10 @@ pub fn inspect_cache_schema(path: &Path) -> Result<CacheSchemaStatus, QdevError>
 }
 
 /// Boot-time verification and initialization of the SQLite cache database.
-/// Ensures `.qdev/cache/cache.sqlite` exists with all 15 tables, WAL mode, busy_timeout=5000,
-/// and schema_version = user_version = 2. Automatically rebuilds from files on missing cache
-/// or version mismatch, and runs the incremental hydration sweep on every healthy boot.
+/// Ensures `.qdev/cache/cache.sqlite` exists with every table in `ALL_TABLE_NAMES`, WAL mode,
+/// busy_timeout=5000, and both version pragmas at `CACHE_SCHEMA_VERSION`. Automatically
+/// rebuilds from files on a missing cache or a version mismatch, and runs the incremental
+/// hydration sweep on every healthy boot.
 pub fn ensure_cache(
     workspace_root: &Path,
     storage: &StorageConfig,
@@ -3581,14 +3700,6 @@ ON CONFLICT(path) DO UPDATE SET
     })
 }
 
-fn now_iso8601() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    iso8601_from_timestamp(secs)
-}
-
 fn clear_findings_for_path(tx: &rusqlite::Transaction, path: &str) -> Result<(), QdevError> {
     tx.execute(
         "DELETE FROM findings WHERE path = ?1;",
@@ -3612,14 +3723,21 @@ fn record_finding(
 ) -> Result<(), QdevError> {
     tx.execute(
         r#"
-INSERT INTO findings (path, code, severity, message, found_at)
-VALUES (?1, ?2, ?3, ?4, ?5)
-ON CONFLICT(path, code) DO UPDATE SET
+INSERT INTO findings (path, code, severity, message, message_key, found_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+ON CONFLICT(path, code, message_key) DO UPDATE SET
     severity = excluded.severity,
     message = excluded.message,
     found_at = excluded.found_at;
 "#,
-        rusqlite::params![path, code, severity, message, now_iso8601()],
+        rusqlite::params![
+            path,
+            code,
+            severity,
+            message,
+            message,
+            crate::write::current_iso8601()
+        ],
     )
     .map(|_| ())
     .map_err(|e| {
@@ -4303,7 +4421,7 @@ fn hydrate_markdown_file(
         .get("updated_at")
         .and_then(|v| v.as_str())
         .map(str::to_string)
-        .unwrap_or_else(|| iso8601_from_timestamp(mtime));
+        .unwrap_or_else(|| crate::write::iso8601_from_timestamp(mtime));
 
     // Upsert entities table (successful parse clears the stale flag)
     tx.execute(
@@ -5073,25 +5191,4 @@ fn sha256_digest(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
     format!("{:x}", hasher.finalize())
-}
-
-fn iso8601_from_timestamp(secs: i64) -> String {
-    let s = (secs.rem_euclid(60)) as u64;
-    let m = ((secs / 60).rem_euclid(60)) as u64;
-    let h = ((secs / 3600).rem_euclid(24)) as u64;
-    let mut days = secs / 86400;
-    days += 719468;
-    let era = (if days >= 0 { days } else { days - 146096 }) / 146097;
-    let doe = (days - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = (yoe as i64) + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { y + 1 } else { y };
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, d, h, m, s
-    )
 }

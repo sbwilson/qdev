@@ -552,3 +552,51 @@ fn test_list_sprint_filter() {
     let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(ids, vec!["E15S1"]);
 }
+
+/// `blocked` is a story-level notion, and `payload-story.json` documents it as such. Hydration
+/// keeps an out-of-band `depends_on` row on another kind (it records an `invalid_relation_kind`
+/// finding rather than dropping the row), so without an explicit kind gate a non-story carrying
+/// one would report `blocked: true` and contradict the schema every consumer reads.
+#[test]
+fn test_blocked_stays_false_for_a_non_story_with_a_depends_on_row() {
+    let store = SqliteStore::open_in_memory().unwrap();
+
+    let epic = base_entity("E12", EntityKind::Epic);
+    store.upsert_entity(&epic).unwrap();
+
+    // A blocking target: present, and not `done`.
+    let mut target = base_entity("E12S1", EntityKind::Story);
+    target.status = Some("draft".to_string());
+    store.upsert_entity(&target).unwrap();
+
+    // The out-of-band edge hydration would have kept while flagging it.
+    store
+        .upsert_relation(&RelationRecord {
+            source_id: "E12".to_string(),
+            relation: "depends_on".to_string(),
+            target_id: "E12S1".to_string(),
+        })
+        .unwrap();
+
+    let result = query_entity(
+        &store,
+        Some(EntityKind::Epic),
+        "E12",
+        &QueryOptions::default(),
+    )
+    .unwrap();
+    let projection = match result {
+        GetResult::Entity(p) => *p,
+        GetResult::Constraint(_) => panic!("expected an entity projection"),
+    };
+
+    assert_eq!(projection.kind, EntityKind::Epic);
+    assert!(
+        !projection.blocked,
+        "blocked must stay false for a non-story, whatever relations it carries"
+    );
+    assert!(
+        projection.relations.contains_key("depends_on"),
+        "the row itself is still reported; only `blocked` is gated"
+    );
+}

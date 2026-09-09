@@ -36,3 +36,22 @@ context:
 - `low` — the epic filter was only tested excluding an *edge into* the filtered set (excluded story depends on an included one); the reverse (included story depends on an excluded one) was unverified. **Fixed**: added `test_graph_dot_epic_filter_excludes_edge_to_story_outside_filter`.
 - `low` — bare `qdev graph` (no flags at all) — the most likely real mistake — had no direct test, only `graph --json`. **Fixed**: added `test_graph_bare_no_flags_is_refused`.
 - `false` — flagged `fillcolor="gray45"` for `superseded`/`abandoned` as possibly not matching "gray45 dashed border." Rejected: the spec's own wording ("gray45 dashed border") is satisfied literally by `style="filled,dashed"` + `fillcolor="gray45"` — a gray-filled node with a dashed outline — which is what was intended and implemented; no ambiguity to resolve.
+
+### 2026-09-09 — Cross-story review of stories 1.9-1.13 (bmad-review)
+
+**Frozen boundary needs renegotiation — `qdev graph` refusal exit code.**
+
+Boundaries state that `--json` (and, by extension, a missing `--dot`) is refused with
+`needs_confirmation`, exit 3. Both refusals now return `usage_error`, exit 2.
+
+Why: AD-13 reserves exit 3 for refusals a human has to act on — preflight, lease, governance,
+missing confirmation — and exit 2 for a malformed invocation. Both `graph` refusals are about the
+shape of the flags, and every other flag rejection in the binary uses exit 2 (`--expand` with an
+unknown value, `schema` with an extra positional, `--changed` combined with `--fix-ids`). Leaving
+`graph` on exit 3 taught two contradictory meanings for the same code, so a caller branching on
+"a human must confirm something" versus "I passed the wrong flags" was sent down the wrong path
+by a plain typo.
+
+The three refusal tests were renamed and now assert exit 2 and a `usage_error` code. If exit 3
+was deliberate here, the boundary needs to say what a human is being asked to confirm — nothing
+about these two refusals is recoverable by confirming anything.

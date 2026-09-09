@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "List Payload Schema",
+  "description": "Output shape of `qdev list <kind> --json`. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "type": "object",
+  "required": ["schema_version", "kind", "items"],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string",
+      "description": "The entity kind that was listed."
+    },
+    "items": {
+      "type": "array",
+      "description": "Matching entities, ordered by id.",
+      "items": {
+        "type": "object",
+        "required": ["id", "owners", "version", "stale"],
+        "properties": {
+          "id": { "type": "string" },
+          "epic_id": { "type": "string" },
+          "title": { "type": "string" },
+          "status": { "type": "string" },
+          "owners": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "version": { "type": "integer" },
+          "stale": {
+            "type": "boolean",
+            "description": "True when the source file currently fails to parse and these values are its last known good hydrated state."
+          }
+        }
+      }
+    }
+  }
+}

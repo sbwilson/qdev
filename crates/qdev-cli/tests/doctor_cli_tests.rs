@@ -75,7 +75,7 @@ fn test_doctor_json_shape_and_exit_0() {
         .find(|s| s["name"] == "cache")
         .expect("a 'cache' doctor section must be present");
 
-    assert!(cache["schema_version"].is_number());
+    assert!(cache["cache_schema_version"].is_number());
     assert!(cache["entity_count"].is_number());
     assert!(cache["finding_count"].is_number());
     assert!(cache.get("last_synced_at").is_some());
@@ -223,5 +223,95 @@ updated_by:
         cache["finding_count"].as_u64().unwrap_or(0) > 0,
         "expected a non-zero finding_count for a seeded merge-conflict finding: {}",
         cache
+    );
+}
+
+/// The cache section reports the version the database actually carries alongside the one this
+/// binary expects. Echoing the compiled-in constant back — as it did — made the one diagnostic
+/// `qdev doctor` ships structurally incapable of detecting the stale or half-migrated cache it
+/// exists to find.
+#[test]
+fn test_doctor_reports_observed_schema_state() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    write_story(&root.join("docs/specs/stories"), "E1S1", "Story one");
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["doctor", "--json"])
+        .assert()
+        .success();
+    let output = assert.get_output();
+    let val: Value = serde_json::from_str(std::str::from_utf8(&output.stdout).unwrap()).unwrap();
+    let cache = val["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "cache")
+        .expect("a cache section");
+
+    assert_eq!(cache["schema_status"], "ok");
+    assert_eq!(cache["missing_tables"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        cache["cache_schema_version"], cache["expected_cache_schema_version"],
+        "a healthy cache reports the version it was built for"
+    );
+    assert!(
+        cache["schema_version"].is_null(),
+        "the section must not shadow the envelope's string schema_version"
+    );
+}
+
+/// A cache stamped with an older version is healed by the boot-time `ensure_cache` rebuild
+/// before any command's handler runs, so `qdev doctor` reports it as `ok` — the rebuild is what
+/// makes that true, and `schema_status` is what would catch a rebuild that failed to stamp.
+/// (The store-level observation itself is covered by `sweep_tests`.)
+#[test]
+fn test_doctor_reports_ok_after_a_stale_cache_is_healed_at_boot() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    write_story(&root.join("docs/specs/stories"), "E1S1", "Story one");
+
+    let mut prime = Command::cargo_bin("qdev").unwrap();
+    prime
+        .current_dir(root)
+        .args(["doctor", "--json"])
+        .assert()
+        .success();
+    {
+        let conn =
+            qdev_core::rusqlite::Connection::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
+        conn.execute_batch("PRAGMA user_version = 1;").unwrap();
+    }
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["doctor", "--json"])
+        .assert()
+        .success();
+    let output = assert.get_output();
+    let val: Value = serde_json::from_str(std::str::from_utf8(&output.stdout).unwrap()).unwrap();
+    let cache = val["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "cache")
+        .expect("a cache section");
+
+    assert_eq!(
+        cache["schema_status"], "ok",
+        "the boot rebuild must have restamped the cache before doctor read it"
+    );
+    assert_eq!(
+        cache["cache_schema_version"],
+        cache["expected_cache_schema_version"]
+    );
+    assert_eq!(
+        cache["entity_count"], 1,
+        "the rebuild must not have lost the workspace's entities"
     );
 }

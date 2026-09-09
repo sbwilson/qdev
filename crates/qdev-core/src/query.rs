@@ -127,7 +127,20 @@ fn group_relations(rows: &[RelationRecord]) -> BTreeMap<String, Vec<String>> {
 
 /// Computes `blocked` per the frozen spec: true if any `depends_on` target's cached status
 /// isn't `done` (including a dangling target with no cached row). No cycle traversal.
-fn compute_blocked(store: &dyn Store, relation_rows: &[RelationRecord]) -> Result<bool, QdevError> {
+///
+/// Stories only, matching the documented invariant and `payload-story.json`. `depends_on` is a
+/// Story -> Story relation, but hydration only *records* an out-of-band edge on another kind as
+/// an `invalid_relation_kind` finding — it keeps the row — so without this gate an epic
+/// carrying a stray `depends_on` would report `blocked: true` and contradict the payload schema
+/// every consumer reads.
+fn compute_blocked(
+    store: &dyn Store,
+    kind: EntityKind,
+    relation_rows: &[RelationRecord],
+) -> Result<bool, QdevError> {
+    if kind != EntityKind::Story {
+        return Ok(false);
+    }
     for row in relation_rows {
         if row.relation == "depends_on" {
             let target_status = store.get_entity(&row.target_id)?.and_then(|e| e.status);
@@ -180,7 +193,7 @@ fn build_entity_projection(
 
     let relation_rows = store.get_relations_for_source(&entity.id)?;
     let relations = group_relations(&relation_rows);
-    let blocked = compute_blocked(store, &relation_rows)?;
+    let blocked = compute_blocked(store, entity.kind, &relation_rows)?;
 
     let scratch = if options.expand_scratch {
         let entries = store.get_scratchpad_entries(&entity.id)?;

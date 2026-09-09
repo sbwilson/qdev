@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Fix-Ids Payload Schema",
+  "description": "Output shape of `qdev validate --fix-ids --json`. This branch of `qdev validate` emits a renumber report rather than a finding list, so it has its own schema; the `validate` payload covers the plain branch. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "renumbered",
+    "skipped"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "renumbered": {
+      "type": "array",
+      "description": "One entry per file whose frontmatter id was rewritten.",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "old_id",
+          "new_id",
+          "relations_rewritten",
+          "citations_rewritten"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Workspace-relative path of the renumbered file."
+          },
+          "old_id": {
+            "type": "string",
+            "description": "The duplicated id, which the group's first file keeps."
+          },
+          "new_id": {
+            "type": "string",
+            "description": "The freshly allocated id this file now declares."
+          },
+          "relations_rewritten": {
+            "type": "array",
+            "description": "Source entity ids whose relations were redirected from old_id to new_id. Note that the group's first file keeps old_id, so an edge that meant the keeper is redirected away from it; nothing records which of the colliding files a reference meant.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "citations_rewritten": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "How many citation occurrences under the configured module globs were redirected from old_id to new_id."
+          }
+        }
+      }
+    },
+    "skipped": {
+      "type": "array",
+      "description": "Workspace-relative paths that were offered a renumber and not rewritten (declined at the prompt, or an unparseable id).",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

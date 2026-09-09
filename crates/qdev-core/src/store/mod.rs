@@ -10,9 +10,9 @@ use crate::schema::EntityKind;
 use crate::write::Author;
 
 pub use sqlite::{
-    create_schema_v2, determine_entity_kind, drop_all_user_tables, ensure_cache,
-    inspect_cache_schema, CacheSchemaStatus, SqliteStore, ALL_TABLE_NAMES, BUSY_TIMEOUT_MS,
-    CACHE_SCHEMA_VERSION, CACHE_USER_VERSION, SCHEMA_V2_DDL,
+    create_schema, determine_entity_kind, drop_all_user_tables, ensure_cache, inspect_cache_schema,
+    stamp_cache_version, CacheSchemaStatus, SqliteStore, ALL_TABLE_NAMES, BUSY_TIMEOUT_MS,
+    CACHE_SCHEMA_VERSION, CACHE_USER_VERSION, SCHEMA_DDL,
 };
 
 /// Common entity record representing rows in the `entities` table.
@@ -209,7 +209,9 @@ pub struct DirtyEntityRecord {
 
 /// Per-path validation finding record representing rows in the `findings` table.
 /// Findings are current state: each sweep pass replaces a path's findings, and purging a
-/// path removes its findings.
+/// path removes its findings. A path may hold several findings of the same `code` — one file
+/// can have two dangling relations, or take part in two disjoint dependency cycles — so rows
+/// are keyed by `(path, code, message)`, not by `(path, code)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FindingRecord {
     pub path: String,
@@ -247,7 +249,7 @@ pub struct EntityFilter {
     pub sprint: Option<i64>,
 }
 
-/// The unified Store trait exposing reads and writes for all 15 cache tables.
+/// The unified Store trait exposing reads and writes for all 16 cache tables.
 pub trait Store: Send + Sync {
     // Entities
     fn upsert_entity(&self, record: &EntityRecord) -> Result<(), QdevError>;
@@ -361,6 +363,9 @@ pub trait Store: Send + Sync {
 
     // Findings
     fn upsert_finding(&self, finding: &FindingRecord) -> Result<(), QdevError>;
+    /// One finding for `(path, code)`. Since v3 a path can hold several findings of the same
+    /// code (distinguished by message), so this returns the lowest-message one; use
+    /// `get_findings_for_path` to see them all.
     fn get_finding(&self, path: &str, code: &str) -> Result<Option<FindingRecord>, QdevError>;
     fn get_findings_for_path(&self, path: &str) -> Result<Vec<FindingRecord>, QdevError>;
     fn list_findings(&self) -> Result<Vec<FindingRecord>, QdevError>;
@@ -369,6 +374,17 @@ pub trait Store: Send + Sync {
     /// Returns the ISO8601 timestamp of the most recent successful sweep or rebuild, or `None`
     /// if the cache has never been synced (a freshly created schema with an empty `sync_meta`).
     fn get_last_synced_at(&self) -> Result<Option<String>, QdevError>;
+
+    // Schema introspection
+
+    /// The open cache database's own `PRAGMA user_version`, read from the connection rather
+    /// than reported back from the binary's compiled-in `CACHE_SCHEMA_VERSION`. Diagnostics
+    /// need the observed value to detect a stale or half-migrated cache at all.
+    fn cache_schema_version(&self) -> Result<u32, QdevError>;
+
+    /// Names from `ALL_TABLE_NAMES` that are absent from the open cache database, sorted. Empty
+    /// for a healthy cache; non-empty means a half-migrated one that a rebuild would heal.
+    fn cache_missing_tables(&self) -> Result<Vec<String>, QdevError>;
 
     // Incremental sweep
     fn sweep_workspace(

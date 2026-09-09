@@ -21,7 +21,7 @@ fn test_schema_creation_and_all_tables_exist() {
     let store = SqliteStore::open(&db_path).unwrap();
     store
         .with_conn(|conn| {
-            qdev_core::store::create_schema_v2(conn).unwrap();
+            qdev_core::store::create_schema(conn).unwrap();
             Ok(())
         })
         .unwrap();
@@ -75,9 +75,30 @@ fn test_user_version_and_schema_version_pragmas() {
     let temp = TempDir::new().unwrap();
     let db_path = temp.path().join("cache.sqlite");
     let store = SqliteStore::open(&db_path).unwrap();
+
+    // Creating the tables must not stamp a version on its own: `CREATE TABLE IF NOT EXISTS`
+    // leaves an older table's columns alone, so a stamp here would mark an unmigrated database
+    // as current and `ensure_cache` would skip the rebuild it needs.
     store
         .with_conn(|conn| {
-            qdev_core::store::create_schema_v2(conn).unwrap();
+            qdev_core::store::create_schema(conn).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    store
+        .with_conn(|conn| {
+            let user_ver: u32 = conn
+                .query_row("PRAGMA user_version;", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(user_ver, 0, "create_schema must not stamp a version");
+            Ok(())
+        })
+        .unwrap();
+
+    // Stamping is the separate, explicit step, safe here because the database is brand new.
+    store
+        .with_conn(|conn| {
+            qdev_core::store::stamp_cache_version(conn).unwrap();
             Ok(())
         })
         .unwrap();
@@ -592,13 +613,14 @@ fn test_store_findings_crud() {
     assert!(for_path.iter().all(|f| f.path == conflicted));
     assert_eq!(store.list_findings().unwrap().len(), 3);
 
-    // (path, code) is the primary key: re-upserting replaces severity/message/found_at.
+    // (path, code, message) is the primary key: re-upserting the *same* message replaces
+    // severity and found_at in place.
     store
         .upsert_finding(&FindingRecord {
             path: conflicted.to_string(),
             code: "merge_conflict".to_string(),
             severity: "warning".to_string(),
-            message: Some("still conflicted".to_string()),
+            message: Some("File contains merge conflict markers".to_string()),
             found_at: "2026-09-08T00:00:00Z".to_string(),
         })
         .unwrap();
@@ -608,11 +630,52 @@ fn test_store_findings_crud() {
         .unwrap()
         .unwrap();
     assert_eq!(updated.severity, "warning");
-    assert_eq!(updated.message.as_deref(), Some("still conflicted"));
+    assert_eq!(
+        updated.message.as_deref(),
+        Some("File contains merge conflict markers")
+    );
     assert_eq!(updated.found_at, "2026-09-08T00:00:00Z");
 
+    // A *different* message under the same (path, code) is a distinct finding, not a
+    // replacement: one file can have two dangling relations, or sit in two disjoint dependency
+    // cycles, and the narrower (path, code) key silently kept only the last one written.
+    store
+        .upsert_finding(&FindingRecord {
+            path: conflicted.to_string(),
+            code: "merge_conflict".to_string(),
+            severity: "error".to_string(),
+            message: Some("A second, unrelated conflict".to_string()),
+            found_at: "2026-09-08T00:00:01Z".to_string(),
+        })
+        .unwrap();
+    let both = store.get_findings_for_path(conflicted).unwrap();
+    assert_eq!(both.len(), 3, "both merge_conflict messages must survive");
+    // Read back in message order, not re-sorted here: the row order is part of the contract, so
+    // dropping the ORDER BY would make output order depend on SQLite's query plan.
+    let messages: Vec<&str> = both
+        .iter()
+        .filter(|f| f.code == "merge_conflict")
+        .filter_map(|f| f.message.as_deref())
+        .collect();
+    assert_eq!(
+        messages,
+        vec![
+            "A second, unrelated conflict",
+            "File contains merge conflict markers"
+        ],
+        "get_findings_for_path must order by (code, message)"
+    );
+
+    // `get_finding` returns one row for a (path, code) that now holds several: the lowest
+    // message, deterministically, per the trait's documented contract.
+    let one = store
+        .get_finding(conflicted, "merge_conflict")
+        .unwrap()
+        .unwrap();
+    assert_eq!(one.message.as_deref(), Some("A second, unrelated conflict"));
+
     // Deleting one path leaves the other path's findings alone.
-    assert_eq!(store.delete_findings_for_path(conflicted).unwrap(), 2);
+    assert_eq!(store.delete_findings_for_path(conflicted).unwrap(), 3);
     assert!(store.get_findings_for_path(conflicted).unwrap().is_empty());
     assert_eq!(store.list_findings().unwrap().len(), 1);
     assert_eq!(store.delete_findings_for_path(conflicted).unwrap(), 0);

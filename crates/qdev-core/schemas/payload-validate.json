@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Validate Payload Schema",
-  "description": "Output shape of `qdev validate --json`. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "description": "Output shape of `qdev validate --json`. The `--fix-ids` branch emits a renumber report instead and is covered by the `fix_ids` payload schema. Schema changes follow semver on schema_version; additive fields do not bump the major.",
   "type": "object",
   "required": ["schema_version", "findings"],
   "properties": {
