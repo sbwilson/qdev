@@ -6,7 +6,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-10-2026 09:00
+last_updated: 09-10-2026 10:00
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -95,7 +95,7 @@ action_items:
       allocators, STANDARD_DIRECTORIES, GITIGNORE_ENTRIES) and gitignore a non-default
       cache_dir"
     owner: "Simon"
-    status: open
+    status: done
     ref: "docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md"
   - id: "epic-1-retro-item-4-route-qdev-create-story-through-the-stor"
     epic: 1
@@ -130,7 +130,7 @@ action_items:
     action: "Verify or drop the section-D findings in the epic 1 retrospective before
       scheduling them"
     owner: "Simon"
-    status: open
+    status: done
     ref: "docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md"
   - id: "epic-1-retro-item-9-process-advance-sprint-status-story-keys"
     epic: 1

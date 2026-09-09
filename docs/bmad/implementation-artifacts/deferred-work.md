@@ -47,3 +47,30 @@ Items deferred from reviews and implementation, kept out of the story they surfa
 - source_spec: `docs/bmad/implementation-artifacts/spec-1-14-cache-version-stamp-hardening.md`
   summary: `docs/architecture.md` §10's abbreviated DDL is still the v1 shape, so the cache-version paragraph this story added describes an `entities.stale` column the listing below it does not show.
   evidence: Pre-existing and already owned by epic-1 retrospective action item 6 ("Reconcile architecture.md sections 10 and 11 with the shipped 16-table cache"); duplicated here because story 1.14's review surfaced it again from the same file it edits. This story added the version paragraph, it did not create the stale listing.
+
+## Scheduled from: epic 1 retrospective section D verification pass (2026-09-10)
+
+Confirmed by re-checking every section-D claim against the tree at `a706c85`; see the
+"Verification pass — 2026-09-10" table in `epic-1-retro-2026-09-09.md` for the refutations.
+
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md`
+  summary: A frontmatter fence closed with a trailing space (`"--- "`) hydrates but cannot be patched — `schema.rs:332` trims the line, `write.rs:311`, `write.rs:691` and `validate.rs:518` do not.
+  evidence: Confirmed. The three scanners must agree on what closes a fence; today a file readable by the sweep is rejected by `qdev update`. Review by: before epic 2 story 2.1 (lifecycle hooks patch frontmatter on every transition).
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md`
+  summary: Malformed frontmatter exits 4, 1, or 2 depending on which reader hits it; AD-13 reserves 4 for infrastructure and 2 for malformed input.
+  evidence: Confirmed. `parse_error` is an `infrastructure_failure` at `write.rs:1335`, `write.rs:1732`, `main.rs:2537`; `yaml_parse_error` is a `logical_failure` at `write.rs:1570`. Review by: before epic 3 story 3.2 (gate result contract / failure taxonomy) freezes the exit-code contract.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md`
+  summary: `write.rs:877-920` hand-writes five raw statements duplicating four `Store` methods, and `epic_id`/`seq` are derived in three places (`sqlite.rs:4512`, `write.rs:1428`, `main.rs:2560`).
+  evidence: Confirmed as duplication only — no behavioural difference today (the `stale`-column half of the original claim is refuted). Same class of hazard that produced defects B1/B2: two sources of truth kept in step by hand. Review by: whenever the cache schema next changes.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md`
+  summary: The AD-1 forbidden-dependency guard inspects only qdev-core's direct dependencies, so a forbidden crate arriving transitively passes.
+  evidence: Confirmed and latent (`cargo tree` is currently clean). `architecture_tests.rs:56-70` iterates the qdev-core package's own `dependencies` array from `cargo metadata` rather than walking the resolved graph. Review by: before epic 3 story 3.12 (SOUP audit / SBOM), which needs the resolved graph anyway.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md`
+  summary: `_QDEV_MOCK_TTY` (`main.rs:114`) is compiled into release builds, so the env var makes a piped stdin look interactive in a shipped binary.
+  evidence: Confirmed — no `cfg(debug_assertions)` gate. Interacts with the non-interactive-first / closed-fail policy. Review by: before the first tagged release.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md`
+  summary: Not-found errors carry a typed `entity_not_found` code only on the `query.rs` pair; `main.rs:1524` and `write.rs:1121,1173` emit bare usage errors with no stable code.
+  evidence: Downgraded from the original claim — every path exits 2, so there is no exit-code split. Code consistency only. Review by: before epic 4 story 4.1 (context projection consumes error codes programmatically).
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md`
+  summary: Unsettled — 21 `println!` sites in `main.rs` bypass `OutputEmitter::emit_text`, which swallows `BrokenPipe`; claim is that `qdev relate | head -1` exits 4 where `qdev list | head -1` exits 0.
+  evidence: Still unverified after two attempts (the retro's and this pass's). Settling it needs one pipe-closing test, not an investigation — write that test before deciding whether there is anything to fix. Review by: epic 2 planning.
