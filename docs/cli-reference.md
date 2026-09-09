@@ -60,12 +60,30 @@ Universal reference resolution: any command that takes an ID accepts any entity 
 | --- | --- |
 | `qdev get <kind> <id> [--expand relations,constraints,scratch]` | One entity; isolated by default |
 | `qdev list <kind> [--epic --status --owner --sprint --module]` | Filtered list |
-| `qdev create story E12 --title ... --appetite small --module bridge` | Allocates the next ID |
+| `qdev create story E12 --title ... --appetite small --module bridge [--author-type agent --author-id bot]` | Allocates the next ID |
 | `qdev create epic|adr|requirement|hazard|prd ...` | Same pattern |
 | `qdev update <kind> <id> --field value [--if-version N]` | Field-level mutation |
 | `qdev update <kind> <id> --section "Acceptance Criteria" --file ac.md` | Body section replacement |
 | `qdev constraint add E12S4 --kind no_go -- "Do not touch frame buffers"` | Allocates `E12S4/NG-n` |
 | `qdev relate E12S4 depends_on E12S3` / `qdev unrelate ...` | Manage relations |
+
+`qdev create story` and `qdev update` share one write path: it takes the advisory lock on
+`<cache_dir>/write.lock` with a 5-second timeout (`lock_timeout`, exit 5), writes atomically via
+temp-file-then-rename, and upserts the cache row and marks it dirty, so the entity is queryable
+without waiting for the next sweep. `create story` additionally validates the frontmatter it
+generates against the story schema *before* writing — an `--appetite` or `--safety-class` outside
+its enum (`tiny|small|medium|deep`, `ClassA|ClassB|ClassC`) is a logical failure (exit 1) naming
+the field, and no file is created — refuses a create whose target path is already occupied
+(`file_exists`, exit 5, checked while holding the lock), and records the resolved author in both
+`created_by` and `updated_by`.
+
+Run outside an initialized workspace, `create story` writes only the story file: it creates no
+cache and takes no lock, so no `.qdev/` directory is left behind.
+
+Attribution is resolved from one path for every command that records an author: `--author-type`
+/ `--author-id` first, then `QDEV_AUTHOR_TYPE` / `QDEV_AUTHOR_ID`, then `[identity]
+developer_id`, then `git config user.email`. An author type other than `human` or `agent` is a
+usage error (exit 2) whatever its source, refused before anything is written.
 
 ### Workflow
 

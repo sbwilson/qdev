@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use qdev_core::store::{SqliteStore, Store};
 use qdev_core::{
-    acquire_write_lock, apply_entity_update, patch_frontmatter, replace_markdown_section,
-    sha256_digest, upsert_cache_and_mark_dirty, upsert_cache_with_relation, write_file_atomic,
-    Author, EntityKind, EntityRecord, EntityUpdateOptions, ExitCode, FrontmatterPatchOptions,
-    RelationRowChange,
+    acquire_write_lock, apply_entity_update, create_story, patch_frontmatter,
+    replace_markdown_section, sha256_digest, upsert_cache_and_mark_dirty,
+    upsert_cache_with_relation, write_file_atomic, Author, EntityKind, EntityRecord,
+    EntityUpdateOptions, ExitCode, FrontmatterPatchOptions, RelationRowChange, StoryCreateOptions,
 };
 use tempfile::TempDir;
 
@@ -950,4 +950,180 @@ fn test_upsert_cache_with_relation_writes_the_relation_row() {
         store.get_relations_for_source("E1S1").unwrap().is_empty(),
         "the edge must be gone without a sweep"
     );
+}
+
+/// The document `create_story` generates is a byte-for-byte contract: field order, flow-style
+/// sequences, an always-quoted title, and block-mapped attribution. Pinned here in core so the
+/// shape survives independently of the CLI's own assertions.
+#[test]
+fn test_create_story_generated_document_golden() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    let opts = StoryCreateOptions {
+        workspace_root: root.to_path_buf(),
+        storage: None,
+        story_id: "E12S1".to_string(),
+        title: Some("Feature \"quoted\": [special]".to_string()),
+        appetite: Some("small".to_string()),
+        safety_class: Some("ClassB".to_string()),
+        target_modules: vec!["bridge".to_string(), "foundation".to_string()],
+        owners: vec!["simon".to_string(), "team:core-platform".to_string()],
+        author: Author::new("agent", "claude-code"),
+    };
+
+    let result = create_story(&opts).unwrap();
+    assert_eq!(result.id, "E12S1");
+    assert_eq!(result.rel_path, "docs/specs/stories/E12S1.md");
+    assert_eq!(result.path, root.join("docs/specs/stories/E12S1.md"));
+
+    let expected = r#"---
+id: E12S1
+title: "Feature \"quoted\": [special]"
+status: draft
+appetite: small
+safety_class: ClassB
+target_modules: ["bridge","foundation"]
+owners: ["simon","team:core-platform"]
+version: 1
+created_by:
+  type: agent
+  id: claude-code
+updated_by:
+  type: agent
+  id: claude-code
+---
+
+## Acceptance Criteria
+"#;
+    assert_eq!(fs::read_to_string(&result.path).unwrap(), expected);
+
+    // The title must survive a round trip through the YAML parser, not merely look escaped.
+    let frontmatter = qdev_core::extract_frontmatter(expected).unwrap();
+    assert_eq!(frontmatter["title"], "Feature \"quoted\": [special]");
+}
+
+/// `write_file_atomic` renames over its destination, which *succeeds* on an existing path — so
+/// the exclusivity `OpenOptions::create_new` used to provide is re-established explicitly,
+/// inside the lock. Without it a refused create would silently clobber an existing story.
+#[test]
+fn test_create_story_refuses_to_clobber_an_occupied_path() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    let stories_dir = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    fs::write(stories_dir.join("E12S1.md"), "PRECIOUS\n").unwrap();
+
+    let opts = StoryCreateOptions {
+        workspace_root: root.to_path_buf(),
+        storage: None,
+        story_id: "E12S1".to_string(),
+        title: Some("Clobber".to_string()),
+        appetite: None,
+        safety_class: None,
+        target_modules: Vec::new(),
+        owners: Vec::new(),
+        author: Author::new("human", "simon"),
+    };
+
+    let err = create_story(&opts).expect_err("an occupied path must be a conflict");
+    assert_eq!(err.exit_code(), ExitCode::Conflict);
+    assert_eq!(err.code(), "file_exists");
+    assert_eq!(
+        fs::read_to_string(stories_dir.join("E12S1.md")).unwrap(),
+        "PRECIOUS\n",
+        "the existing file must be untouched"
+    );
+}
+
+/// Schema validation runs before the lock is taken and before anything is written, so an
+/// invalid field leaves no file at all — not a rejected-but-present one.
+#[test]
+fn test_create_story_schema_invalid_writes_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    let opts = StoryCreateOptions {
+        workspace_root: root.to_path_buf(),
+        storage: None,
+        story_id: "E12S1".to_string(),
+        title: None,
+        appetite: Some("huge".to_string()),
+        safety_class: None,
+        target_modules: Vec::new(),
+        owners: Vec::new(),
+        author: Author::new("human", "simon"),
+    };
+
+    let err = create_story(&opts).expect_err("an out-of-enum appetite must be refused");
+    assert_eq!(err.exit_code(), ExitCode::LogicalFailure);
+    assert_eq!(err.code(), "schema_validation_failed");
+    assert!(
+        err.message().contains("appetite"),
+        "the error must name the offending field, got: {}",
+        err.message()
+    );
+    assert!(!root.join("docs/specs/stories/E12S1.md").exists());
+}
+
+/// `create_story` must take the advisory lock *itself*. The CLI-level lock test cannot prove
+/// this: in an initialized workspace every command boots through `ensure_cache`, whose sweep
+/// takes the same lock, so the command fails at boot and exits 5 whether or not `create_story`
+/// ever locks anything. Deleting the lock from `create_story` left the whole suite green.
+/// Calling core directly bypasses boot, so the contention observed here is the one under test.
+#[test]
+fn test_create_story_waits_on_the_advisory_lock_then_succeeds_once_released() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    // The lock is only taken when the cache directory exists — that is what marks an
+    // initialized workspace for `create_story`.
+    let cache_dir = root.join(".qdev/cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    let lock_path = cache_dir.join("write.lock");
+
+    let opts = StoryCreateOptions {
+        workspace_root: root.to_path_buf(),
+        storage: None,
+        story_id: "E12S1".to_string(),
+        title: Some("Contended".to_string()),
+        appetite: None,
+        safety_class: None,
+        target_modules: Vec::new(),
+        owners: Vec::new(),
+        author: Author::new("human", "simon"),
+    };
+
+    let release = Arc::new(AtomicBool::new(false));
+    let holder_release = Arc::clone(&release);
+    let holder_path = lock_path.clone();
+    let holder = thread::spawn(move || {
+        let _guard = acquire_write_lock(&holder_path, Duration::from_millis(1000))
+            .expect("the holder must get the lock first");
+        // Held past the 5 s timeout the writer allows, then released unconditionally so an
+        // assertion failure in the main thread cannot leave this thread holding it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while !holder_release.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+        }
+    });
+
+    thread::sleep(Duration::from_millis(200));
+
+    let err = create_story(&opts).expect_err("a held write lock must refuse the create");
+    assert_eq!(err.code(), "lock_timeout");
+    assert_eq!(err.exit_code(), ExitCode::Conflict);
+    assert!(
+        !root.join("docs/specs/stories/E12S1.md").exists(),
+        "nothing may be written while another writer holds the lock"
+    );
+
+    release.store(true, Ordering::SeqCst);
+    holder.join().unwrap();
+
+    // Recovery: the same create succeeds once the lock is free, and the id was not consumed.
+    let res = create_story(&opts).expect("the create must succeed once the lock is released");
+    assert_eq!(res.id, "E12S1");
+    assert!(root.join("docs/specs/stories/E12S1.md").is_file());
 }

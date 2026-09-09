@@ -74,3 +74,21 @@ Confirmed by re-checking every section-D claim against the tree at `a706c85`; se
 - source_spec: `docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md`
   summary: Unsettled — 21 `println!` sites in `main.rs` bypass `OutputEmitter::emit_text`, which swallows `BrokenPipe`; claim is that `qdev relate | head -1` exits 4 where `qdev list | head -1` exits 0.
   evidence: Still unverified after two attempts (the retro's and this pass's). Settling it needs one pipe-closing test, not an investigation — write that test before deciding whether there is anything to fix. Review by: epic 2 planning.
+
+## Deferred from: code review of spec-create-story-via-write-path (2026-09-10)
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-create-story-via-write-path.md`
+  summary: Story-id allocation runs outside the advisory lock, so two concurrent `qdev create story E12` runs can both allocate `E12S1` and the loser exits 5 `file_exists` instead of getting `E12S2`.
+  evidence: Confirmed by two reviewers. `allocate_next_story_id_in` is called in `handle_create_story` before `create_story` takes the lock — the frozen Code Map deliberately kept it there, so fixing it is a design change (allocate inside the lock, or retry once on `file_exists`) rather than a patch. Review by: epic 2 story 2.9 (sprints as assignments), the first feature that creates entities from more than one session.
+- source_spec: `docs/bmad/implementation-artifacts/spec-create-story-via-write-path.md`
+  summary: `write_file_atomic`'s rename can clobber a file created between the in-lock existence check and the rename by a writer that does not hold the advisory lock.
+  evidence: Real but narrow — every qdev writer holds the lock, so it needs an external process writing that exact path inside a microsecond window. The old `OpenOptions::create_new` was atomic against it; the in-lock `symlink_metadata` check is not. An exact fix means creating the destination exclusively (or `hard_link`-ing the temp file) rather than renaming over it. Review by: whenever the write path is next opened.
+- source_spec: `docs/bmad/implementation-artifacts/spec-create-story-via-write-path.md`
+  summary: A cache-upsert failure after a successful atomic write leaves the file on disk while the command exits non-zero, and nothing covers that partial state.
+  evidence: Not introduced here — `apply_entity_update` propagates the same error the same way (`crates/qdev-core/src/write.rs:1393`), so `update` and `relate` share it. The cache is a rebuildable index (AD-3), so the defensible fix is to report the cache failure without failing the command; that is a contract decision for the whole write path. Review by: epic 3 story 3.2, which freezes the failure taxonomy.
+- source_spec: `docs/bmad/implementation-artifacts/spec-create-story-via-write-path.md`
+  summary: The 5-second advisory-lock timeout is hardcoded at five call sites across `write.rs` and `main.rs` while `cli-reference.md` now promises it as a contract.
+  evidence: Pre-existing duplication (three sites predate this story). One `pub const` in `write.rs` used by core and the CLI. Review by: next time the timeout is questioned or made configurable.
+- source_spec: `docs/bmad/implementation-artifacts/spec-create-story-via-write-path.md`
+  summary: `docs/cli-reference.md`'s entity table advertises `qdev create epic|adr|requirement|hazard|prd`, none of which exist — `Story` is the only `CreateCommands` variant.
+  evidence: Pre-existing documentation overclaim, untouched by this story and outside its intent. Either implement them or mark the row as planned. Review by: epic 2 planning, which decides whether those creates land.

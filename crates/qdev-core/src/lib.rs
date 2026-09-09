@@ -65,11 +65,12 @@ pub use validate::{
     sort_findings, DuplicateIdScan,
 };
 pub use write::{
-    acquire_write_lock, apply_entity_update, apply_relation_change, current_iso8601,
+    acquire_write_lock, apply_entity_update, apply_relation_change, create_story, current_iso8601,
     iso8601_from_timestamp, patch_frontmatter, replace_markdown_section, resolve_entity_file,
     sha256_digest, upsert_cache_and_mark_dirty, upsert_cache_with_relation, write_file_atomic,
     AdvisoryLockGuard, Author, EntityUpdateOptions, EntityUpdateResult, FrontmatterPatchOptions,
-    RelationChangeOptions, RelationChangeResult, RelationRowChange,
+    RelationChangeOptions, RelationChangeResult, RelationRowChange, StoryCreateOptions,
+    StoryCreateResult,
 };
 
 use serde::{Deserialize, Serialize};

@@ -309,8 +309,11 @@ fn reject_empty_filter_values(flags: &[(&str, Option<&str>)]) -> Result<(), Qdev
 ///
 /// The exceptions are deliberate: `status` and `config show` report on whatever they find,
 /// `init` and `schema` are dispatched before this point, and `create story` bootstraps — it is
-/// specified and tested to work in a clean directory, allocating the first id and creating the
-/// cache as it goes. Everything else reads or writes an existing cache.
+/// specified and tested to work in a clean directory, allocating the first id and writing the
+/// story file. Outside a workspace it deliberately leaves no `.qdev/` behind: no cache (an
+/// unstamped one would make the next `qdev init` demand a confirmed migration) and no advisory
+/// lock (there is no other writer to serialize against). Everything else reads or writes an
+/// existing cache.
 ///
 /// Deciding this from the command itself, rather than from a call inside each handler, is what
 /// stops the next new command from silently shipping without the guard — the omission that let
@@ -754,6 +757,10 @@ fn prompt_input(prompt: &str) -> std::io::Result<String> {
     Ok(input.trim().to_string())
 }
 
+/// Argument parsing, id allocation, author resolution and output rendering — the write itself
+/// belongs to `qdev_core::create_story`, which takes the advisory lock, validates the generated
+/// frontmatter against the story schema, writes atomically and syncs the cache. Per AD-2 the CLI
+/// does not assemble YAML or touch the filesystem itself.
 fn handle_create_story(
     story_args: &cli::CreateStoryArgs,
     annotated_config: &qdev_core::AnnotatedConfig,
@@ -785,6 +792,23 @@ fn handle_create_story(
     };
 
     let root = qdev_core::find_workspace_root(current_dir);
+
+    // Resolved before allocation so a misconfigured author type is refused without scanning or
+    // writing anything. `resolve_author` is the single attribution path (AD-12): flags first,
+    // then `QDEV_AUTHOR_TYPE`/`QDEV_AUTHOR_ID`, then config identity, then the git email.
+    let author = match resolve_author(
+        story_args.author_type.as_deref(),
+        story_args.author_id.as_deref(),
+        annotated_config,
+        &root,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
     // Allocate against, and write into, the *configured* specs directory. Using the default
     // layout here while the sweep reads `storage.specs_dir` meant a non-default `[storage]`
     // silently wrote every created story somewhere no read command would ever look.
@@ -797,106 +821,30 @@ fn handle_create_story(
         }
     };
 
-    let rel_path = format!("{}/stories/{}.md", storage.specs_dir, story_id);
-    let abs_path = root.join(&rel_path);
-
-    if let Some(parent) = abs_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            let err = QdevError::infrastructure_failure(
-                "io_error",
-                format!("Failed to create directory '{}': {}", parent.display(), e),
-            );
-            let _ = output.emit_error(&err);
-            return ExitCode::InfrastructureFailure;
-        }
-    }
-
-    let author = if !annotated_config.config.identity.developer_id.is_empty() {
-        annotated_config.config.identity.developer_id.clone()
-    } else {
-        qdev_core::resolve_git_email(Some(&root)).unwrap_or_else(|| "developer".to_string())
+    let create_opts = qdev_core::StoryCreateOptions {
+        workspace_root: root,
+        storage: Some(storage.clone()),
+        story_id: story_id.to_string(),
+        title: story_args.title.clone(),
+        appetite: story_args.appetite.clone(),
+        safety_class: story_args.safety_class.clone(),
+        target_modules: story_args.module.clone(),
+        owners: story_args.owner.clone(),
+        author,
     };
 
-    let title = story_args.title.as_deref().unwrap_or("");
-    let title_json = serde_json::to_string(title).unwrap_or_default();
-
-    let mut frontmatter = format!(
-        "---\nid: {}\ntitle: {}\nstatus: draft\n",
-        story_id, title_json
-    );
-
-    if let Some(ref appetite) = story_args.appetite {
-        frontmatter.push_str(&format!("appetite: {}\n", appetite));
-    }
-
-    if let Some(ref safety) = story_args.safety_class {
-        frontmatter.push_str(&format!("safety_class: {}\n", safety));
-    }
-
-    if !story_args.module.is_empty() {
-        let modules_json =
-            serde_json::to_string(&story_args.module).unwrap_or_else(|_| "[]".to_string());
-        frontmatter.push_str(&format!("target_modules: {}\n", modules_json));
-    }
-
-    if !story_args.owner.is_empty() {
-        let owners_json =
-            serde_json::to_string(&story_args.owner).unwrap_or_else(|_| "[]".to_string());
-        frontmatter.push_str(&format!("owners: {}\n", owners_json));
-    }
-
-    frontmatter.push_str(&format!(
-        "version: 1\ncreated_by:\n  type: human\n  id: {}\nupdated_by:\n  type: human\n  id: {}\n---\n\n## Acceptance Criteria\n",
-        author, author
-    ));
-
-    use std::io::Write;
-    let mut file = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&abs_path)
-    {
-        Ok(f) => f,
-        // Something already occupies the path. `create_new` reports that as `AlreadyExists` on
-        // Unix whatever the existing entry is, but Windows fails an exclusive create over a
-        // *directory* with ERROR_ACCESS_DENIED, which maps to `PermissionDenied` — so the
-        // occupancy is confirmed against the filesystem rather than trusted to the error kind.
-        // Either way the answer is the same conflict, not an infrastructure failure.
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists || abs_path.exists() => {
-            let err = QdevError::conflict(
-                "file_exists",
-                format!("Story path already exists: {}", abs_path.display()),
-            );
-            let _ = output.emit_error(&err);
-            return ExitCode::Conflict;
-        }
+    let res = match qdev_core::create_story(&create_opts) {
+        Ok(r) => r,
         Err(e) => {
-            let err = QdevError::infrastructure_failure(
-                "io_error",
-                format!(
-                    "Failed to create story file '{}': {}",
-                    abs_path.display(),
-                    e
-                ),
-            );
-            let _ = output.emit_error(&err);
-            return ExitCode::InfrastructureFailure;
+            let _ = output.emit_error(&e);
+            return e.exit_code();
         }
     };
-
-    if let Err(e) = file.write_all(frontmatter.as_bytes()) {
-        let err = QdevError::infrastructure_failure(
-            "io_error",
-            format!("Failed to write story file '{}': {}", abs_path.display(), e),
-        );
-        let _ = output.emit_error(&err);
-        return ExitCode::InfrastructureFailure;
-    }
 
     if cli.json {
         let envelope = JsonEnvelope::new(CreateStoryPayload {
-            id: story_id.to_string(),
-            path: rel_path,
+            id: res.id.clone(),
+            path: res.rel_path.clone(),
         });
         if let Err(e) = output.emit_envelope(&envelope) {
             let err = QdevError::infrastructure_failure(
@@ -907,7 +855,7 @@ fn handle_create_story(
             return ExitCode::InfrastructureFailure;
         }
     } else {
-        println!("Created story {} at {}", story_id, rel_path);
+        println!("Created story {} at {}", res.id, res.rel_path);
     }
 
     ExitCode::Success
@@ -1465,9 +1413,17 @@ fn resolve_author(
         "human".to_string()
     };
 
-    let resolved_id = if let Some(aid) = author_id {
+    // An empty or whitespace-only value is treated as absent rather than accepted and then
+    // rejected downstream by `Author::validate`: `QDEV_AUTHOR_ID=` (a var defined but never
+    // given a value, common in CI) used to fail every mutation with "Author ID cannot be
+    // empty" and no way to fall back to the config identity.
+    let flag_id = author_id.filter(|aid| !aid.trim().is_empty());
+    let env_id = std::env::var("QDEV_AUTHOR_ID")
+        .ok()
+        .filter(|aid| !aid.trim().is_empty());
+    let resolved_id = if let Some(aid) = flag_id {
         aid.to_string()
-    } else if let Ok(env_aid) = std::env::var("QDEV_AUTHOR_ID") {
+    } else if let Some(env_aid) = env_id {
         env_aid
     } else if !annotated_config.config.identity.developer_id.is_empty() {
         annotated_config.config.identity.developer_id.clone()

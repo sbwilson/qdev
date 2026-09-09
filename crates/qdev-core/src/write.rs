@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::config::StorageConfig;
 use crate::errors::QdevError;
 use crate::id::{Identifier, IdentifierKind};
-use crate::schema::{validate_frontmatter, EntityKind};
+use crate::schema::{validate_frontmatter, validate_frontmatter_detailed, EntityKind};
 
 /// Advisory lock guard releasing the file lock on drop.
 #[derive(Debug)]
@@ -220,6 +220,15 @@ impl Author {
         }
         if self.id.trim().is_empty() {
             return Err(QdevError::usage_error("Author ID cannot be empty"));
+        }
+        // Attribution is audited (AD-12) and is written into YAML frontmatter. A newline or
+        // control character in the id is never a real developer or agent name, and letting one
+        // through means the audited field is describing something the writer did not intend.
+        if self.id.chars().any(|c| c.is_control()) {
+            return Err(QdevError::usage_error(format!(
+                "Author ID must be a single line without control characters, got {:?}",
+                self.id
+            )));
         }
         Ok(())
     }
@@ -1453,6 +1462,361 @@ fn story_detail_fields(
         .get("target_modules")
         .map(|v| v.to_string());
     (epic, s_num, app, safe, mods)
+}
+
+/// The body a newly created story starts with. Redesigning this template is out of scope here.
+const STORY_BODY_TEMPLATE: &str = "\n## Acceptance Criteria\n";
+
+/// Free-text frontmatter keys that are always emitted double-quoted.
+///
+/// Everything else goes through `serde_yaml`'s own emitter, which quotes only when the value
+/// would otherwise be re-read as a different YAML type. A title is arbitrary user text, so it is
+/// quoted unconditionally: that is both safer and the shape every existing reader and golden
+/// test already expects.
+const ALWAYS_QUOTED_KEYS: &[&str] = &["title"];
+
+/// Options for creating a new story file (`qdev create story`).
+///
+/// The story id is allocated by the caller (`allocate_next_story_id_in`) and passed in, so id
+/// allocation stays where the CLI can report it; everything from building the frontmatter to
+/// syncing the cache happens here, under the advisory lock.
+#[derive(Debug, Clone)]
+pub struct StoryCreateOptions {
+    pub workspace_root: PathBuf,
+    pub storage: Option<StorageConfig>,
+    /// Pre-allocated canonical story id, e.g. `E12S1`.
+    pub story_id: String,
+    pub title: Option<String>,
+    pub appetite: Option<String>,
+    pub safety_class: Option<String>,
+    pub target_modules: Vec<String>,
+    pub owners: Vec<String>,
+    pub author: Author,
+}
+
+/// Result of creating a story.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StoryCreateResult {
+    pub id: String,
+    /// Absolute path written, for callers that need to open or report the file.
+    pub path: PathBuf,
+    /// Workspace-relative path, which is what the CLI payload reports.
+    pub rel_path: String,
+}
+
+/// Builds the story frontmatter as a `serde_yaml` mapping in the canonical field order:
+/// `id`, `title`, `status`, the optional `appetite` / `safety_class` / `target_modules` /
+/// `owners`, then `version`, `created_by`, `updated_by`. A `Mapping` iterates in insertion
+/// order, so the order declared here is the order written to disk.
+fn build_story_frontmatter(options: &StoryCreateOptions) -> serde_yaml::Mapping {
+    fn author_mapping(author: &Author) -> serde_yaml::Value {
+        let mut m = serde_yaml::Mapping::new();
+        m.insert(
+            serde_yaml::Value::String("type".to_string()),
+            serde_yaml::Value::String(author.author_type.clone()),
+        );
+        m.insert(
+            serde_yaml::Value::String("id".to_string()),
+            serde_yaml::Value::String(author.id.clone()),
+        );
+        serde_yaml::Value::Mapping(m)
+    }
+
+    fn string_sequence(values: &[String]) -> serde_yaml::Value {
+        serde_yaml::Value::Sequence(
+            values
+                .iter()
+                .map(|v| serde_yaml::Value::String(v.clone()))
+                .collect(),
+        )
+    }
+
+    let mut fm = serde_yaml::Mapping::new();
+    let mut put = |key: &str, value: serde_yaml::Value| {
+        fm.insert(serde_yaml::Value::String(key.to_string()), value);
+    };
+
+    put(
+        "id",
+        serde_yaml::Value::String(options.story_id.trim().to_string()),
+    );
+    put(
+        "title",
+        serde_yaml::Value::String(options.title.clone().unwrap_or_default()),
+    );
+    put("status", serde_yaml::Value::String("draft".to_string()));
+    if let Some(ref appetite) = options.appetite {
+        put("appetite", serde_yaml::Value::String(appetite.clone()));
+    }
+    if let Some(ref safety_class) = options.safety_class {
+        put(
+            "safety_class",
+            serde_yaml::Value::String(safety_class.clone()),
+        );
+    }
+    if !options.target_modules.is_empty() {
+        put("target_modules", string_sequence(&options.target_modules));
+    }
+    if !options.owners.is_empty() {
+        put("owners", string_sequence(&options.owners));
+    }
+    put("version", serde_yaml::Value::Number(1.into()));
+    put("created_by", author_mapping(&options.author));
+    put("updated_by", author_mapping(&options.author));
+    fm
+}
+
+/// Emits a single scalar the way `serde_yaml` itself would, quoting only when the plain form
+/// would be re-read as some other type.
+fn render_yaml_scalar(value: &serde_yaml::Value) -> Result<String, QdevError> {
+    let rendered = serde_yaml::to_string(value).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "serialize_error",
+            format!("Failed to serialize frontmatter scalar: {}", e),
+        )
+    })?;
+    let rendered = rendered.trim_end_matches('\n').to_string();
+
+    // `serde_yaml` renders a string containing a newline as a multi-line block scalar (`|-`
+    // followed by indented lines). Every caller splices this into one `key: value` line, so a
+    // block scalar would be spliced into a document that no longer parses. A JSON-quoted string
+    // is always a valid single-line YAML scalar, so fall back to that instead of corrupting the
+    // document. Callers that own audited fields reject control characters outright — see
+    // `Author::validate`; this is the generic backstop for every other scalar.
+    if rendered.contains('\n') {
+        return serde_json::to_string(value).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "serialize_error",
+                format!("Failed to serialize multi-line frontmatter scalar: {}", e),
+            )
+        });
+    }
+
+    Ok(rendered)
+}
+
+/// Renders a frontmatter mapping plus a Markdown body into a complete document.
+///
+/// Sequences are emitted in flow style and free-text keys double-quoted, which is the shape the
+/// rest of the tree already reads; nested mappings (`created_by` / `updated_by`) are emitted as
+/// two-space-indented blocks.
+fn render_frontmatter_document(
+    frontmatter: &serde_yaml::Mapping,
+    body: &str,
+) -> Result<String, QdevError> {
+    let mut out = String::from("---\n");
+
+    for (key, value) in frontmatter {
+        let key_str = key.as_str().ok_or_else(|| {
+            QdevError::infrastructure_failure("serialize_error", "Frontmatter keys must be strings")
+        })?;
+
+        match value {
+            serde_yaml::Value::Sequence(_) => {
+                let json = serde_json::to_value(value).map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "serialize_error",
+                        format!("Failed to serialize '{}' sequence: {}", key_str, e),
+                    )
+                })?;
+                out.push_str(&format!("{}: {}\n", key_str, json));
+            }
+            serde_yaml::Value::Mapping(nested) => {
+                out.push_str(&format!("{}:\n", key_str));
+                for (nested_key, nested_value) in nested {
+                    let nested_key_str = nested_key.as_str().ok_or_else(|| {
+                        QdevError::infrastructure_failure(
+                            "serialize_error",
+                            "Frontmatter keys must be strings",
+                        )
+                    })?;
+                    out.push_str(&format!(
+                        "  {}: {}\n",
+                        nested_key_str,
+                        render_yaml_scalar(nested_value)?
+                    ));
+                }
+            }
+            serde_yaml::Value::String(s) if ALWAYS_QUOTED_KEYS.contains(&key_str) => {
+                let quoted = serde_json::to_string(s).map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "serialize_error",
+                        format!("Failed to serialize '{}': {}", key_str, e),
+                    )
+                })?;
+                out.push_str(&format!("{}: {}\n", key_str, quoted));
+            }
+            _ => {
+                out.push_str(&format!("{}: {}\n", key_str, render_yaml_scalar(value)?));
+            }
+        }
+    }
+
+    out.push_str("---\n");
+    out.push_str(body);
+    Ok(out)
+}
+
+/// Creates a new story file through the same write path every other mutation uses: build the
+/// frontmatter, validate it against the story schema, take the advisory lock, confirm the
+/// destination is free, write atomically, then upsert the cache row and mark it dirty.
+///
+/// The destination check happens **inside** the lock on purpose. The old hand-rolled
+/// implementation got its "already exists" refusal for free from `OpenOptions::create_new`;
+/// `write_file_atomic` renames over its destination and would happily clobber an existing story,
+/// so the exclusivity is re-established explicitly here. Checking before taking the lock would
+/// be a race.
+pub fn create_story(options: &StoryCreateOptions) -> Result<StoryCreateResult, QdevError> {
+    options.author.validate()?;
+
+    let story_id = options.story_id.trim();
+    match story_id.parse::<Identifier>() {
+        Ok(Identifier::Story { .. }) => {}
+        _ => {
+            return Err(QdevError::usage_error(format!(
+                "'{}' is not a story identifier (expected E<n>S<m>)",
+                story_id
+            )))
+        }
+    }
+
+    // 1. Frontmatter as a mapping, rendered into the document that will be written verbatim.
+    let frontmatter_mapping = build_story_frontmatter(options);
+    let content = render_frontmatter_document(&frontmatter_mapping, STORY_BODY_TEMPLATE)?;
+
+    // 2. Validate the exact bytes destined for disk *before* anything is written, so a schema
+    //    violation leaves no file behind.
+    validate_frontmatter_detailed(EntityKind::Story, &content).map_err(|errs| {
+        let fields: Vec<String> = errs
+            .iter()
+            .map(|e| {
+                if e.path.is_empty() {
+                    e.message.clone()
+                } else {
+                    format!("{}: {}", e.path, e.message)
+                }
+            })
+            .collect();
+        QdevError::logical_failure(
+            "schema_validation_failed",
+            format!(
+                "Generated story frontmatter failed schema validation: {}",
+                fields.join("; ")
+            ),
+        )
+        .with_details(serde_json::json!({
+            "validation_errors": errs,
+        }))
+    })?;
+
+    let rel_dir = directory_for_kind(options.storage.as_ref(), EntityKind::Story);
+    let rel_path = format!(
+        "{}/{}.md",
+        rel_dir.to_string_lossy().replace('\\', "/"),
+        story_id
+    );
+    let abs_path = options
+        .workspace_root
+        .join(&rel_dir)
+        .join(format!("{}.md", story_id));
+
+    // 3. Advisory write lock, same file and timeout as every other write.
+    let cache_dir_rel = options
+        .storage
+        .as_ref()
+        .map(|s| s.cache_dir.as_str())
+        .unwrap_or(".qdev/cache");
+    let lock_path = options
+        .workspace_root
+        .join(cache_dir_rel)
+        .join("write.lock");
+    // The lock is skipped only when the cache directory does not exist at all, which means this
+    // is not an initialized workspace: there is no other qdev writer to serialize against, and
+    // `acquire_write_lock` would otherwise create a stray `.qdev/cache/write.lock` tree in an
+    // unrelated directory. In every real workspace `qdev init` has created the directory, so the
+    // lock is always taken.
+    let _lock_guard = if lock_path
+        .parent()
+        .map(|parent| parent.is_dir())
+        .unwrap_or(false)
+    {
+        Some(acquire_write_lock(&lock_path, Duration::from_millis(5000))?)
+    } else {
+        None
+    };
+
+    // 4. Under the lock: the destination must be free. `symlink_metadata` answers for a file, a
+    //    directory or a dangling symlink alike, so occupancy never depends on an error kind.
+    if abs_path.symlink_metadata().is_ok() {
+        return Err(QdevError::conflict(
+            "file_exists",
+            format!("Story path already exists: {}", abs_path.display()),
+        )
+        .with_details(serde_json::json!({
+            "id": story_id,
+            "path": rel_path,
+        })));
+    }
+
+    // 5. Atomic write.
+    write_file_atomic(&abs_path, &content)?;
+
+    // 6. Cache upsert and dirty mark, so the story is queryable without waiting for a sweep.
+    let frontmatter = crate::schema::extract_frontmatter(&content).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "parse_error",
+            format!("Failed to parse generated frontmatter: {}", e),
+        )
+    })?;
+
+    let (epic_id, seq, appetite, safety_class, target_modules) =
+        story_detail_fields(EntityKind::Story, story_id, &frontmatter);
+
+    let record = EntityRecord {
+        id: story_id.to_string(),
+        kind: EntityKind::Story,
+        title: frontmatter
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        status: frontmatter
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        owners: frontmatter.get("owners").map(|v| v.to_string()),
+        source_path: rel_path.clone(),
+        content_hash: sha256_digest(content.as_bytes()),
+        version: 1,
+        created_by: Some(options.author.clone()),
+        updated_by: Some(options.author.clone()),
+        updated_at: current_iso8601(),
+        stale: false,
+        epic_id,
+        seq,
+        appetite,
+        safety_class,
+        target_modules,
+    };
+
+    // Only upsert into a cache that already exists. In a real workspace it always does — boot
+    // runs `ensure_cache` before any command — so the "queryable without a sweep" guarantee is
+    // unaffected. Outside a workspace, `upsert_cache_and_mark_dirty` would *create* a 16-table,
+    // unstamped `cache.sqlite`, which a later `qdev init` then reads as a v0 cache needing a
+    // confirmed migration: `create story` followed by `init` in the same directory would exit 3
+    // asking for `--yes`. The file on disk is the source of truth; the next boot hydrates it.
+    let cache_db_path = options
+        .workspace_root
+        .join(cache_dir_rel)
+        .join("cache.sqlite");
+    if cache_db_path.is_file() {
+        upsert_cache_and_mark_dirty(&cache_db_path, &record)?;
+    }
+
+    Ok(StoryCreateResult {
+        id: story_id.to_string(),
+        path: abs_path,
+        rel_path,
+    })
 }
 
 /// Options for applying a relation change (`qdev relate` / `qdev unrelate`).

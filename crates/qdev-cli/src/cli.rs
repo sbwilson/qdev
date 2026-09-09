@@ -263,6 +263,14 @@ pub struct CreateStoryArgs {
     /// Safety class (ClassA, ClassB, ClassC)
     #[arg(long = "safety-class")]
     pub safety_class: Option<String>,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
