@@ -244,7 +244,19 @@ Frontmatter edits by qdev are line-based patches that preserve comments and orde
 
 ## 10. SQLite Cache Schema
 
-The cache mirrors the files; every table row carries `source_path` and `content_hash`. Abbreviated:
+The cache mirrors the files; every table row carries `source_path` and `content_hash`.
+
+The cache schema version is the value of `CACHE_SCHEMA_VERSION` (currently 3), carried by
+`PRAGMA user_version` alone — the single application-owned stamp, written only by
+`stamp_cache_version`. SQLite's internal `schema_version` cookie is never read or written: it is
+incremented automatically on every DDL statement, so it cannot distinguish a healthy cache from
+a stale one. Cache validity is `user_version` plus a table-presence and column check. A cache
+stamped older is rebuilt from the files; one stamped newer than the binary supports is refused
+with `schema_version_mismatch` (exit 5), recoverable with `qdev sync --rebuild` or by deleting
+the cache file. If a second version dimension is ever needed it belongs in `sync_meta` as an
+ordinary row, not in a pragma.
+
+Abbreviated:
 
 ```sql
 CREATE TABLE entities (           -- common index for every entity kind

@@ -23,8 +23,14 @@ use crate::write::Author;
 // narrower key silently collapsed a path's several dangling relations, or its membership in
 // two disjoint dependency cycles, down to whichever row was written last. A v2 cache is
 // therefore rebuilt on first open rather than migrated in place.
+//
+// `PRAGMA user_version` is the *only* version stamp this cache carries. `PRAGMA schema_version`
+// is SQLite's internal schema cookie — auto-incremented on every DDL statement and used by
+// SQLite to invalidate other connections' prepared statements — so it is neither application
+// owned nor safe to write. Cache validity is `user_version` plus the table-presence and column
+// checks in `inspect_cache_schema`. A second version dimension, if ever wanted, belongs in
+// `sync_meta` as an ordinary row.
 pub const CACHE_SCHEMA_VERSION: u32 = 3;
-pub const CACHE_USER_VERSION: u32 = 3;
 pub const BUSY_TIMEOUT_MS: u64 = 5000;
 
 pub const ALL_TABLE_NAMES: &[&str] = &[
@@ -210,7 +216,16 @@ CREATE TABLE IF NOT EXISTS sync_meta (
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheSchemaStatus {
     Valid,
+    /// The cache is at an older version, or is structurally incomplete (a missing table or a
+    /// missing column). Either way it is rebuilt losslessly from the Markdown files.
     Mismatch,
+    /// The cache was stamped by a newer binary than this one. Rebuilding would silently discard
+    /// whatever that binary recorded, so boot refuses instead; `qdev sync --rebuild` is the
+    /// documented recovery path.
+    NewerThanSupported {
+        found: u32,
+        supported: u32,
+    },
 }
 
 /// SQLite-backed cache implementation conforming to AD-2, AD-3, and AD-4.
@@ -360,8 +375,8 @@ impl SqliteStore {
     }
 
     /// Drops every table and trigger, recreates the schema, repopulates the cache rows from the
-    /// workspace's Markdown entity files, and stamps both version pragmas to
-    /// `CACHE_USER_VERSION` / `CACHE_SCHEMA_VERSION`.
+    /// workspace's Markdown entity files, and stamps `PRAGMA user_version` to
+    /// `CACHE_SCHEMA_VERSION`.
     ///
     /// Deliberately does **not** take the advisory write lock: `ensure_cache` already holds it
     /// when it calls this on a mismatched cache, so acquiring it here would deadlock. Any
@@ -380,20 +395,9 @@ impl SqliteStore {
 
         let summary = self.rebuild_from_workspace(workspace_root, storage)?;
 
-        // Ensure user_version and schema_version pragmas are 2 after rebuild
-        self.with_conn(|conn| {
-            conn.execute_batch(&format!(
-                "PRAGMA user_version = {};\nPRAGMA schema_version = {};\n",
-                CACHE_USER_VERSION, CACHE_SCHEMA_VERSION
-            ))
-            .map_err(|e| {
-                QdevError::infrastructure_failure(
-                    "sqlite_error",
-                    format!("Failed to record cache pragmas: {}", e),
-                )
-            })?;
-            Ok(())
-        })?;
+        // The tables were just dropped and recreated, so stamping the current version is safe.
+        // Routed through `stamp_cache_version` so there is exactly one place that writes it.
+        self.with_conn(stamp_cache_version)?;
 
         Ok(summary)
     }
@@ -3321,23 +3325,20 @@ pub fn create_schema(conn: &rusqlite::Connection) -> Result<(), QdevError> {
     Ok(())
 }
 
-/// Stamps `PRAGMA user_version` and `PRAGMA schema_version` to this binary's current cache
-/// version. Only safe on a database whose tables are known to match `SCHEMA_DDL` — a freshly
-/// created one, or one whose tables were just dropped and recreated.
+/// Stamps `PRAGMA user_version` — the cache's single application-owned version stamp — to this
+/// binary's `CACHE_SCHEMA_VERSION`. Only safe on a database whose tables are known to match
+/// `SCHEMA_DDL` — a freshly created one, or one whose tables were just dropped and recreated.
+///
+/// This is the only place the stamp is written. `PRAGMA schema_version` is deliberately not
+/// touched: it is SQLite's internal schema cookie, not an application field.
 pub fn stamp_cache_version(conn: &rusqlite::Connection) -> Result<(), QdevError> {
-    conn.execute_batch(&format!(
-        "PRAGMA user_version = {};\nPRAGMA schema_version = {};\n",
-        CACHE_USER_VERSION, CACHE_SCHEMA_VERSION
-    ))
-    .map_err(|e| {
-        QdevError::infrastructure_failure(
-            "sqlite_error",
-            format!(
-                "Failed to set user_version and schema_version pragmas: {}",
-                e
-            ),
-        )
-    })
+    conn.execute_batch(&format!("PRAGMA user_version = {};", CACHE_SCHEMA_VERSION))
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to set user_version pragma: {}", e),
+            )
+        })
 }
 
 /// Drops all triggers, views, and tables in the database (disabling foreign keys during drop).
@@ -3455,7 +3456,33 @@ pub fn drop_all_user_tables(conn: &rusqlite::Connection) -> Result<(), QdevError
     Ok(())
 }
 
-/// Inspects an existing database path and returns whether its schema is valid or mismatched.
+/// The single `schema_version_mismatch` conflict raised for a cache stamped by a newer binary.
+///
+/// Shared by `ensure_cache` (boot) and `init::check_cache_status` so both refuse identically:
+/// rebuilding such a cache would silently discard whatever the newer binary recorded. The
+/// message names `qdev sync --rebuild` because that is the documented in-tool recovery, the only
+/// command allowed past this refusal — and also names deleting the cache file, because two of
+/// this conflict's three call sites are in `init`, where there is no workspace yet and
+/// `requires_workspace` refuses `sync` before it can run.
+pub fn newer_cache_conflict(found: u32, supported: u32) -> QdevError {
+    QdevError::conflict(
+        "schema_version_mismatch",
+        format!(
+            "Cache database schema version v{} is newer than supported version v{}; \
+             run `qdev sync --rebuild` to discard it and rebuild the cache from files, \
+             or delete the cache file",
+            found, supported
+        ),
+    )
+    .with_details(serde_json::json!({
+        "current_version": found,
+        "supported_version": supported,
+        "recovery": "qdev sync --rebuild, or delete the cache file",
+    }))
+}
+
+/// Inspects an existing database path and returns whether its schema is valid, mismatched, or
+/// stamped newer than this binary supports.
 pub fn inspect_cache_schema(path: &Path) -> Result<CacheSchemaStatus, QdevError> {
     if !path.exists() {
         return Ok(CacheSchemaStatus::Mismatch);
@@ -3485,16 +3512,16 @@ pub fn inspect_cache_schema(path: &Path) -> Result<CacheSchemaStatus, QdevError>
             )
         })?;
 
-    let schema_version: u32 = conn
-        .query_row("PRAGMA schema_version;", [], |row| row.get(0))
-        .map_err(|e| {
-            QdevError::infrastructure_failure(
-                "sqlite_error",
-                format!("Failed to read schema_version: {}", e),
-            )
-        })?;
-
-    if user_version != CACHE_USER_VERSION || schema_version != CACHE_SCHEMA_VERSION {
+    // Only `user_version` is consulted. SQLite's internal `schema_version` cookie moves on every
+    // DDL statement — including the `CREATE TABLE`s of a perfectly healthy fresh cache — so
+    // comparing it produced nothing but false negatives and destructive rebuilds.
+    if user_version > CACHE_SCHEMA_VERSION {
+        return Ok(CacheSchemaStatus::NewerThanSupported {
+            found: user_version,
+            supported: CACHE_SCHEMA_VERSION,
+        });
+    }
+    if user_version != CACHE_SCHEMA_VERSION {
         return Ok(CacheSchemaStatus::Mismatch);
     }
 
@@ -3554,9 +3581,12 @@ pub fn inspect_cache_schema(path: &Path) -> Result<CacheSchemaStatus, QdevError>
 
 /// Boot-time verification and initialization of the SQLite cache database.
 /// Ensures `.qdev/cache/cache.sqlite` exists with every table in `ALL_TABLE_NAMES`, WAL mode,
-/// busy_timeout=5000, and both version pragmas at `CACHE_SCHEMA_VERSION`. Automatically
+/// busy_timeout=5000, and `PRAGMA user_version` at `CACHE_SCHEMA_VERSION`. Automatically
 /// rebuilds from files on a missing cache or a version mismatch, and runs the incremental
 /// hydration sweep on every healthy boot.
+///
+/// A cache stamped *newer* than this binary supports is refused with the same
+/// `schema_version_mismatch` conflict `init::check_cache_status` raises, rather than rebuilt.
 pub fn ensure_cache(
     workspace_root: &Path,
     storage: &StorageConfig,
@@ -3584,6 +3614,9 @@ pub fn ensure_cache(
         match inspect_cache_schema(&cache_db_path) {
             Ok(CacheSchemaStatus::Valid) => false,
             Ok(CacheSchemaStatus::Mismatch) => true,
+            Ok(CacheSchemaStatus::NewerThanSupported { found, supported }) => {
+                return Err(newer_cache_conflict(found, supported));
+            }
             Err(_) => true,
         }
     };
@@ -3600,6 +3633,11 @@ pub fn ensure_cache(
             match inspect_cache_schema(&cache_db_path) {
                 Ok(CacheSchemaStatus::Valid) => false,
                 Ok(CacheSchemaStatus::Mismatch) => true,
+                // Re-checked under the write lock: another process may have upgraded the cache
+                // between the first inspection and here. Refuse rather than rebuild over it.
+                Ok(CacheSchemaStatus::NewerThanSupported { found, supported }) => {
+                    return Err(newer_cache_conflict(found, supported));
+                }
                 Err(_) => true,
             }
         };

@@ -9,7 +9,6 @@ use qdev_core::store::{
     DeferredWorkRecord, EntityFilter, EntityRecord, FindingRecord, GateRecord, GateRunRecord,
     RelationRecord, ScratchpadRecord, SoupRecord, SprintAssignmentRecord, SprintRecord,
     SqliteStore, Store, StoryRecord, ALL_TABLE_NAMES, BUSY_TIMEOUT_MS, CACHE_SCHEMA_VERSION,
-    CACHE_USER_VERSION,
 };
 use qdev_core::write::Author;
 use qdev_core::StorageConfig;
@@ -71,7 +70,7 @@ fn test_wal_mode_and_busy_timeout_pragmas() {
 }
 
 #[test]
-fn test_user_version_and_schema_version_pragmas() {
+fn test_create_schema_does_not_stamp_and_stamp_writes_user_version() {
     let temp = TempDir::new().unwrap();
     let db_path = temp.path().join("cache.sqlite");
     let store = SqliteStore::open(&db_path).unwrap();
@@ -108,12 +107,35 @@ fn test_user_version_and_schema_version_pragmas() {
             let user_ver: u32 = conn
                 .query_row("PRAGMA user_version;", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(user_ver, CACHE_USER_VERSION);
+            assert_eq!(user_ver, CACHE_SCHEMA_VERSION);
+            Ok(())
+        })
+        .unwrap();
+}
 
-            let schema_ver: u32 = conn
-                .query_row("PRAGMA schema_version;", [], |r| r.get(0))
+/// The in-memory store creates the schema and stamps the single version pragma in one step, so
+/// it starts out in exactly the state `inspect_cache_schema` calls `Valid` on a file cache.
+#[test]
+fn test_open_in_memory_creates_schema_and_stamps_version() {
+    let store = SqliteStore::open_in_memory().unwrap();
+
+    store
+        .with_conn(|conn| {
+            let user_ver: u32 = conn
+                .query_row("PRAGMA user_version;", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(schema_ver, CACHE_SCHEMA_VERSION);
+            assert_eq!(user_ver, CACHE_SCHEMA_VERSION);
+
+            for &table in ALL_TABLE_NAMES {
+                let present: bool = conn
+                    .query_row(
+                        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name = ?1;",
+                        [table],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert!(present, "in-memory store is missing table {}", table);
+            }
             Ok(())
         })
         .unwrap();
@@ -760,12 +782,10 @@ updated_by:
     // 3. Re-running ensure_cache should automatically detect mismatch, drop legacy table, rebuild from files
     let store2 = ensure_cache(root, &storage).unwrap();
 
-    // Verify user_version and schema_version are back to the v2 values
+    // Verify the single version stamp is back to the current value
     store2.with_conn(|conn| {
         let user_ver: u32 = conn.query_row("PRAGMA user_version;", [], |r| r.get(0)).unwrap();
-        assert_eq!(user_ver, CACHE_USER_VERSION);
-        let schema_ver: u32 = conn.query_row("PRAGMA schema_version;", [], |r| r.get(0)).unwrap();
-        assert_eq!(schema_ver, CACHE_SCHEMA_VERSION);
+        assert_eq!(user_ver, CACHE_SCHEMA_VERSION);
 
         // Verify legacy table was dropped
         let has_legacy: bool = conn
@@ -1261,7 +1281,10 @@ fn test_rebuild_from_workspace_scratchpad_nested_author() {
 }
 
 #[test]
-fn test_schema_version_only_mismatch_triggers_rebuild() {
+fn test_perturbed_schema_cookie_leaves_cache_valid() {
+    // SQLite's internal `schema_version` cookie moves on every DDL statement, including the
+    // `CREATE TABLE`s of a healthy fresh cache. It is deliberately not consulted, so an
+    // external DDL touch must leave the cache Valid and provoke no rebuild.
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     let cache_dir = root.join(".qdev").join("cache");
@@ -1275,33 +1298,90 @@ fn test_schema_version_only_mismatch_triggers_rebuild() {
         CacheSchemaStatus::Valid
     );
 
-    // Alter only schema_version while keeping user_version = 1
+    // An external DDL touch: creating a marker index moves the cookie and doubles as the
+    // proof that no rebuild happened, since a rebuild drops every user table and with it every
+    // index. (A marker *table* would fail the unrelated "no extra tables" check.)
     store
         .with_conn(|conn| {
-            conn.execute_batch("PRAGMA schema_version = 42;").unwrap();
+            conn.execute_batch("CREATE INDEX cookie_marker_idx ON entities(kind);")
+                .unwrap();
             Ok(())
         })
         .unwrap();
+    drop(store);
 
     assert_eq!(
         inspect_cache_schema(&cache_db).unwrap(),
-        CacheSchemaStatus::Mismatch
+        CacheSchemaStatus::Valid,
+        "a moved schema cookie must not invalidate the cache"
     );
 
-    // Rebuilding through ensure_cache restores valid schema and resets schema_version to 1
     let store2 = ensure_cache(root, &storage).unwrap();
-    assert_eq!(
-        inspect_cache_schema(&cache_db).unwrap(),
-        CacheSchemaStatus::Valid
-    );
-
     store2
         .with_conn(|conn| {
-            let sv: u32 = conn
-                .query_row("PRAGMA schema_version;", [], |r| r.get(0))
+            let user_ver: u32 = conn
+                .query_row("PRAGMA user_version;", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(sv, CACHE_SCHEMA_VERSION);
+            assert_eq!(user_ver, CACHE_SCHEMA_VERSION);
+            let survived: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='cookie_marker_idx';",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(survived, "the cache must not have been rebuilt");
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn test_newer_than_supported_cache_is_refused_not_rebuilt() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let cache_dir = root.join(".qdev").join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    let cache_db = cache_dir.join("cache.sqlite");
+
+    let storage = StorageConfig::default();
+    let store = ensure_cache(root, &storage).unwrap();
+    store
+        .with_conn(|conn| {
+            conn.execute_batch(&format!(
+                "PRAGMA user_version = {};",
+                CACHE_SCHEMA_VERSION + 1
+            ))
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    drop(store);
+
+    assert_eq!(
+        inspect_cache_schema(&cache_db).unwrap(),
+        CacheSchemaStatus::NewerThanSupported {
+            found: CACHE_SCHEMA_VERSION + 1,
+            supported: CACHE_SCHEMA_VERSION,
+        }
+    );
+
+    let err = match ensure_cache(root, &storage) {
+        Ok(_) => panic!("a newer-than-supported cache must be refused, not opened"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code(), "schema_version_mismatch");
+    assert_eq!(err.exit_code().as_i32(), 5);
+    assert!(
+        err.message().contains("qdev sync --rebuild"),
+        "the refusal must name the recovery path: {}",
+        err.message()
+    );
+
+    // Refused, not rebuilt: the stamp is untouched.
+    let conn = rusqlite::Connection::open(&cache_db).unwrap();
+    let user_ver: u32 = conn
+        .query_row("PRAGMA user_version;", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(user_ver, CACHE_SCHEMA_VERSION + 1);
 }

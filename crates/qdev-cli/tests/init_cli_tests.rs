@@ -623,7 +623,7 @@ fn test_future_schema_version_conflict_fails_with_yes() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
 
-    // Create .qdev/cache/cache.sqlite with user_version = 3 (newer than supported v2)
+    // Create .qdev/cache/cache.sqlite stamped one past CACHE_SCHEMA_VERSION (newer than supported)
     let cache_dir = root.join(".qdev/cache");
     fs::create_dir_all(&cache_dir).unwrap();
     let cache_file = cache_dir.join("cache.sqlite");

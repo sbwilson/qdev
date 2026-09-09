@@ -14,11 +14,11 @@ pub mod write;
 
 pub use store::{
     create_schema, determine_entity_kind, drop_all_user_tables, ensure_cache, inspect_cache_schema,
-    stamp_cache_version, CacheSchemaStatus, ConstraintRecord, DecisionRecord, DeferredWorkRecord,
-    DirtyEntityRecord, EntityFilter, EntityRecord, FindingRecord, GateRecord, GateRunRecord,
-    RelationRecord, ScratchpadRecord, SoupRecord, SprintAssignmentRecord, SprintRecord,
-    SqliteStore, Store, StoryRecord, SweepSummary, SyncStateRecord, ALL_TABLE_NAMES,
-    BUSY_TIMEOUT_MS, CACHE_USER_VERSION,
+    newer_cache_conflict, stamp_cache_version, CacheSchemaStatus, ConstraintRecord, DecisionRecord,
+    DeferredWorkRecord, DirtyEntityRecord, EntityFilter, EntityRecord, FindingRecord, GateRecord,
+    GateRunRecord, RelationRecord, ScratchpadRecord, SoupRecord, SprintAssignmentRecord,
+    SprintRecord, SqliteStore, Store, StoryRecord, SweepSummary, SyncStateRecord, ALL_TABLE_NAMES,
+    BUSY_TIMEOUT_MS,
 };
 
 pub use dag::{allowed_kind_pairs, find_dependency_cycle, is_valid_kind_pair, would_create_cycle};

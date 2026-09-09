@@ -7,7 +7,7 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 use qdev_core::rusqlite;
-use qdev_core::store::{ALL_TABLE_NAMES, CACHE_SCHEMA_VERSION, CACHE_USER_VERSION};
+use qdev_core::store::{ALL_TABLE_NAMES, CACHE_SCHEMA_VERSION};
 
 fn dump_all_tables(db_path: &Path) -> BTreeMap<String, Vec<Vec<String>>> {
     let conn = rusqlite::Connection::open(db_path).unwrap();
@@ -102,16 +102,8 @@ fn test_cli_boot_with_empty_cache() {
         .query_row("PRAGMA user_version;", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        user_version, CACHE_USER_VERSION,
-        "user_version must match CACHE_USER_VERSION"
-    );
-
-    let schema_version: u32 = conn
-        .query_row("PRAGMA schema_version;", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(
-        schema_version, CACHE_SCHEMA_VERSION,
-        "schema_version must match CACHE_SCHEMA_VERSION"
+        user_version, CACHE_SCHEMA_VERSION,
+        "user_version must match CACHE_SCHEMA_VERSION"
     );
 
     let journal_mode: String = conn
@@ -172,7 +164,7 @@ fn test_cli_boot_with_missing_cache_dir() {
     let user_version: u32 = conn
         .query_row("PRAGMA user_version;", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(user_version, CACHE_USER_VERSION);
+    assert_eq!(user_version, CACHE_SCHEMA_VERSION);
 
     for &table in ALL_TABLE_NAMES {
         let count: u32 = conn
@@ -243,16 +235,8 @@ updated_at: 2026-09-07T00:00:00Z
         .query_row("PRAGMA user_version;", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        user_version, CACHE_USER_VERSION,
-        "user_version must be reset to CACHE_USER_VERSION"
-    );
-
-    let schema_version: u32 = conn
-        .query_row("PRAGMA schema_version;", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(
-        schema_version, CACHE_SCHEMA_VERSION,
-        "schema_version must be reset to CACHE_SCHEMA_VERSION"
+        user_version, CACHE_SCHEMA_VERSION,
+        "user_version must be reset to CACHE_SCHEMA_VERSION"
     );
 
     let has_legacy: bool = conn
@@ -495,4 +479,160 @@ updated_by:
             table, initial_rows, rebuilt_rows
         );
     }
+}
+
+/// Story 1.14 acceptance: `qdev init` must produce a cache that the very next command finds
+/// `Valid` and leaves alone. Before the fix, `init` stamped only `user_version` while
+/// `inspect_cache_schema` also demanded SQLite's schema cookie equal the version, so a fresh
+/// cache was declared invalid and the next command dropped and rebuilt every table.
+#[test]
+fn test_init_produces_cache_valid_on_next_command() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    init_workspace(root);
+
+    let cache_db_path = root.join(".qdev/cache/cache.sqlite");
+    assert_eq!(
+        qdev_core::inspect_cache_schema(&cache_db_path).unwrap(),
+        qdev_core::CacheSchemaStatus::Valid,
+        "the cache `qdev init` just wrote must inspect Valid"
+    );
+
+    // A marker index is dropped along with its table by any rebuild, so its survival is proof
+    // that the next command did not rebuild. (A marker table would trip the unrelated
+    // "no extra tables" check and cause the very rebuild this test is looking for.)
+    {
+        let conn = rusqlite::Connection::open(&cache_db_path).unwrap();
+        conn.execute_batch("CREATE INDEX init_marker_idx ON entities(kind);")
+            .unwrap();
+    }
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["list", "stories"])
+        .assert()
+        .success();
+
+    let conn = rusqlite::Connection::open(&cache_db_path).unwrap();
+    let survived: bool = conn
+        .query_row(
+            "SELECT count(*) > 0 FROM sqlite_master WHERE type='index' AND name='init_marker_idx';",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        survived,
+        "the command after `qdev init` must not rebuild the cache"
+    );
+
+    let user_version: u32 = conn
+        .query_row("PRAGMA user_version;", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(user_version, CACHE_SCHEMA_VERSION);
+}
+
+/// A cache stamped newer than this binary supports is refused on boot (exit 5) for every
+/// command, `qdev doctor` included — except `qdev sync --rebuild`, the recovery path the
+/// refusal message itself names.
+#[test]
+fn test_newer_cache_refused_everywhere_except_sync_rebuild() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    init_workspace(root);
+
+    // An entity file so "rebuilt from files" has something to prove: the row must come back
+    // from the Markdown, not merely leave a re-stamped empty cache behind.
+    let stories_dir = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    fs::write(
+        stories_dir.join("E12S1.md"),
+        r#"---
+id: E12S1
+kind: story
+title: Newer Cache Recovery Story
+status: draft
+version: 1
+created_by:
+  type: human
+  id: alice
+updated_by:
+  type: human
+  id: alice
+created_at: 2026-09-07T00:00:00Z
+updated_at: 2026-09-07T00:00:00Z
+---
+
+## Acceptance Criteria
+- Rebuilt from files after a newer-cache refusal.
+"#,
+    )
+    .unwrap();
+
+    let cache_db_path = root.join(".qdev/cache/cache.sqlite");
+    let stamp_future = || {
+        let conn = rusqlite::Connection::open(&cache_db_path).unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {};",
+            CACHE_SCHEMA_VERSION + 1
+        ))
+        .unwrap();
+    };
+
+    stamp_future();
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["doctor"])
+        .assert()
+        .failure()
+        .code(5)
+        .stderr(predicate::str::contains("newer than supported version"))
+        .stderr(predicate::str::contains("qdev sync --rebuild"));
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["list", "stories"])
+        .assert()
+        .failure()
+        .code(5);
+
+    // A plain `qdev sync` is refused too: only the explicit `--rebuild` is the recovery path.
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["sync"])
+        .assert()
+        .failure()
+        .code(5);
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["sync", "--rebuild"])
+        .assert()
+        .success()
+        .code(0);
+
+    let conn = rusqlite::Connection::open(&cache_db_path).unwrap();
+    let user_version: u32 = conn
+        .query_row("PRAGMA user_version;", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        user_version, CACHE_SCHEMA_VERSION,
+        "`sync --rebuild` must re-stamp the cache to the supported version"
+    );
+
+    let rebuilt: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM entities WHERE id = 'E12S1';",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        rebuilt,
+        "`sync --rebuild` must repopulate the cache from the Markdown files, not just re-stamp it"
+    );
+
+    // And the workspace is healthy again afterwards.
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root).args(["doctor"]).assert().success();
 }

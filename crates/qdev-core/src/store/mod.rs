@@ -11,8 +11,8 @@ use crate::write::Author;
 
 pub use sqlite::{
     create_schema, determine_entity_kind, drop_all_user_tables, ensure_cache, inspect_cache_schema,
-    stamp_cache_version, CacheSchemaStatus, SqliteStore, ALL_TABLE_NAMES, BUSY_TIMEOUT_MS,
-    CACHE_SCHEMA_VERSION, CACHE_USER_VERSION, SCHEMA_DDL,
+    newer_cache_conflict, stamp_cache_version, CacheSchemaStatus, SqliteStore, ALL_TABLE_NAMES,
+    BUSY_TIMEOUT_MS, CACHE_SCHEMA_VERSION, SCHEMA_DDL,
 };
 
 /// Common entity record representing rows in the `entities` table.

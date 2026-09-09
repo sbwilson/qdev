@@ -6,7 +6,7 @@ use crate::config::StorageConfig;
 use crate::errors::QdevError;
 
 pub use crate::store::{
-    create_schema, drop_all_user_tables, BUSY_TIMEOUT_MS, CACHE_SCHEMA_VERSION,
+    create_schema, drop_all_user_tables, stamp_cache_version, BUSY_TIMEOUT_MS, CACHE_SCHEMA_VERSION,
 };
 
 pub const STANDARD_DIRECTORIES: &[&str] = &[
@@ -192,17 +192,12 @@ pub fn check_cache_status(root: &Path) -> Result<CacheStatus, QdevError> {
             target_version: CACHE_SCHEMA_VERSION,
         })
     } else if user_version > CACHE_SCHEMA_VERSION {
-        Err(QdevError::conflict(
-            "schema_version_mismatch",
-            format!(
-                "Cache database schema version v{} is newer than supported version v{}",
-                user_version, CACHE_SCHEMA_VERSION
-            ),
-        )
-        .with_details(serde_json::json!({
-            "current_version": user_version,
-            "supported_version": CACHE_SCHEMA_VERSION,
-        })))
+        // Same conflict `ensure_cache` raises on boot, from the same constructor, so the two
+        // paths cannot drift apart again.
+        Err(crate::store::newer_cache_conflict(
+            user_version,
+            CACHE_SCHEMA_VERSION,
+        ))
     } else {
         Ok(CacheStatus::UpToDate {
             version: user_version,
@@ -486,13 +481,10 @@ fn initialize_cache(
 
         let res = (|| -> Result<(), QdevError> {
             create_schema(&conn)?;
-            conn.execute_batch(&format!("PRAGMA user_version = {};", CACHE_SCHEMA_VERSION))
-                .map_err(|e| {
-                    QdevError::infrastructure_failure(
-                        "sqlite_error",
-                        format!("Failed to set user_version: {}", e),
-                    )
-                })?;
+            // Stamped through the shared writer, not a hand-rolled pragma: one stamping path
+            // means a fresh cache is inspected `Valid` on the very next command instead of
+            // being torn down and rebuilt.
+            stamp_cache_version(&conn)?;
             Ok(())
         })();
 
@@ -536,13 +528,10 @@ fn initialize_cache(
         let res = (|| -> Result<(), QdevError> {
             drop_all_user_tables(&conn)?;
             create_schema(&conn)?;
-            conn.execute_batch(&format!("PRAGMA user_version = {};", CACHE_SCHEMA_VERSION))
-                .map_err(|e| {
-                    QdevError::infrastructure_failure(
-                        "sqlite_error",
-                        format!("Failed to set user_version: {}", e),
-                    )
-                })?;
+            // Stamped through the shared writer, not a hand-rolled pragma: one stamping path
+            // means a fresh cache is inspected `Valid` on the very next command instead of
+            // being torn down and rebuilt.
+            stamp_cache_version(&conn)?;
             Ok(())
         })();
 
@@ -559,17 +548,12 @@ fn initialize_cache(
         })?;
         Ok((CACHE_SCHEMA_VERSION, true))
     } else if user_version > CACHE_SCHEMA_VERSION {
-        Err(QdevError::conflict(
-            "schema_version_mismatch",
-            format!(
-                "Cache database schema version v{} is newer than supported version v{}",
-                user_version, CACHE_SCHEMA_VERSION
-            ),
-        )
-        .with_details(serde_json::json!({
-            "current_version": user_version,
-            "supported_version": CACHE_SCHEMA_VERSION,
-        })))
+        // Same conflict `ensure_cache` raises on boot, from the same constructor, so the two
+        // paths cannot drift apart again.
+        Err(crate::store::newer_cache_conflict(
+            user_version,
+            CACHE_SCHEMA_VERSION,
+        ))
     } else {
         // Schema is current
         Ok((user_version, false))

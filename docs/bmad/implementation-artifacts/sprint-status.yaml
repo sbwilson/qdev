@@ -6,7 +6,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-09-2026 19:28
+last_updated: 09-10-2026 08:00
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -27,7 +27,7 @@ development_status:
   1-11-qdev-validate: done
   1-12-qdev-sync-cache-diagnostics: done
   1-13-qdev-schema: done
-  1-14-cache-version-stamp-hardening: backlog
+  1-14-cache-version-stamp-hardening: review
   epic-1-retrospective: done
 
   epic-2: backlog
@@ -80,14 +80,14 @@ action_items:
     action: "Make qdev init produce a cache inspect_cache_schema accepts; add a test
       asserting init -> Valid"
     owner: "Simon"
-    status: open
+    status: done
     ref: "docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md"
   - id: "epic-1-retro-item-2-retire-pragma-schema_version-as-an-appli"
     epic: 1
     action: "Retire PRAGMA schema_version as an application version; keep user_version
       as the single stamp and amend the frozen story-1.6 spec"
     owner: "Simon"
-    status: open
+    status: done
     ref: "docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md"
   - id: "epic-1-retro-item-3-thread-storageconfig-through-the-remaini"
     epic: 1

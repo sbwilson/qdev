@@ -164,8 +164,17 @@ fn run(raw_args: &[String]) -> ExitCode {
     // Boot-time cache verification and initialization per spec-1-6 (in initialized workspaces)
     if root.join("qdev.toml").is_file() {
         if let Err(e) = qdev_core::ensure_cache(&root, &annotated_config.config.storage) {
-            let _ = output.emit_error(&e);
-            return e.exit_code();
+            // A cache stamped by a newer binary is refused on boot for every command — except
+            // `qdev sync --rebuild`, the documented recovery path the refusal itself names.
+            // That command drops and repopulates every table from the Markdown files, so it is
+            // the one caller that does not need to read the newer cache first. Every other
+            // command, `qdev doctor` included, still exits 5 here.
+            let recoverable_by_this_command = e.code() == "schema_version_mismatch"
+                && matches!(cli.command, Some(Commands::Sync(ref args)) if args.rebuild);
+            if !recoverable_by_this_command {
+                let _ = output.emit_error(&e);
+                return e.exit_code();
+            }
         }
     }
 

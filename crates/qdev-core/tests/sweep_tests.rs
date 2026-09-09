@@ -11,7 +11,7 @@ use tempfile::TempDir;
 use qdev_core::rusqlite;
 use qdev_core::store::{
     ensure_cache, inspect_cache_schema, CacheSchemaStatus, EntityRecord, FindingRecord,
-    SqliteStore, Store, SweepSummary, ALL_TABLE_NAMES, CACHE_SCHEMA_VERSION, CACHE_USER_VERSION,
+    SqliteStore, Store, SweepSummary, ALL_TABLE_NAMES, CACHE_SCHEMA_VERSION,
 };
 use qdev_core::StorageConfig;
 
@@ -645,13 +645,12 @@ fn test_v1_cache_auto_rebuilds_to_current_schema() {
     make_workspace(root, &["E1S1", "E1S2"]);
     let storage = storage();
 
-    // Pre-create a v1 cache (user_version/schema_version = 1).
+    // Pre-create a v1 cache (user_version = 1).
     let cache_dir = root.join(".qdev/cache");
     fs::create_dir_all(&cache_dir).unwrap();
     {
         let conn = rusqlite::Connection::open(cache_db(root)).unwrap();
-        conn.execute_batch("PRAGMA user_version = 1; PRAGMA schema_version = 1;")
-            .unwrap();
+        conn.execute_batch("PRAGMA user_version = 1;").unwrap();
     }
 
     // Any boot detects the mismatch and rebuilds to the current schema version.
@@ -661,16 +660,9 @@ fn test_v1_cache_auto_rebuilds_to_current_schema() {
     let user_ver: u32 = conn
         .query_row("PRAGMA user_version;", [], |r| r.get(0))
         .unwrap();
-    let schema_ver: u32 = conn
-        .query_row("PRAGMA schema_version;", [], |r| r.get(0))
-        .unwrap();
     assert_eq!(
-        user_ver, CACHE_USER_VERSION,
+        user_ver, CACHE_SCHEMA_VERSION,
         "user_version rebuilt to the current version"
-    );
-    assert_eq!(
-        schema_ver, CACHE_SCHEMA_VERSION,
-        "schema_version rebuilt to the current version"
     );
 
     // Every table present.
@@ -1168,14 +1160,13 @@ fn test_unreadable_file_records_finding_and_keeps_dirty() {
 // ---------------------------------------------------------------------------
 
 /// Turns the v2 cache at `root` into a genuine v1 shape: 14 tables, `entities` without
-/// `stale`, pragmas at 1.
+/// `stale`, `user_version` at 1.
 fn downgrade_cache_to_v1(root: &Path) {
     let conn = rusqlite::Connection::open(cache_db(root)).unwrap();
     conn.execute_batch(
         "DROP TABLE findings;
          ALTER TABLE entities DROP COLUMN stale;
-         PRAGMA user_version = 1;
-         PRAGMA schema_version = 1;",
+         PRAGMA user_version = 1;",
     )
     .unwrap();
 }
@@ -1220,7 +1211,7 @@ fn test_real_v1_cache_rebuilds_to_current_schema_and_matches_a_fresh_sweep() {
     let user_ver: u32 = conn
         .query_row("PRAGMA user_version;", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(user_ver, CACHE_USER_VERSION);
+    assert_eq!(user_ver, CACHE_SCHEMA_VERSION);
     let tables: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';",
@@ -1515,15 +1506,11 @@ fn drop_sync_meta(root: &Path) {
     let conn = rusqlite::Connection::open(cache_db(root)).unwrap();
     conn.execute_batch("DROP TABLE IF EXISTS sync_meta;")
         .unwrap();
-    // Both pragmas are restamped, not just `user_version`: `DROP TABLE` bumps SQLite's own
-    // schema cookie, and `inspect_cache_schema` compares that cookie *before* it looks at the
-    // table list. Leaving it bumped would let the test pass on the pragma check alone, so the
-    // table-presence check it exists to pin could be deleted with the test still green.
-    conn.execute_batch(&format!(
-        "PRAGMA writable_schema = ON;\nPRAGMA user_version = {};\nPRAGMA schema_version = {};\nPRAGMA writable_schema = OFF;",
-        CACHE_USER_VERSION, CACHE_SCHEMA_VERSION
-    ))
-    .unwrap();
+    // `user_version` is restamped to the current version so the stamp check passes and the
+    // table-presence check is the only thing left that can catch the missing table — which is
+    // exactly what this fixture exists to pin.
+    conn.execute_batch(&format!("PRAGMA user_version = {};", CACHE_SCHEMA_VERSION))
+        .unwrap();
 }
 
 /// A cache missing only `sync_meta` must be reported `Mismatch`, not `Valid`. The pragmas
@@ -1554,13 +1541,9 @@ fn test_cache_missing_only_sync_meta_is_reported_as_mismatch_and_healed() {
         let user_ver: u32 = conn
             .query_row("PRAGMA user_version;", [], |r| r.get(0))
             .unwrap();
-        let schema_ver: u32 = conn
-            .query_row("PRAGMA schema_version;", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(user_ver, CACHE_USER_VERSION);
         assert_eq!(
-            schema_ver, CACHE_SCHEMA_VERSION,
-            "the fixture must look healthy to the pragma check, so that only the \
+            user_ver, CACHE_SCHEMA_VERSION,
+            "the fixture must look healthy to the version stamp, so that only the \
              table-presence check can catch this cache"
         );
     }
@@ -1593,7 +1576,7 @@ fn test_cache_schema_introspection_reports_observed_state() {
     let storage = storage();
     let store = ensure_cache(root, &storage).unwrap();
 
-    assert_eq!(store.cache_schema_version().unwrap(), CACHE_USER_VERSION);
+    assert_eq!(store.cache_schema_version().unwrap(), CACHE_SCHEMA_VERSION);
     assert!(store.cache_missing_tables().unwrap().is_empty());
     drop(store);
 
@@ -1637,8 +1620,7 @@ fn test_writing_to_an_older_cache_does_not_stamp_it_as_current() {
                  found_at TEXT NOT NULL,
                  PRIMARY KEY (path, code)
              );
-             PRAGMA user_version = 2;
-             PRAGMA schema_version = 2;",
+             PRAGMA user_version = 2;",
         )
         .unwrap();
     }
@@ -1669,7 +1651,7 @@ fn test_writing_to_an_older_cache_does_not_stamp_it_as_current() {
             .unwrap()
             .query_row("PRAGMA user_version;", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        CACHE_USER_VERSION,
+        CACHE_SCHEMA_VERSION,
         "a write must not stamp the current version onto tables it did not migrate"
     );
     assert_eq!(
@@ -1713,7 +1695,7 @@ fn test_doctor_cache_section_reports_a_stale_database() {
             .clone()
     };
     assert_eq!(field("schema_status"), "ok");
-    assert_eq!(field("cache_schema_version"), CACHE_USER_VERSION);
+    assert_eq!(field("cache_schema_version"), CACHE_SCHEMA_VERSION);
     assert_eq!(field("expected_cache_schema_version"), CACHE_SCHEMA_VERSION);
     drop(store);
 
