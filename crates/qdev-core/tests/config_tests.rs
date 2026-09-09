@@ -338,9 +338,9 @@ require_clean_tree_in_scope = true
 max_integration_staleness_commits = 15
 
 [storage]
-specs_dir = "specs"
-state_dir = "state"
-cache_dir = "cache"
+specs_dir = "docs/specs"
+state_dir = "docs/state"
+cache_dir = ".qdev/cache"
 
 [[modules]]
 id = "mod1"
@@ -403,7 +403,10 @@ editor = "vim"
         Some(&vec!["alice".to_string(), "bob".to_string()])
     );
     assert_eq!(cfg.git.branch_template, "feat/{story_id}");
-    assert_eq!(cfg.storage.specs_dir, "specs");
+    // v1 accepts only the default layout — `[storage]` is validated but not yet honoured
+    // everywhere (see the epic 1 retrospective, finding C1), so a non-default value is refused
+    // rather than half-supported. This still pins that the section parses into typed fields.
+    assert_eq!(cfg.storage.specs_dir, "docs/specs");
     assert_eq!(cfg.modules.len(), 1);
     assert_eq!(cfg.hygiene.max_inline_comment_lines, 4);
     assert_eq!(cfg.regulatory.iec62304_class.as_deref(), Some("ClassB"));
@@ -819,7 +822,7 @@ remote = "upstream"
 integration_branch = "main"
 
 [storage]
-specs_dir = "specs"
+specs_dir = "docs/specs"
 
 [[modules]]
 id = "core"

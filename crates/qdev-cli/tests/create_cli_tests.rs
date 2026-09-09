@@ -321,15 +321,16 @@ fn test_create_story_file_conflict() {
         .code(5);
 }
 
-/// A configured `[storage] specs_dir` must be honoured by `create story` — both for where the
-/// file is written and for where the next id is allocated from.
+/// `[storage]` is aspirational in v1: the sweep and validation read it, but `init` scaffolding,
+/// the `.gitignore` entries and the DW/decision id allocators are still written against the
+/// default layout. A non-default value used to be accepted and then silently ignored by
+/// `create story`, which wrote to the default path while every read command looked at the
+/// configured one — the story was created, the command exited 0, and nothing could see it.
 ///
-/// The sweep, hydration and validation all read `storage.specs_dir`, but creation used to
-/// hardcode the default layout: with a non-default `[storage]` the command exited 0, reported a
-/// path under `docs/specs/`, and the created story was invisible to every read command. Id
-/// allocation scanned the same wrong directory, so every create restarted at 1.
+/// v1 therefore refuses the value outright, naming the key and the file, rather than shipping
+/// half-support that loses data.
 #[test]
-fn test_create_story_honours_configured_specs_dir() {
+fn test_non_default_storage_is_refused_with_a_clear_error() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
 
@@ -353,46 +354,51 @@ fn test_create_story_honours_configured_specs_dir() {
     fs::write(root.join("qdev.toml"), toml).unwrap();
 
     let mut create = Command::cargo_bin("qdev").unwrap();
-    let assert = create
+    create
+        .current_dir(root)
+        .args(["create", "story", "E12"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("storage.specs_dir"))
+        .stderr(predicate::str::contains("not configurable in this version"));
+
+    assert!(
+        !root.join("planning/specs/stories/E12S1.md").exists()
+            && !root.join("docs/specs/stories/E12S1.md").exists(),
+        "a refused configuration must not write a story anywhere"
+    );
+}
+
+/// The default layout is of course still accepted, written explicitly or omitted entirely.
+#[test]
+fn test_explicit_default_storage_is_accepted() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args([
+            "init",
+            "--non-interactive",
+            "--name",
+            "TestProject",
+            "--developer",
+            "simon",
+            "--team",
+            "core-platform",
+        ])
+        .assert()
+        .success();
+
+    let mut toml = fs::read_to_string(root.join("qdev.toml")).unwrap();
+    toml.push_str("\n[storage]\nspecs_dir = \"docs/specs\"\nstate_dir = \"docs/state\"\n");
+    fs::write(root.join("qdev.toml"), toml).unwrap();
+
+    let mut create = Command::cargo_bin("qdev").unwrap();
+    create
         .current_dir(root)
         .args(["create", "story", "E12", "--json"])
         .assert()
         .success();
-    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
-
-    assert_eq!(val["path"], "planning/specs/stories/E12S1.md");
-    assert!(
-        root.join("planning/specs/stories/E12S1.md").is_file(),
-        "the story must land under the configured specs_dir"
-    );
-    assert!(
-        !root.join("docs/specs/stories/E12S1.md").exists(),
-        "nothing may be written to the default layout"
-    );
-
-    // Readable back through the cache — the check that actually failed before.
-    let mut list = Command::cargo_bin("qdev").unwrap();
-    let list_assert = list
-        .current_dir(root)
-        .args(["list", "stories", "--json"])
-        .assert()
-        .success();
-    let listed: Value = serde_json::from_slice(&list_assert.get_output().stdout).unwrap();
-    let ids: Vec<&str> = listed["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|i| i["id"].as_str().unwrap())
-        .collect();
-    assert_eq!(ids, vec!["E12S1"], "the created story must be readable");
-
-    // Allocation must continue from the configured directory, not restart at 1.
-    let mut second = Command::cargo_bin("qdev").unwrap();
-    let second_assert = second
-        .current_dir(root)
-        .args(["create", "story", "E12", "--json"])
-        .assert()
-        .success();
-    let second_val: Value = serde_json::from_slice(&second_assert.get_output().stdout).unwrap();
-    assert_eq!(second_val["id"], "E12S2");
+    assert!(root.join("docs/specs/stories/E12S1.md").is_file());
 }

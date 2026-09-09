@@ -150,6 +150,31 @@ deferred: []
   - `[low]` `[patch]` Regression gap: fallback to default identity when git user email is unavailable is unverified — added test_default_identity_fallback_without_git in config_tests.rs asserting empty identity and ConfigSource::Default
   - `[medium]` `[patch]` In crates/qdev-core/src/config/mod.rs:1084, project gate deserialization uses unwrap_or_default() rather than propagating errors — patched to propagate deserialization errors with map_err (grouped with B3)
 
+### 2026-09-10 — Epic 1 retrospective: `[storage]` restricted to the default layout
+
+**Human decision (Simon): `[storage]` is aspirational for v1.**
+
+This story specified and delivered a configurable `[storage]` block, and its tests asserted a
+non-default `specs_dir` was parsed and honoured. The epic 1 retrospective found (finding C1,
+confirmed by reproduction) that only *part* of the codebase honours it: the sweep, hydration and
+validation read `StorageConfig`, while `init`'s directory scaffolding, the `.gitignore` entries,
+the deferred-work and decision id allocators, and — until this pass — `qdev create story` were
+written against the default paths.
+
+The consequence was silent data loss: with `specs_dir = "planning/specs"`, `qdev create story`
+exited 0, reported a path under `docs/specs/`, wrote it there, and no read command could see it.
+Id allocation scanned the same wrong directory, so every create restarted at `E12S1`.
+
+Rather than ship half-support, v1 now **refuses** a non-default `[storage]` value with a usage
+error naming the key and the file (`config/mod.rs::reject_non_default_storage`). The section is
+still parsed and type-checked exactly as this story specified; only non-default *values* are
+rejected. Two tests here were updated to the default layout, and
+`create_cli_tests.rs::test_non_default_storage_is_refused_with_a_clear_error` pins the refusal.
+
+This narrows an approved acceptance criterion and is recorded rather than absorbed. Lifting the
+restriction means making every path listed above config-driven — epic 1 retrospective action
+item 4.
+
 ## Design Notes
 
 Dual configuration merges committed project policies in `qdev.toml` with local gitignored developer preferences in `.qdev.local.toml`.
