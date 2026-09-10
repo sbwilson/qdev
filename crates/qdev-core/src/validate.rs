@@ -11,7 +11,7 @@ use crate::errors::QdevError;
 use crate::id::Identifier;
 use crate::schema::{extract_frontmatter, EntityKind};
 use crate::store::sqlite::collect_markdown_files;
-use crate::store::{EntityFilter, FindingRecord, Store};
+use crate::store::{EntityFilter, EntityPresence, FindingRecord, Store};
 use crate::write::current_iso8601;
 
 const ERROR_SEVERITY: &str = "error";
@@ -180,8 +180,11 @@ pub fn ids_in_use_from_scan(
 ) -> Result<HashSet<String>, QdevError> {
     let mut used = scan.all_ids.clone();
     if let Some(store) = store {
-        // Stale rows count: a stale row is a *hydrated* entity whose last parse failed, and its
-        // id is precisely the one the filesystem half can no longer see.
+        // Stale rows count, so this deliberately uses the unfiltered `list_entities` rather
+        // than the derivation helper: a stale row is a *hydrated* entity whose last parse
+        // failed, and its id is precisely the one the filesystem half can no longer see. This
+        // asks about *id ownership*, not about whether a finding may be derived — a stale row's
+        // id is still taken, and filtering here would hand it out to a second entity.
         used.extend(
             store
                 .list_entities(&EntityFilter::default())?
@@ -192,10 +195,14 @@ pub fn ids_in_use_from_scan(
     Ok(used)
 }
 
-/// The source path to report a deferred-work finding against. A `deferred_work` row whose
-/// `entities` row is missing is itself a broken cache, but the finding must still be reported:
-/// dropping it would let `qdev validate` exit 0 on a workspace that has a real problem, so the
-/// id is named in a placeholder path instead.
+/// The source path to report a deferred-work finding against.
+///
+/// Uses the unfiltered [`Store::get_entity`] deliberately: this asks *where to report*, not
+/// whether the entity counts as present, and a row's `source_path` is the right path whatever its
+/// staleness. In practice both callers skip a stale DW row before reaching here, so this only
+/// ever sees `Live` or a missing row — the unfiltered read matters for the missing case, where a
+/// `deferred_work` row without an `entities` row is itself a broken cache and the finding must
+/// still be reported against a named placeholder rather than dropped.
 fn deferred_work_path(store: &dyn Store, dw_id: &str) -> Result<String, QdevError> {
     Ok(match store.get_entity(dw_id)? {
         Some(entity) => entity.source_path,
@@ -213,11 +220,18 @@ fn deferred_work_path(store: &dyn Store, dw_id: &str) -> Result<String, QdevErro
 ///
 /// A row the cache has no entity for at all is *not* skipped: that is a broken cache rather than
 /// a known-unparseable file, and dropping the finding would let `qdev validate` exit 0 on it.
+/// That is the whole reason this asks [`Store::entity_presence_for_derivation`] for the
+/// three-state answer instead of the boolean: `Stale` and `Absent` mean different things here,
+/// and the rule that a stale row is absent still lives in one place.
 fn deferred_work_is_stale(store: &dyn Store, dw_id: &str) -> Result<bool, QdevError> {
-    Ok(store.get_entity(dw_id)?.is_some_and(|entity| entity.stale))
+    Ok(store.entity_presence_for_derivation(dw_id)? == EntityPresence::Stale)
 }
 
-/// `orphan_deferred_work`: DW's `origin_story_id` is set but `get_entity` returns `None` for it.
+/// `orphan_deferred_work`: DW's `origin_story_id` is set but no entity exists for it — asked of
+/// [`Store::entity_exists_for_derivation`], so a *stale* origin story counts as absent and the
+/// finding is reported. It has to: a rebuild of the same tree has no row for that story at all
+/// and reports the orphan, so a sweep that treated the retained row as present would make
+/// `qdev validate`'s answer depend on hydration history.
 pub fn find_orphan_deferred_work(store: &dyn Store) -> Result<Vec<FindingRecord>, QdevError> {
     let found_at = current_iso8601();
     let mut findings = Vec::new();
@@ -229,21 +243,25 @@ pub fn find_orphan_deferred_work(store: &dyn Store) -> Result<Vec<FindingRecord>
             Some(o) if !o.is_empty() => o,
             _ => continue,
         };
-        if store.get_entity(origin)?.is_some() {
+        if store.entity_exists_for_derivation(origin)? {
             continue;
         }
-        {
-            findings.push(FindingRecord {
-                path: deferred_work_path(store, &dw.id)?,
-                code: "orphan_deferred_work".to_string(),
-                severity: ERROR_SEVERITY.to_string(),
-                message: Some(format!(
-                    "Deferred work '{}' references origin_story_id '{}', which does not exist",
-                    dw.id, origin
-                )),
-                found_at: found_at.clone(),
-            });
-        }
+        // One message for both a stale and an absent origin, deliberately. Naming the difference
+        // would read better — a stale story *is* on disk, and the parse failure reported against
+        // it is the actionable finding — but the message is part of the finding, and a sweep
+        // (which has the stale row) would then describe the same workspace differently from a
+        // rebuild (which has no row at all). Convergence is the stronger property, and the
+        // convergence test caught the attempt.
+        findings.push(FindingRecord {
+            path: deferred_work_path(store, &dw.id)?,
+            code: "orphan_deferred_work".to_string(),
+            severity: ERROR_SEVERITY.to_string(),
+            message: Some(format!(
+                "Deferred work '{}' references origin_story_id '{}', which does not exist",
+                dw.id, origin
+            )),
+            found_at: found_at.clone(),
+        });
     }
     Ok(findings)
 }
@@ -301,8 +319,10 @@ pub fn find_unregistered_target_modules(
     };
     for story in store.list_entities(&filter)? {
         // A stale row's `target_modules` is pre-edit content: the file's own parse failure is
-        // already reported, and a rebuild of the same tree has no such row to derive from.
-        if story.stale {
+        // already reported, and a rebuild of the same tree has no such row to derive from. The
+        // rule is the store's (`EntityPresence`), asked of the row already in hand rather than
+        // via `entity_exists_for_derivation`, which would cost one query per listed row.
+        if !story.exists_for_derivation() {
             continue;
         }
         let modules: Vec<String> = story
@@ -358,7 +378,8 @@ pub fn find_off_convention_entity_files(
     for entity in store.list_entities(&EntityFilter::default())? {
         // Stale rows are excluded for the same reason as the other computed checks: the id this
         // convention is checked against comes from a parse that is known to be out of date.
-        if entity.stale {
+        // Same store-owned rule as above, asked of the row in hand.
+        if !entity.exists_for_derivation() {
             continue;
         }
         let rel = entity.source_path.replace('\\', "/");
@@ -435,10 +456,13 @@ fn normalize_rel(path: &Path) -> String {
 /// duplicated: this only ever reads from `list_findings`, never writes back to the `findings`
 /// table.
 ///
-/// The four checks that read cached rows skip *stale* ones, so no finding is ever derived from
-/// content a file no longer has, and a sweep and a full rebuild of the same tree report the same
-/// list. Reads are deliberately untouched: `qdev get` and `qdev list` still return a stale
-/// entity with its `stale` flag set, which is what the retention exists for.
+/// The four checks that read cached rows treat a *stale* row as absent, so no finding is ever
+/// derived from content a file no longer has — and none derived from an entity a stale row
+/// merely *refers to* either, since the existence probes go through
+/// [`Store::entity_exists_for_derivation`] rather than `get_entity`. One rule, one helper: a
+/// sweep and a full rebuild of the same tree report the same list. Reads are deliberately
+/// untouched: `qdev get` and `qdev list` still return a stale entity with its `stale` flag set,
+/// which is what the retention exists for.
 pub fn run_validation(
     store: &dyn Store,
     workspace_root: &Path,

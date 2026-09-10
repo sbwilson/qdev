@@ -1461,6 +1461,120 @@ fn test_validate_derives_no_computed_finding_from_a_stale_row() {
     assert_eq!(val["stale"], true, "get must still return the stale row");
 }
 
+/// The spec's own reproduction, end to end: a deferred-work row whose *origin story* is
+/// merge-conflicted. The retained row is stale, so it is absent for the purpose of deriving a
+/// finding and the orphan is reported — and reported identically by a sweep and by
+/// `sync --rebuild` on the identical tree, which is the answer that used to depend on hydration
+/// history.
+#[test]
+fn test_validate_orphan_deferred_work_agrees_after_sweep_and_rebuild_with_a_stale_origin() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories = root.join("docs/specs/stories");
+    write_story(&stories, "E1S1");
+    let dw_dir = root.join("docs/state/dw");
+    fs::create_dir_all(&dw_dir).unwrap();
+    fs::write(
+        dw_dir.join("DW-1111.md"),
+        r#"---
+id: DW-1111
+title: "Deferred"
+status: open
+origin_story_id: E1S1
+target_module: foundation
+safety_risk: negligible
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+Body
+"#,
+    )
+    .unwrap();
+
+    // `(code, path, message)`, matching the core convergence test: a divergence confined to a
+    // message is still a divergence, and comparing only code and path would miss it.
+    let validate = |expect_failure: bool| -> Vec<(String, String, String)> {
+        let mut cmd = Command::cargo_bin("qdev").unwrap();
+        let assert = cmd.current_dir(root).args(["validate", "--json"]).assert();
+        let assert = if expect_failure {
+            assert.failure().code(1)
+        } else {
+            assert.success()
+        };
+        let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+        let mut codes: Vec<(String, String, String)> = val["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                (
+                    f["code"].as_str().unwrap().to_string(),
+                    f["path"].as_str().unwrap().to_string(),
+                    f["message"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        codes.sort();
+        codes
+    };
+
+    // Precondition: with the origin story parsing, this check reports nothing. Filtered to the
+    // code under test rather than asserting the whole list is empty, which would couple this
+    // test to every unrelated check's behaviour on the fixture.
+    assert!(
+        !validate(false)
+            .iter()
+            .any(|(code, _, _)| code == "orphan_deferred_work"),
+        "precondition: a live origin story suppresses the orphan"
+    );
+
+    // Conflict the origin story. The next sweep retains its row, flagged stale.
+    fs::write(
+        stories.join("E1S1.md"),
+        read_story(&stories, "E1S1") + "<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> b\n",
+    )
+    .unwrap();
+
+    let swept = validate(true);
+    assert!(
+        swept
+            .iter()
+            .any(|(code, path, _)| code == "orphan_deferred_work"
+                && path == "docs/state/dw/DW-1111.md"),
+        "a stale origin story must not suppress the orphan: {swept:?}"
+    );
+
+    // The rebuild has no row for that story at all, and must reach the same answer.
+    Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["sync", "--rebuild", "--json"])
+        .assert()
+        .success();
+    assert_eq!(
+        swept,
+        validate(true),
+        "sweep and rebuild must report the same findings on the identical tree"
+    );
+
+    // And the derivation rule does not leak into reads.
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["get", "DW-1111", "--json"])
+        .assert()
+        .success();
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["id"], "DW-1111");
+}
+
 #[test]
 fn test_validate_reports_duplicate_planning_id_in_state_dir() {
     // Duplicate-id detection must cover every directory hydration reads, not `specs_dir` alone.

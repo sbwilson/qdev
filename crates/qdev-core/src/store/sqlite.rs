@@ -13,9 +13,9 @@ use crate::id::{Identifier, IdentifierKind};
 use crate::schema::{extract_frontmatter, validate_value_detailed, EntityKind, ValidationError};
 use crate::store::{
     ConstraintRecord, DecisionRecord, DeferredWorkRecord, DirtyEntityRecord, EntityFilter,
-    EntityRecord, FindingRecord, GateRecord, GateRunRecord, RelationRecord, ScratchpadRecord,
-    SoupRecord, SprintAssignmentRecord, SprintRecord, Store, StoryRecord, SweepSummary,
-    SyncStateRecord,
+    EntityPresence, EntityRecord, FindingRecord, GateRecord, GateRunRecord, RelationRecord,
+    ScratchpadRecord, SoupRecord, SprintAssignmentRecord, SprintRecord, Store, StoryRecord,
+    SweepSummary, SyncStateRecord,
 };
 use crate::write::Author;
 
@@ -798,6 +798,29 @@ WHERE e.id = ?1;
             } else {
                 Ok(None)
             }
+        })
+    }
+
+    fn entity_presence_for_derivation(&self, id: &str) -> Result<EntityPresence, QdevError> {
+        self.with_conn(|conn| {
+            // Only the flag is read — the rule itself lives in `EntityPresence::from_stale_flag`,
+            // never in this SQL. A `WHERE stale = 0` here would be a second spelling of it, and
+            // would also collapse `Stale` into `Absent`, which the deferred-work checks must
+            // tell apart.
+            let stale: Option<bool> = conn
+                .query_row(
+                    "SELECT stale FROM entities WHERE id = ?1;",
+                    rusqlite::params![id],
+                    |row| row.get::<_, i64>(0).map(|flag| flag != 0),
+                )
+                .optional()
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to query entity presence for '{}': {}", id, e),
+                    )
+                })?;
+            Ok(EntityPresence::from_stale_flag(stale))
         })
     }
 
@@ -4054,6 +4077,11 @@ fn validate_relations_graph(tx: &rusqlite::Transaction) -> Result<(), QdevError>
     {
         let mut stmt = tx
             .prepare(
+                // The one place the stale rule is written in SQL rather than through
+                // `Store::entity_presence_for_derivation`: this is whole-graph validation, where
+                // a per-row helper would trade one query for N. Named as a deliberate exception
+                // in `architecture.md` §11 for that reason.
+                //
                 // `stale = 0` only: a stale row holds pre-edit content retained so reads keep
                 // working, and a full rebuild of the same tree has no row for it at all. Counting
                 // it as present would suppress the `dangling_relation` a rebuild reports on every

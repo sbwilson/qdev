@@ -255,3 +255,18 @@ two pass-1 findings that were dropped by mistake and the mediums.
 - source_spec: `docs/bmad/implementation-artifacts/spec-change-gate-compares-content.md`
   summary: The convergence test no longer compares `sync_meta` across a sweep and a rebuild, and nothing replaced the assertion, so a rebuild leaving that table empty or duplicated is uncaught.
   evidence: The exclusion itself is correct — `sync_meta` holds a wall-clock stamp that cannot be equal across two hydrations — but a shape assertion (exactly one row on both paths) would keep the coverage the exclusion dropped. Review by: next time the convergence test is edited.
+
+## Deferred from: code review of spec-stale-means-absent (2026-09-10)
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-stale-means-absent.md`
+  summary: `qdev relate` decides entity existence with the unfiltered `get_entity` and then reads `target.kind` off a possibly stale row, so a kind-pair refusal can be decided from pre-edit content.
+  evidence: Not in this story's inventory of five sites, and arguably outside its rule: `relate` is a *write gate*, not a derived finding, so refusing on a stale row's kind may be the right conservative answer — but nobody has decided which, and the site looks exactly like the one this story fixed. Either route it through the helper or name it as a fourth deliberate exception. Review by: with the `--if-version`/`unrelate` contract work already filed against the relation write path (pass 1's H8 and M1).
+- source_spec: `docs/bmad/implementation-artifacts/spec-stale-means-absent.md`
+  summary: `ids_in_use`'s deliberate use of the unfiltered `list_entities` has no test pinning the stale case, so a later consistency pass could adopt the derivation helper there and hand a stale row's id to a second entity.
+  evidence: The architecture text now says "every derivation site asks the helper", which makes exactly that mistake tempting; only a comment protects the exception. A test asserting that `create story` skips a *stale* row's id would make the exception enforceable. Review by: **before epic 1 acceptance** — it guards invariant 1's own rule.
+- source_spec: `docs/bmad/implementation-artifacts/spec-stale-means-absent.md`
+  summary: A `deferred_work` row whose `origin_story_id` names a non-story entity (an epic, another DW, a decision) passes the origin check, which never verified kind.
+  evidence: Pre-existing and independent of staleness; the check asks only whether *something* with that id exists. Review by: epic 2 story 2.8 (deferred work as entities), which owns the DW model.
+- source_spec: `docs/bmad/implementation-artifacts/spec-stale-means-absent.md`
+  summary: The stale-means-absent rule is centralised but not mechanically enforced — nothing stops a future site writing `get_entity(..).is_some()` at a derivation point.
+  evidence: A clippy `disallowed-methods` entry on `Store::get_entity` would turn the convention into a compile error, at the cost of annotating every legitimate read (query, doctor, CLI — roughly ten sites), which inverts the burden onto the common case. Renaming the read to `get_entity_including_stale` is the other option and touches the same call sites. Filed rather than taken because both trades deserve a decision, not a default. Review by: epic 2 planning, when the number of derivation sites is known.

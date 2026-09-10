@@ -957,6 +957,84 @@ fn test_computed_checks_skip_stale_rows() {
     }
 }
 
+/// The existence *probe* the check makes about a row it merely refers to — the case the test
+/// above misses, because its fixtures only ever made the check's own subject stale. A stale
+/// origin story is absent for the purpose of deriving a finding (`Store::
+/// entity_exists_for_derivation`), so the orphan is reported exactly as a rebuild — which has no
+/// row for that story at all — reports it. Each of the three origin states is asserted, so this
+/// cannot pass for want of a triggering fixture.
+#[test]
+fn test_orphan_deferred_work_treats_a_stale_origin_story_as_absent() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let config = Config::default();
+    let store = SqliteStore::open_in_memory().unwrap();
+
+    // A *live* deferred-work row: the check's own subject is not what is under test here.
+    store
+        .upsert_entity(&entity(
+            "DW-a1b2",
+            EntityKind::DeferredWork,
+            "docs/state/dw/DW-a1b2.md",
+        ))
+        .unwrap();
+    store
+        .upsert_deferred_work(&DeferredWorkRecord {
+            id: "DW-a1b2".to_string(),
+            origin_story_id: Some("E1S1".to_string()),
+            target_module: "core".to_string(),
+            status: Some("open".to_string()),
+            // Negligible with no rationale, so `dw_missing_rationale` cannot fire and the
+            // assertions below are about the origin probe alone.
+            safety_risk: Some("negligible".to_string()),
+            rationale: None,
+            gate: None,
+            resolution: None,
+        })
+        .unwrap();
+
+    let orphan_codes = |store: &SqliteStore| -> Vec<String> {
+        qdev_core::run_validation(store, root, &config)
+            .unwrap()
+            .into_iter()
+            .filter(|f| f.code == "orphan_deferred_work")
+            .map(|f| f.path)
+            .collect()
+    };
+
+    // 1. No origin story at all: reported, as it always was.
+    assert_eq!(
+        orphan_codes(&store),
+        vec!["docs/state/dw/DW-a1b2.md".to_string()],
+        "a missing origin story must be reported"
+    );
+
+    // 2. The origin story hydrated and *stale* — its file is merge-conflicted, so its retained
+    // row describes content the file may no longer have. This is the defect: the probe used to
+    // read the retained row as present and swallow the finding on the sweep path only.
+    let mut origin = entity("E1S1", EntityKind::Story, "docs/specs/stories/E1S1.md");
+    origin.stale = true;
+    store.upsert_entity(&origin).unwrap();
+    assert_eq!(
+        orphan_codes(&store),
+        vec!["docs/state/dw/DW-a1b2.md".to_string()],
+        "a stale origin story is absent for derivation: the orphan must still be reported"
+    );
+
+    // The derivation rule does not leak into reads: `qdev get` still returns the stale row.
+    let read_back = store.get_entity("E1S1").unwrap().expect("row is retained");
+    assert!(read_back.stale, "a read must still see the stale row");
+
+    // 3. The same origin story, parsing: nothing to report. Without this the test would pass
+    // for a check that reported the orphan unconditionally.
+    origin.stale = false;
+    store.upsert_entity(&origin).unwrap();
+    assert!(
+        orphan_codes(&store).is_empty(),
+        "a live origin story must suppress the finding, exactly as before this change"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // One rule for which ids are in use
 // ---------------------------------------------------------------------------
@@ -1058,4 +1136,55 @@ fn test_carried_ids_do_not_become_duplicate_findings() {
     let scan = qdev_core::scan_duplicate_planning_ids(root, &storage).unwrap();
     assert!(scan.groups.is_empty(), "{:?}", scan.groups);
     assert!(scan.all_ids.contains("E1S1"));
+}
+
+/// `EntityPresence::Absent` is the entire reason the helper has three states rather than being a
+/// boolean, and nothing exercised it: every deferred-work fixture in the suite upserts a matching
+/// entity row, so presence was always `Live` or `Stale`. Collapsing `Absent` into `Stale` — one
+/// token — would silence both DW checks on a broken cache and leave the suite green.
+#[test]
+fn test_deferred_work_with_no_entity_row_is_still_reported() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let store = SqliteStore::open_in_memory().unwrap();
+
+    // A `deferred_work` row with no `entities` row at all: a broken cache, not a stale file.
+    store
+        .upsert_deferred_work(&DeferredWorkRecord {
+            id: "DW-c3d4".to_string(),
+            origin_story_id: Some("E9S9".to_string()),
+            target_module: "core".to_string(),
+            status: Some("open".to_string()),
+            safety_risk: Some("unacceptable".to_string()),
+            rationale: None,
+            gate: None,
+            resolution: None,
+        })
+        .unwrap();
+
+    let config = Config::default();
+    let findings = qdev_core::run_validation(&store, root, &config).unwrap();
+
+    for expected in ["orphan_deferred_work", "dw_missing_rationale"] {
+        let finding = findings
+            .iter()
+            .find(|f| f.code == expected)
+            .unwrap_or_else(|| {
+                panic!(
+                    "a DW row with no entity row must still be reported ({expected}): {:?}",
+                    findings.iter().map(|f| &f.code).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            finding.path, "(unknown path for DW-c3d4)",
+            "with no row there is no source path, so the id is named instead"
+        );
+    }
+
+    // And the three states are distinguished at the store, which is where the rule lives.
+    use qdev_core::store::EntityPresence;
+    assert_eq!(
+        store.entity_presence_for_derivation("DW-c3d4").unwrap(),
+        EntityPresence::Absent
+    );
 }

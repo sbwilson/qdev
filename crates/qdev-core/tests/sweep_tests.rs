@@ -2636,3 +2636,274 @@ fn test_sweep_hashes_a_file_whose_stamp_cannot_resolve_the_edit() {
         "and the edit the stamp cannot resolve must land"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Convergence of every *computed* check when the row it derives from is stale
+// ---------------------------------------------------------------------------
+
+/// One workspace per computed finding code, hydrated by a sweep and then by a rebuild of the
+/// identical tree, with the row the check derives from retained *stale*.
+///
+/// `test_rebuild_and_sweep_findings_equal` above compares cache tables, which the computed
+/// checks never touch: they are derived at `qdev validate` time from cached rows. Its fixtures
+/// also only ever made the *subject* of a check stale, never something a check *refers to* —
+/// which is exactly how `orphan_deferred_work`'s origin-story probe shipped reading a stale row
+/// as present, reporting one finding after a sweep and two after a rebuild of the same tree.
+///
+/// Table-driven per code so a future computed check that forgets that a stale row is absent
+/// fails here rather than in a bug report.
+struct StaleConvergenceCase {
+    /// The computed finding code under test.
+    code: &'static str,
+    /// Writes a tree that hydrates cleanly, `qdev.toml` included.
+    setup: fn(&Path),
+    /// The workspace-relative file that then becomes merge-conflicted, so the sweep retains its
+    /// row flagged `stale` while a rebuild has no row for it at all.
+    conflicted: &'static str,
+    /// The entity whose retained row must be stale after the sweep, or `None` for a check that
+    /// derives from the filesystem rather than from a cached row.
+    stale_id: Option<&'static str>,
+    /// Whether `code` is reported while the tree is still clean — the positive control. Three
+    /// of these cases expect silence once the row is stale, and silence is also what a check
+    /// that never fired at all would produce, so each fixture is pinned in both states.
+    reported_live: bool,
+    /// Whether `code` must still be reported once that row is stale.
+    reported_stale: bool,
+}
+
+#[test]
+fn test_computed_checks_converge_when_the_row_they_derive_from_is_stale() {
+    let cases = [
+        // The defect this story fixes: the DW row is live, the *origin story* it names is stale.
+        // A rebuild has no row for that story, so both paths must report the orphan.
+        StaleConvergenceCase {
+            code: "orphan_deferred_work",
+            setup: |root| {
+                write_qdev_toml(root, "");
+                write_story(root, "E1S1", "Origin");
+                write_at(
+                    root,
+                    "docs/state/dw/DW-1111.md",
+                    &dw_md("DW-1111", "E1S1", "negligible", None),
+                );
+            },
+            conflicted: "docs/specs/stories/E1S1.md",
+            stale_id: Some("E1S1"),
+            reported_live: false,
+            reported_stale: true,
+        },
+        // Both stale at once: the DW row's own skip must take precedence over the origin probe,
+        // which is the interaction the two rules create and the one combination the table
+        // otherwise omits. Neither path may report the orphan — the sweep skips the DW row, the
+        // rebuild has neither row — and both report the two parse failures.
+        StaleConvergenceCase {
+            code: "orphan_deferred_work",
+            setup: |root| {
+                write_qdev_toml(root, "");
+                write_story(root, "E1S1", "Origin");
+                write_at(
+                    root,
+                    "docs/state/dw/DW-3333.md",
+                    &dw_md("DW-3333", "E1S1", "negligible", None),
+                );
+            },
+            // Conflicting the DW file leaves the origin story live; the case below conflicts both.
+            conflicted: "docs/state/dw/DW-3333.md",
+            stale_id: Some("DW-3333"),
+            reported_live: false,
+            reported_stale: false,
+        },
+        // A rationale that *is* present must keep the check silent, so `reported_live: false`
+        // here pins the negative side rather than merely the absence of a trigger.
+        StaleConvergenceCase {
+            code: "dw_missing_rationale",
+            setup: |root| {
+                write_qdev_toml(root, "");
+                write_at(
+                    root,
+                    "docs/state/dw/DW-4444.md",
+                    &dw_md("DW-4444", "", "unacceptable", Some("mitigated in review")),
+                );
+            },
+            conflicted: "docs/state/dw/DW-4444.md",
+            stale_id: Some("DW-4444"),
+            reported_live: false,
+            reported_stale: false,
+        },
+        // The check's own subject is stale: skipped by the sweep, and absent from a rebuild.
+        StaleConvergenceCase {
+            code: "dw_missing_rationale",
+            setup: |root| {
+                write_qdev_toml(root, "");
+                write_at(
+                    root,
+                    "docs/state/dw/DW-2222.md",
+                    &dw_md("DW-2222", "", "unacceptable", None),
+                );
+            },
+            conflicted: "docs/state/dw/DW-2222.md",
+            stale_id: Some("DW-2222"),
+            reported_live: true,
+            reported_stale: false,
+        },
+        StaleConvergenceCase {
+            code: "target_module_not_registered",
+            setup: |root| {
+                write_qdev_toml(root, "");
+                write_at(
+                    root,
+                    "docs/specs/stories/E1S2.md",
+                    &story_with_target_modules("E1S2", &["ghost-module"]),
+                );
+            },
+            conflicted: "docs/specs/stories/E1S2.md",
+            stale_id: Some("E1S2"),
+            reported_live: true,
+            reported_stale: false,
+        },
+        StaleConvergenceCase {
+            code: "entity_file_off_convention",
+            setup: |root| {
+                write_qdev_toml(root, "");
+                write_at(
+                    root,
+                    "docs/specs/stories/off-convention.md",
+                    &story_md("E1S3", "Off"),
+                );
+            },
+            conflicted: "docs/specs/stories/off-convention.md",
+            stale_id: Some("E1S3"),
+            reported_live: true,
+            reported_stale: false,
+        },
+        // `duplicate_planning_id` re-reads the files rather than the cache — the `entities.id`
+        // primary key leaves a second declaration no trace to detect against — so no cached row
+        // backs it and a conflicted member of the pair still declares its id. The case is
+        // asserted anyway: were the check ever rewritten onto the cache, this is where the
+        // divergence would appear.
+        StaleConvergenceCase {
+            code: "duplicate_planning_id",
+            setup: |root| {
+                write_qdev_toml(root, "");
+                write_story(root, "E1S4", "Keeper");
+                write_at(
+                    root,
+                    "docs/specs/stories/E1S4-copy.md",
+                    &story_md("E1S4", "Copy"),
+                );
+            },
+            conflicted: "docs/specs/stories/E1S4-copy.md",
+            stale_id: None,
+            reported_live: true,
+            reported_stale: true,
+        },
+    ];
+
+    let storage = storage();
+    let config = qdev_core::Config::default();
+
+    for case in cases {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        (case.setup)(root);
+
+        // Hydrate the clean tree, so the sweep below has a previous row to retain.
+        let store = ensure_cache(root, &storage).unwrap();
+        let live = finding_keys(&qdev_core::run_validation(&store, root, &config).unwrap());
+        assert_eq!(
+            live.iter().any(|(code, _, _)| code == case.code),
+            case.reported_live,
+            "case '{}': expected reported={} while every row is live: {live:?}",
+            case.code,
+            case.reported_live
+        );
+
+        // Break the file the check derives from. The sweep retains its row, flagged stale; a
+        // rebuild of the same tree has no row for it at all.
+        let path = root.join(case.conflicted);
+        let broken =
+            fs::read_to_string(&path).unwrap() + "<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> b\n";
+        fs::write(&path, broken).unwrap();
+
+        store.sweep_workspace(root, &storage).unwrap();
+        if let Some(id) = case.stale_id {
+            assert!(
+                entity_stale(&store, id),
+                "case '{}': the sweep must retain '{id}' flagged stale, or the case tests nothing",
+                case.code
+            );
+        }
+        let swept = finding_keys(&qdev_core::run_validation(&store, root, &config).unwrap());
+
+        store.reset_and_rebuild(root, &storage).unwrap();
+        let rebuilt = finding_keys(&qdev_core::run_validation(&store, root, &config).unwrap());
+
+        assert_eq!(
+            swept, rebuilt,
+            "case '{}': a sweep and a rebuild of the same tree must report the same findings",
+            case.code
+        );
+        assert_eq!(
+            swept.iter().any(|(code, _, _)| code == case.code),
+            case.reported_stale,
+            "case '{}': expected reported={} once the row it derives from is stale: {swept:?}",
+            case.code,
+            case.reported_stale
+        );
+        assert!(
+            swept
+                .iter()
+                .any(|(code, path, _)| code == "merge_conflict" && path == case.conflicted),
+            "case '{}': the broken file must carry its own merge_conflict finding: {swept:?}",
+            case.code
+        );
+    }
+}
+
+/// Findings as sorted, comparable `(code, path, message)` triples — `found_at` is second-
+/// resolution wall clock and legitimately differs between the two passes.
+fn finding_keys(findings: &[FindingRecord]) -> Vec<(String, String, String)> {
+    let mut keys: Vec<(String, String, String)> = findings
+        .iter()
+        .map(|f| {
+            (
+                f.code.clone(),
+                f.path.clone(),
+                f.message.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// A deferred-work entity file. `origin` is omitted when empty, so a case can exercise the
+/// origin-story probe or leave it out of the picture entirely.
+fn dw_md(id: &str, origin: &str, safety_risk: &str, rationale: Option<&str>) -> String {
+    let mut s = format!("---\nid: {id}\ntitle: \"Deferred {id}\"\nstatus: open\nversion: 1\n");
+    if !origin.is_empty() {
+        s.push_str(&format!("origin_story_id: {origin}\n"));
+    }
+    s.push_str(&format!(
+        "target_module: foundation\nsafety_risk: {safety_risk}\n"
+    ));
+    if let Some(rationale) = rationale {
+        s.push_str(&format!("rationale: \"{rationale}\"\n"));
+    }
+    s.push_str(
+        "created_by:\n  type: human\n  id: alice\nupdated_by:\n  type: human\n  id: alice\n---\nBody\n",
+    );
+    s
+}
+
+/// A story entity file declaring `target_modules`, for the module-registry check.
+fn story_with_target_modules(id: &str, modules: &[&str]) -> String {
+    let list = modules
+        .iter()
+        .map(|m| format!("\"{m}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "---\nid: {id}\ntitle: \"Story {id}\"\nstatus: draft\nversion: 1\ntarget_modules: [{list}]\ncreated_by:\n  type: human\n  id: alice\nupdated_by:\n  type: human\n  id: alice\n---\nBody\n"
+    )
+}

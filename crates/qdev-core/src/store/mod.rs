@@ -40,7 +40,62 @@ pub struct EntityRecord {
     pub target_modules: Option<String>,
 }
 
+/// Whether the cache holds an entity **for the purpose of deriving a finding** — the one place
+/// the rule "a stale row is *absent*" is written down.
+///
+/// Three states rather than a boolean because two derivation sites need to tell `Stale` from
+/// `Absent`: the deferred-work checks skip a stale row (its file's own parse failure is already
+/// reported) but must still report against a row the cache has no entity for at all, which is a
+/// broken cache rather than a known-unparseable file. Everything else wants
+/// [`EntityPresence::exists_for_derivation`], which collapses both into "not there".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityPresence {
+    /// A row is present and its last parse succeeded: the only state a finding may be derived
+    /// from.
+    Live,
+    /// A row is present but retained `stale` — its file failed its last parse, so every cached
+    /// field describes content the file may no longer have.
+    Stale,
+    /// No row at all.
+    Absent,
+}
+
+impl EntityPresence {
+    /// **The rule, in one function.** `stale` is `None` when the cache holds no row for the id,
+    /// `Some(flag)` when it holds one. Every path that answers the derivation question — the
+    /// SQL helper on [`Store`] and the row-in-hand [`EntityRecord::presence_for_derivation`] —
+    /// goes through here, so the rule cannot be spelled two ways.
+    pub fn from_stale_flag(stale: Option<bool>) -> Self {
+        match stale {
+            None => Self::Absent,
+            Some(true) => Self::Stale,
+            Some(false) => Self::Live,
+        }
+    }
+
+    /// True only for [`EntityPresence::Live`]: a stale row does not exist as far as any derived
+    /// finding is concerned.
+    pub fn exists_for_derivation(self) -> bool {
+        matches!(self, Self::Live)
+    }
+}
+
 impl EntityRecord {
+    /// [`EntityPresence`] for a row already in hand, for the checks that iterate
+    /// [`Store::list_entities`] and would otherwise pay one query per row to ask the same
+    /// question. Same rule, same function — see [`EntityPresence::from_stale_flag`].
+    /// Never returns [`EntityPresence::Absent`] — the row is in hand. Callers that only need the
+    /// decision should use [`EntityRecord::exists_for_derivation`] and avoid a dead match arm.
+    pub fn presence_for_derivation(&self) -> EntityPresence {
+        EntityPresence::from_stale_flag(Some(self.stale))
+    }
+
+    /// [`Self::presence_for_derivation`] as the boolean the computed checks want: may a finding
+    /// be derived from this row?
+    pub fn exists_for_derivation(&self) -> bool {
+        self.presence_for_derivation().exists_for_derivation()
+    }
+
     pub fn created_by_type(&self) -> Option<&str> {
         self.created_by.as_ref().map(|a| a.author_type.as_str())
     }
@@ -256,9 +311,46 @@ pub struct EntityFilter {
 pub trait Store: Send + Sync {
     // Entities
     fn upsert_entity(&self, record: &EntityRecord) -> Result<(), QdevError>;
+    /// Returns the row as stored, **stale rows included**. Reads must keep working: `qdev get`
+    /// and `qdev list` return a stale entity with its `stale` flag set, which is what retention
+    /// exists for. A site that derives a *finding* from an entity's existence must ask
+    /// [`Store::entity_exists_for_derivation`] instead — a bare `get_entity(..).is_some()` at
+    /// such a site is the defect this pair of methods exists to prevent.
     fn get_entity(&self, id: &str) -> Result<Option<EntityRecord>, QdevError>;
+    /// Every row, stale ones included — the same read `get_entity` is, in list form.
+    ///
+    /// A derivation site iterating these must ask each row
+    /// [`EntityRecord::exists_for_derivation`]; a bare iteration treats pre-edit content as
+    /// current, which is the defect [`Store::entity_presence_for_derivation`] exists to prevent.
     fn list_entities(&self, filter: &EntityFilter) -> Result<Vec<EntityRecord>, QdevError>;
     fn delete_entity(&self, id: &str) -> Result<bool, QdevError>;
+
+    /// **The one answer to "does this entity exist, for the purpose of deriving a finding?"**
+    /// A stale row is [`EntityPresence::Stale`], never `Live`, so it is absent to every derived
+    /// finding — which is what makes an incremental sweep (which retains stale rows) and a full
+    /// rebuild (which has none) report the same list. Most callers want the boolean
+    /// [`Store::entity_exists_for_derivation`]; take the three-state answer only when `Stale`
+    /// and `Absent` must be told apart.
+    ///
+    /// **Provided, not required.** The rule is written down once, here, in terms of
+    /// [`Store::get_entity`] — so an implementor cannot spell it differently, which is the
+    /// mistake this whole helper exists to make impossible. An implementation may override it
+    /// for a cheaper read (`SqliteStore` fetches the flag alone rather than the whole row), but
+    /// it must return exactly what this default would.
+    fn entity_presence_for_derivation(&self, id: &str) -> Result<EntityPresence, QdevError> {
+        Ok(EntityPresence::from_stale_flag(
+            self.get_entity(id)?.map(|entity| entity.stale),
+        ))
+    }
+
+    /// [`Store::entity_presence_for_derivation`] as a boolean, for the derivation sites that do
+    /// not care *why* an entity is not there. Provided, not required: an implementor cannot get
+    /// the rule wrong here.
+    fn entity_exists_for_derivation(&self, id: &str) -> Result<bool, QdevError> {
+        Ok(self
+            .entity_presence_for_derivation(id)?
+            .exists_for_derivation())
+    }
 
     // Story details
     fn upsert_story_details(&self, story: &StoryRecord) -> Result<(), QdevError>;

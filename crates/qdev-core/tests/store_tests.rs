@@ -1385,3 +1385,63 @@ fn test_newer_than_supported_cache_is_refused_not_rebuilt() {
         .unwrap();
     assert_eq!(user_ver, CACHE_SCHEMA_VERSION + 1);
 }
+
+/// The rule lives in one place now — `EntityPresence::from_stale_flag`, reached through
+/// `Store::entity_presence_for_derivation`. `SqliteStore` overrides it for a cheaper read, so the
+/// override must return exactly what the provided default would. Nothing tested the mapping
+/// directly: every other test reaches it through `run_validation`.
+#[test]
+fn test_entity_presence_for_derivation_maps_all_three_states() {
+    use qdev_core::store::EntityPresence;
+
+    let store = SqliteStore::open_in_memory().unwrap();
+
+    assert_eq!(
+        store.entity_presence_for_derivation("E1S1").unwrap(),
+        EntityPresence::Absent,
+        "no row at all"
+    );
+
+    let mut record = EntityRecord {
+        id: "E1S1".to_string(),
+        kind: EntityKind::Story,
+        title: Some("One".to_string()),
+        status: Some("draft".to_string()),
+        owners: None,
+        source_path: "docs/specs/stories/E1S1.md".to_string(),
+        content_hash: "hash".to_string(),
+        version: 1,
+        created_by: Some(Author::new("human", "simon")),
+        updated_by: Some(Author::new("human", "simon")),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+        stale: false,
+        epic_id: Some("E1".to_string()),
+        seq: Some(1),
+        appetite: None,
+        safety_class: None,
+        target_modules: None,
+    };
+    store.upsert_entity(&record).unwrap();
+    assert_eq!(
+        store.entity_presence_for_derivation("E1S1").unwrap(),
+        EntityPresence::Live
+    );
+    assert!(store.entity_exists_for_derivation("E1S1").unwrap());
+
+    record.stale = true;
+    store.upsert_entity(&record).unwrap();
+    assert_eq!(
+        store.entity_presence_for_derivation("E1S1").unwrap(),
+        EntityPresence::Stale,
+        "a retained row is present but must not be derived from"
+    );
+    assert!(
+        !store.entity_exists_for_derivation("E1S1").unwrap(),
+        "stale means absent for derivation"
+    );
+    // ...while the read is untouched, which is what retention exists for.
+    assert!(
+        store.get_entity("E1S1").unwrap().is_some_and(|e| e.stale),
+        "reads still return the stale row with its flag"
+    );
+}

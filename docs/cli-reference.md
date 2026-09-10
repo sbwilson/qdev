@@ -513,8 +513,12 @@ The set covers both the findings hydration recorded in the cache (`schema_violat
 `entity_file_off_convention`). Computed findings are never written back to the cache: a
 persisted one would outlive the defect it describes. `duplicate_planning_id` covers every
 directory hydration reads — `specs_dir` and `state_dir` — and the four checks that read cached
-rows skip rows flagged `stale`, so no finding is derived from content a file no longer has (see
-architecture §11, "The convergence invariant").
+rows treat a row flagged `stale` as *absent*, so no finding is derived from content a file no
+longer has, and none from an entity a check merely refers to either: a deferred-work row whose
+origin story is merge-conflicted reports `orphan_deferred_work`, exactly as a rebuild of the same
+tree does. One helper on the store answers that existence question for every derivation site (see
+architecture §11, "The convergence invariant"). Reads are unaffected — `qdev get` and `qdev list`
+still return a stale entity with its `stale` flag set.
 
 Because those checks re-read the workspace's spec files, `doctor` now costs a directory walk
 that it did not before — noticeable only on large workspaces, where the cheap sections still
