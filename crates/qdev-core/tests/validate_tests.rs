@@ -1188,3 +1188,77 @@ fn test_deferred_work_with_no_entity_row_is_still_reported() {
         EntityPresence::Absent
     );
 }
+
+/// **The stale exception, made enforceable.** `ids_in_use_from_scan` reads the *unfiltered*
+/// `list_entities` deliberately, and until this test nothing but a comment protected that: the
+/// architecture rule "every derivation site asks the presence helper" makes filtering here look
+/// like a consistency fix, and the suite stayed green when it was applied.
+///
+/// It is not a consistency fix, because this is a different question. The computed checks ask
+/// *may a finding be derived from this row's content* — for which a stale row's pre-edit fields
+/// are worthless. An allocator asks *is this id taken*, and a stale row is a hydrated entity
+/// whose id is precisely the one the filesystem halves can no longer see: its file is unreadable
+/// or unparseable, so it declares nothing, and here its name carries nothing either. Filter the
+/// listing and the id is handed to a second entity — a duplicate minted by the tool.
+///
+/// Reverting the mechanism — `.filter(|e| e.exists_for_derivation())` on the listing in
+/// `validate::ids_in_use_from_scan` — fails this test on both assertions.
+#[test]
+fn test_ids_in_use_includes_a_stale_rows_id_and_allocation_skips_it() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let storage = qdev_core::StorageConfig::default();
+
+    // The declared and carried halves must see nothing, or the test would pass for the wrong
+    // reason: the file is named so it carries no id, and its content will not parse as
+    // frontmatter, so it declares none either. This is the shape a retained stale row has.
+    let stories = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories).unwrap();
+    fs::write(
+        stories.join("notes-for-the-first-story.md"),
+        "this was a story once; its frontmatter is gone\n",
+    )
+    .unwrap();
+
+    let filesystem_only = qdev_core::ids_in_use(root, &storage, None).unwrap();
+    assert!(
+        !filesystem_only.contains("E1S1"),
+        "fixture is wrong: the filesystem halves must not supply the id, or this test would \
+         pass with the cache half filtered out entirely: {filesystem_only:?}"
+    );
+
+    let store = SqliteStore::open_in_memory().unwrap();
+    let mut row = entity(
+        "E1S1",
+        EntityKind::Story,
+        "docs/specs/stories/notes-for-the-first-story.md",
+    );
+    row.stale = true;
+    store.upsert_entity(&row).unwrap();
+
+    // The stale row is treated as absent for *derivation* — that rule is unchanged, and pinning
+    // it here is what makes the divergence below deliberate rather than an oversight.
+    assert!(
+        !store
+            .get_entity("E1S1")
+            .unwrap()
+            .unwrap()
+            .exists_for_derivation(),
+        "a stale row does not exist for derivation"
+    );
+
+    // ...and its id is still taken.
+    let with_cache = qdev_core::ids_in_use(root, &storage, Some(&store)).unwrap();
+    assert!(
+        with_cache.contains("E1S1"),
+        "a stale row's id is still owned by the workspace: {with_cache:?}"
+    );
+
+    // Which is the only thing an allocator was ever asking about.
+    let allocated = qdev_core::allocate_next_story_id_in(root, &storage, 1, Some(&store)).unwrap();
+    assert_eq!(
+        allocated.to_string(),
+        "E1S2",
+        "allocation must skip the stale row's id rather than mint a duplicate of it"
+    );
+}

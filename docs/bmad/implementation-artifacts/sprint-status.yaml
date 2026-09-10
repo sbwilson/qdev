@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-11-2026 12:00
+last_updated: 09-11-2026 14:00
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -48,6 +48,7 @@ development_status:
   1-20-stale-means-absent: done
   1-21-relation-command-contracts: done
   1-22-init-cache-migration: done
+  1-23-hex-allocators-and-invariant-coverage: done
 
   epic-2: backlog
   2-1-state-machine-lifecycle-hooks: backlog

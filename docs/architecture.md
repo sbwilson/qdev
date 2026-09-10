@@ -283,10 +283,13 @@ entity is immediately writable, and reports the move in its payload.
 ### In use: one rule for which ids are taken
 
 The rule above answers "which file is entity `X`?". Its completion answers "is `X` already
-taken?", and **one function answers it for everything that allocates an id** — `qdev create
-story` and `qdev validate --fix-ids` alike. Neither keeps a scan of its own: four components used
-to answer this question and the allocator answered differently (one flat directory,
-case-sensitively, filenames only), so `create story` handed out ids other files already declared.
+taken?", and **every allocator asks `validate::ids_in_use`** — `qdev create story`,
+`qdev validate --fix-ids`, and the `DW-`/`DEC-` hex allocators. No allocator keeps a scan of its
+own: four components used to answer this question and the allocator answered differently (one
+flat directory, case-sensitively, filenames only), so `create story` handed out ids other files
+already declared. The hex allocators were the second instance of exactly that, closed the same
+way — the id set is resolved at their entry points and the collision test is set membership, so
+there is no path left in them for a private scan to reappear on.
 
 An id is in use if it is any of three things, because each is a way a workspace already owns it:
 
@@ -300,10 +303,39 @@ An id is in use if it is any of three things, because each is a way a workspace 
   unreadable. The cache is a union *member*, not the source: `qdev create story` works in a bare
   directory with no cache at all, from the filesystem alone.
 
-`qdev create story` allocates one past the highest number its epic has used — never a lower free one, because an id is a citation target and AD-7 calls them immutable once committed, so a gap is left deliberately. `qdev validate --fix-ids` takes the lowest free number instead (`next_available_id`), because a renumber must land somewhere free. Both read the same in-use set, and
-refuses rather than colliding when it cannot. Two files *carrying* one id in their names without
+An id is owned **workspace-wide, not per-directory**: a `DW-` id declared by a file outside
+`<state_dir>/dw/` is taken, because an id is what a citation names and the directory it happens
+to sit in does not narrow that.
+
+Occupancy follows the identity rule above: a name occupies an id when the rule *resolves* it —
+`<id>.md`, `<id>-<slug>.md`, `<id>_<slug>.md`, extension case-insensitive. Names outside it
+(`DW-7f3a.notes.md`, a `DW-7f3a.txt` sidecar) occupy nothing, and that is narrower than the
+deleted per-directory scan, which refused anything merely *starting* with `DW-7f3a.`. Deliberate:
+`create dw` would write `DW-7f3a.md`, which collides with neither, and one rule for resolution
+and occupancy is the whole point.
+
+The **hex comparison is case-insensitive** on both sides, because a `DW-`/`DEC-` hash is
+canonically lowercase while the declared half contributes the verbatim frontmatter string: `id:
+DW-7F3A` still takes `dw-7f3a`'s space, even though `DW-7F3A` is not itself a legal id (the
+grammar admits only `0-9a-f`). The story allocator reads the same set through
+`Identifier`-parsing, which *is* case-sensitive, so `id: e1s7` sits in the set without affecting
+`E1` numbering — a file declaring it is a schema violation to fix, not an id to work around.
+
+Each allocator keeps its own *strategy* over that one set. `qdev create story` allocates one past the highest number its epic has used — never a lower free one, because an id is a citation target and AD-7 calls them immutable once committed, so a gap is left deliberately. `qdev validate --fix-ids` takes the lowest free number instead (`next_available_id`), because a renumber must land somewhere free. Both read the same in-use set, and `--fix-ids`
+refuses rather than colliding when it cannot place an entry (the paragraph below). Neither hands
+out an id the set contains — with one known exception, on the hex allocators: after 4 → 6 → 8
+growth and 100 retries all collide, `allocate_hex_id_with_rng` returns its taken 8-character
+candidate rather than failing. Pre-existing, filed, and reachable only by exhausting a
+16^8 space; the fix is an `id_space_exhausted` failure, due before those allocators get a
+caller. Two files *carrying* one id in their names without
 either declaring it is an off-convention name, not a collision — `duplicate_planning_id` still
-reports declarations only.
+reports declarations only. The hex allocators stay random — 4 hex characters growing to 6 then 8
+on collision, then bounded retries — because `DW-`/`DEC-` ids are not sequential and must not
+become sequential.
+
+Allocation answers ownership, not reservation: two allocations resolving the set before either
+writes get the same id. Every writer holds the advisory write lock, so this is a question for the
+first caller that allocates outside one — filed, not solved here.
 
 Because the whole in-use set is checked, `--fix-ids` can meet a duplicate whose file lives outside
 its kind's directory. It refuses that entry, records it as skipped and names the expected path:
@@ -502,12 +534,14 @@ Two deliberate exceptions, both narrow:
 
   Three deliberate exceptions, each named at its site, all narrow, and all of them look like the bug:
   - `deferred_work_path` asks the unfiltered `get_entity` for a *path to report against*. A stale row's `source_path` is still the path of the file the finding is about.
-  - `ids_in_use` asks the unfiltered `list_entities` about *id ownership*. A stale row's id is still taken; filtering it would hand that id to a second entity.
+  - `ids_in_use` asks the unfiltered `list_entities` about *id ownership*. A stale row's id is still taken; filtering it would hand that id to a second entity. This one is the easiest of the three to "fix" by mistake — the rule above reads as a consistency requirement — so it is pinned by a named test (`test_ids_in_use_includes_a_stale_rows_id_and_allocation_skips_it`) on a fixture whose declared and carried halves see nothing, and applying the filter fails it.
   - The relation-graph queries keep their `WHERE stale = 0` in SQL. They validate the whole graph in one query, and pulling that through a per-row helper would trade one query for N.
 
   Reads are untouched — `get_entity`, `list_entities` and the `qdev get`/`qdev list` payloads still return a stale entity with its `stale` flag set, which is what the retention exists for.
 
 **When two files declare one id, the last in sorted path order owns the cache row.** Both paths follow it — the rebuild by walking sorted, the sweep by re-parsing both files (each is unaccounted-for once the other takes the row) and finishing with the same winner. Note `qdev validate --fix-ids` renumbers the *other* way round, keeping the id on the first sorted path, so the file it renumbers is the one holding the row.
+
+Nothing persists "this path lost", which is what makes the winner stable rather than merely reproducible on the first pass: the displaced file has no `entities` row and no `schema_violation`/`merge_conflict`/`read_error` finding, so the accounted-for gate re-reads and re-hydrates it on every pass and the sorted-last path takes the row back each time. The cost is that a standing duplicate never reaches the `unchanged` fast path — every participating file re-parses on every boot until the `error`-severity `duplicate_planning_id` is fixed. Repeated sweeps over a duplicate pair and over a triple are pinned against a full rebuild, table by table, in `sweep_tests`.
 
 Duplicate-id detection (`duplicate_planning_id`) covers every directory hydration reads — `specs_dir` **and** `state_dir` — so a collision among sprints, deferred work, decisions, releases or SOUP is reported like one among stories.
 

@@ -138,11 +138,20 @@ pub fn find_duplicate_planning_ids(
 }
 
 /// **The one authority on which ids a workspace already owns.** Every caller that allocates an
-/// id — `qdev create story` ([`crate::id::allocate_next_story_id_in`]) and
-/// `qdev validate --fix-ids` — asks this for the id space. They then allocate differently, and
-/// deliberately: `--fix-ids` takes the lowest free number via
-/// [`next_available_id`]. Neither keeps a scan of its own, so the two allocators cannot disagree
-/// about what is taken.
+/// id asks this for the id space: `qdev create story`
+/// ([`crate::id::allocate_next_story_id_in`]), `qdev validate --fix-ids`, and the `DW-`/`DEC-`
+/// hex allocators ([`crate::id::allocate_deferred_work_id_in_with_rng`],
+/// [`crate::id::allocate_decision_id_in_with_rng`]). They then allocate differently, and
+/// deliberately: `--fix-ids` takes the lowest free number via [`next_available_id`], and the hex
+/// pair stay random with length growth. **None of them keeps a scan of its own** — the hex pair
+/// did until `spec-hex-allocators-and-invariant-coverage.md`, and it disagreed with this set on
+/// five separate axes. Do not add a fourth answer here.
+///
+/// Membership is compared verbatim by the `HashSet`. The hex allocators lowercase both sides
+/// before testing, because a hex hash is canonically lowercase while the declared half below
+/// contributes whatever the frontmatter says. The story allocator instead parses each member as
+/// an [`crate::id::Identifier`], which is case-sensitive, so a mis-cased planning id (`id: e1s7`)
+/// is in this set but not in its numbering — such a file is a schema violation in its own right.
 ///
 /// The answer is a union of three memberships, because each is a way a workspace can already own
 /// an id:
@@ -162,6 +171,10 @@ pub fn find_duplicate_planning_ids(
 /// Four components used to answer "does this id already exist?" and the allocator answered
 /// differently — one flat directory, case-sensitively, filenames only — so `create story` handed
 /// out ids other files already declared. This is that one answer.
+///
+/// It answers *ownership*, not reservation: two allocations that resolve this set before either
+/// writes its file get the same id. There is no reservation protocol, and none is needed while
+/// every allocator's caller writes under the advisory write lock.
 pub fn ids_in_use(
     workspace_root: &Path,
     storage: &crate::config::StorageConfig,

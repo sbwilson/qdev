@@ -2907,3 +2907,195 @@ fn story_with_target_modules(id: &str, modules: &[&str]) -> String {
         "---\nid: {id}\ntitle: \"Story {id}\"\nstatus: draft\nversion: 1\ntarget_modules: [{list}]\ncreated_by:\n  type: human\n  id: alice\nupdated_by:\n  type: human\n  id: alice\n---\nBody\n"
     )
 }
+
+// ---------------------------------------------------------------------------
+// Repeated sweeps over a standing duplicate converge on the rebuild's winner
+// ---------------------------------------------------------------------------
+//
+// The convergence invariant is asserted one pass deep everywhere else in this file: every
+// existing duplicate test sweeps exactly once. The property that makes the invariant hold
+// *across* passes — the same path owns the row every time, and it is the path a full rebuild
+// picks — was verified by hand at a terminal and by nothing else.
+//
+// Why it holds, because a test that does not say this is easy to write wrong: nothing persists
+// "this path lost". The displaced file has no `entities` row and no `schema_violation`,
+// `merge_conflict` or `read_error` finding, so the sweep's accounted-for gate re-reads and
+// re-hydrates it on every pass; the loop walks in sorted order, so the earlier path takes the
+// row first and the sorted-last one takes it back. Reverting either half of that mechanism — the
+// accounted-for gate, or the sorted walk — moves the winner, which is what these tests fail on.
+
+/// Sweeps `root` `passes` times with no edits between them, asserting after each pass that
+/// `winner` still owns the row for `id` and that the pair never reaches the `unchanged` fast
+/// path. Returns nothing: the interesting output is the assertions.
+#[allow(clippy::too_many_arguments)]
+fn assert_winner_stable_across_sweeps(
+    store: &SqliteStore,
+    root: &Path,
+    storage: &qdev_core::StorageConfig,
+    id: &str,
+    winner: &str,
+    expected_parsed: usize,
+    expected_unchanged: usize,
+    passes: usize,
+) {
+    for pass in 1..=passes {
+        let summary = store.sweep_workspace(root, storage).unwrap();
+        assert_eq!(
+            store.get_entity(id).unwrap().unwrap().source_path,
+            winner,
+            "pass {pass}: the winner moved, so repeated sweeps do not converge"
+        );
+        assert_eq!(
+            summary.purged, 0,
+            "pass {pass}: nothing was removed from disk, so nothing may be purged"
+        );
+        // The cost of the tie-break, asserted rather than left implicit: a standing duplicate
+        // re-parses every participating file on every boot, because restoring a missing row
+        // requires re-reading the file that would own it.
+        assert_eq!(
+            summary.parsed, expected_parsed,
+            "pass {pass}: a standing duplicate never reaches the unchanged fast path"
+        );
+        // The other half of the same count, and the half a `parsed`-only assertion cannot pin:
+        // every file that is *not* a duplicate participant does reach the fast path, so a
+        // regression that re-parsed the whole tree would keep `parsed` right and move this.
+        assert_eq!(
+            summary.unchanged, expected_unchanged,
+            "pass {pass}: files outside the duplicate must still be skipped"
+        );
+    }
+}
+
+/// A sweep and a rebuild of `root` must leave the same rows in every table. `sync_meta` is
+/// skipped: it stamps *when* a pass ran, not what it found, so it is expected to advance.
+fn assert_sweep_equals_rebuild(
+    store: &SqliteStore,
+    root: &Path,
+    storage: &qdev_core::StorageConfig,
+) {
+    let swept = dump_tables(&cache_db(root));
+    store.reset_and_rebuild(root, storage).unwrap();
+    let rebuilt = dump_tables(&cache_db(root));
+    for &table in ALL_TABLE_NAMES {
+        if table == "sync_meta" {
+            continue;
+        }
+        assert_eq!(
+            swept.get(table),
+            rebuilt.get(table),
+            "table '{table}' diverges between repeated sweeps and a rebuild"
+        );
+    }
+}
+
+#[test]
+fn test_repeated_sweeps_over_a_duplicate_pair_keep_one_winner_and_equal_a_rebuild() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "Keeper");
+    write_at(
+        root,
+        "docs/specs/stories/E1S1-copy.md",
+        &story_md("E1S1", "Copy"),
+    );
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    // `E1S1-copy.md` sorts before `E1S1.md` (`-` < `.`), so the canonical name is the sorted-last
+    // path and owns the row. `--fix-ids` keeps the id on the *first* sorted path instead; the two
+    // rules are deliberately opposite and both are stated in architecture.md §11.
+    assert_eq!(
+        store.get_entity("E1S1").unwrap().unwrap().source_path,
+        "docs/specs/stories/E1S1.md",
+        "the last path in sorted order owns the row"
+    );
+
+    assert_winner_stable_across_sweeps(
+        &store,
+        root,
+        &storage,
+        "E1S1",
+        "docs/specs/stories/E1S1.md",
+        2,
+        1,
+        3,
+    );
+
+    // One row for the id, however many files declare it - the `entities.id` PRIMARY KEY - so the
+    // repeated passes cannot have been converging by accumulating rows.
+    assert_eq!(count_rows(root, "SELECT COUNT(*) FROM entities;"), 1);
+
+    // Stability is not the same as acceptance: the condition the passes converge *on* is an
+    // error-severity finding telling the user to fix it. It comes from the live scan rather than
+    // the cache, because the id primary key leaves no trace of the loser, which is why no
+    // assertion on `findings` above could have caught it.
+    let duplicates = qdev_core::find_duplicate_planning_ids(root, &storage).unwrap();
+    assert_eq!(
+        duplicates.len(),
+        2,
+        "both participating paths must be reported: {duplicates:?}"
+    );
+    assert!(duplicates
+        .iter()
+        .all(|f| f.code == "duplicate_planning_id" && f.severity == "error"));
+
+    assert_sweep_equals_rebuild(&store, root, &storage);
+}
+
+#[test]
+fn test_repeated_sweeps_over_three_files_declaring_one_id_keep_one_winner() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    // The matrix's triple: `X.md`, `X-b.md`, `X-c.md`. Every existing duplicate fixture in this
+    // file is a *pair*, and a pair cannot distinguish "the sorted-last path wins" from "the
+    // second file wins" or "the last file walked wins".
+    write_story(root, "E1S1", "Canonical");
+    write_at(
+        root,
+        "docs/specs/stories/E1S1-b.md",
+        &story_md("E1S1", "Copy b"),
+    );
+    write_at(
+        root,
+        "docs/specs/stories/E1S1-c.md",
+        &story_md("E1S1", "Copy c"),
+    );
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    assert_winner_stable_across_sweeps(
+        &store,
+        root,
+        &storage,
+        "E1S1",
+        "docs/specs/stories/E1S1.md",
+        3,
+        1,
+        3,
+    );
+    assert_eq!(count_rows(root, "SELECT COUNT(*) FROM entities;"), 1);
+    assert_sweep_equals_rebuild(&store, root, &storage);
+
+    // With the canonical name removed the winner must move to the sorted-last *survivor*, not to
+    // the first-walked file. Without this the fixture could not tell the tie-break apart from
+    // "the canonical name wins", since any `-suffix` name sorts before `E1S1.md`.
+    fs::remove_file(story_path(root, "E1S1")).unwrap();
+    // One settling pass, which legitimately purges the removed path's row before re-hydrating
+    // the survivors; the stability loop below then runs on an unedited tree.
+    let settled = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(settled.purged, 1, "the removed file's row must be purged");
+    assert_winner_stable_across_sweeps(
+        &store,
+        root,
+        &storage,
+        "E1S1",
+        "docs/specs/stories/E1S1-c.md",
+        2,
+        1,
+        3,
+    );
+    assert_eq!(count_rows(root, "SELECT COUNT(*) FROM entities;"), 1);
+    assert_sweep_equals_rebuild(&store, root, &storage);
+}

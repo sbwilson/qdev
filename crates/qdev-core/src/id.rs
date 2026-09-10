@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
@@ -566,52 +567,53 @@ fn generate_random_hex<R: rand::Rng>(rng: &mut R, count: usize) -> String {
     s
 }
 
-fn hex_id_collides(dir: &Path, prefix: &str, hash: &str) -> bool {
-    let exact = dir.join(format!("{}-{}.md", prefix, hash));
-    if exact.exists() {
-        return true;
-    }
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        let prefix_dash = format!("{}-{}-", prefix, hash);
-        let prefix_underscore = format!("{}-{}_", prefix, hash);
-        let prefix_dot = format!("{}-{}.", prefix, hash);
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with(&prefix_dash)
-                    || name.starts_with(&prefix_underscore)
-                    || name.starts_with(&prefix_dot)
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+/// True when `{prefix}-{hash}` is a member of the workspace's in-use id set.
+///
+/// `used_lower` holds the set lowercased, because its members disagree on case by construction:
+/// the carried and cached halves contribute canonical `Identifier::to_string()` spellings (a
+/// `DW-`/`DEC-` hash is canonically lowercase) while the declared half contributes the
+/// *verbatim* frontmatter string, so a file saying `id: DW-7F3A` must still take `dw-7f3a`'s
+/// space.
+fn hex_id_taken(used_lower: &HashSet<String>, prefix: &str, hash: &str) -> bool {
+    used_lower.contains(&format!("{}-{}", prefix, hash).to_ascii_lowercase())
 }
 
+/// The hex allocation *strategy*: 4 random hex characters, growing to 6 then 8 while the
+/// candidate is taken, then up to 100 fresh 8-character attempts.
+///
+/// Pure by construction: the id space arrives as a set and collision testing is set membership,
+/// so there is no path in here for a private scan to reappear on — which is the point, since
+/// this function used to keep one. (`spec-hex-allocators-and-invariant-coverage.md` records what
+/// that scan missed.)
+///
+/// **On exhaustion it returns a hash it knows is taken** — the 8-character candidate from step 3,
+/// not the last retry. Pre-existing behaviour, kept deliberately by this change and no longer
+/// harmless now that the oracle is authoritative: a caller writing that id would collide with an
+/// entity that already owns it. There is no such caller yet, and turning it into an
+/// `id_space_exhausted` failure (as `allocate_next_story_id_in` does for its own space) is filed
+/// in `deferred-work.md` for whoever adds one.
 fn allocate_hex_id_with_rng<R: rand::Rng>(
-    workspace_root: &Path,
-    rel_dir: &str,
+    used: &HashSet<String>,
     prefix: &str,
     rng: &mut R,
 ) -> String {
-    let dir = workspace_root.join(rel_dir);
+    let used_lower: HashSet<String> = used.iter().map(|id| id.to_ascii_lowercase()).collect();
 
     // 1. Generate 4 random hex characters
     let mut hash = generate_random_hex(rng, 4);
-    if !hex_id_collides(&dir, prefix, &hash) {
+    if !hex_id_taken(&used_lower, prefix, &hash) {
         return hash;
     }
 
-    // 2. Extend to 6 if a file with that ID already exists
+    // 2. Extend to 6 if that id is already owned
     hash.push_str(&generate_random_hex(rng, 2));
-    if !hex_id_collides(&dir, prefix, &hash) {
+    if !hex_id_taken(&used_lower, prefix, &hash) {
         return hash;
     }
 
     // 3. Extend to 8 if a collision persists
     hash.push_str(&generate_random_hex(rng, 2));
-    if !hex_id_collides(&dir, prefix, &hash) {
+    if !hex_id_taken(&used_lower, prefix, &hash) {
         return hash;
     }
 
@@ -619,72 +621,94 @@ fn allocate_hex_id_with_rng<R: rand::Rng>(
     const MAX_RETRIES: usize = 100;
     for _ in 0..MAX_RETRIES {
         let retry_hash = generate_random_hex(rng, 8);
-        if !hex_id_collides(&dir, prefix, &retry_hash) {
+        if !hex_id_taken(&used_lower, prefix, &retry_hash) {
             return retry_hash;
         }
     }
 
+    // Exhausted: this is the step-3 candidate, and it is taken. See the note in the rustdoc.
     hash
 }
 
-/// Allocates a new Deferred Work identifier (`DW-{hex4+}`) using the provided random generator.
-/// Generates 4 random hex characters, extending to 6 and 8 on file collisions under `docs/state/dw/`.
+/// Allocates a new Deferred Work identifier (`DW-{hex4+}`) using the provided random generator,
+/// assuming the default `[storage]` layout and no cache.
+///
+/// **Against a workspace with a configured `[storage]` this asks about the wrong tree**; against
+/// an initialised workspace it cannot see ids that live only in the cache. Use
+/// [`allocate_deferred_work_id_in_with_rng`] for either.
 pub fn allocate_deferred_work_id_with_rng<R: rand::Rng>(
     workspace_root: &Path,
     rng: &mut R,
-) -> Identifier {
-    allocate_deferred_work_id_in_with_rng(workspace_root, &StorageConfig::default(), rng)
+) -> Result<Identifier, QdevError> {
+    allocate_deferred_work_id_in_with_rng(workspace_root, &StorageConfig::default(), rng, None)
 }
 
-/// `allocate_deferred_work_id_with_rng`, scanning `storage.state_dir` rather than the default.
+/// Allocates a new Deferred Work identifier (`DW-{hex4+}`) from the workspace's in-use id set.
+///
+/// # One rule for which ids are in use
+///
+/// This allocator keeps no scan of its own. Like
+/// [`allocate_next_story_id_in`], it asks [`crate::validate::ids_in_use`] which ids the
+/// workspace already owns — declared ∪ carried ∪ cached, recursive over `specs_dir` and
+/// `state_dir`, with hydration's case-insensitive `.md` rule — and then applies its own
+/// *strategy* to that one set. The strategy is unchanged (random hex, 4 → 6 → 8, then bounded
+/// retries): `DW-` ids are not sequential and must not become sequential.
+///
+/// Ownership is workspace-wide, not per-directory: a `DW-` id declared by a file outside
+/// `<state_dir>/dw/` is taken, because the id — not the directory — is what a citation names.
+///
+/// `store` is a *union member*, not the source: `None` means "answer from the filesystem alone",
+/// which is what an uninitialised workspace can offer. Passing it covers the one case the
+/// filesystem cannot answer — an id belonging to a hydrated entity whose file has since become
+/// unreadable, or a row retained stale.
 pub fn allocate_deferred_work_id_in_with_rng<R: rand::Rng>(
     workspace_root: &Path,
     storage: &StorageConfig,
     rng: &mut R,
-) -> Identifier {
-    let hash = allocate_hex_id_with_rng(
-        workspace_root,
-        &format!("{}/dw", storage.state_dir),
-        "DW",
-        rng,
-    );
-    Identifier::DeferredWork { hash }
+    store: Option<&dyn crate::store::Store>,
+) -> Result<Identifier, QdevError> {
+    let used = crate::validate::ids_in_use(workspace_root, storage, store)?;
+    let hash = allocate_hex_id_with_rng(&used, "DW", rng);
+    Ok(Identifier::DeferredWork { hash })
 }
 
-/// Allocates a new Deferred Work identifier (`DW-{hex4+}`).
-/// Generates 4 random hex characters, extending to 6 and 8 on file collisions under `docs/state/dw/`.
-pub fn allocate_deferred_work_id(workspace_root: &Path) -> Identifier {
+/// Allocates a new Deferred Work identifier (`DW-{hex4+}`), assuming the default `[storage]`
+/// layout and no cache — see [`allocate_deferred_work_id_with_rng`] for what that costs.
+pub fn allocate_deferred_work_id(workspace_root: &Path) -> Result<Identifier, QdevError> {
     let mut rng = rand::rng();
     allocate_deferred_work_id_with_rng(workspace_root, &mut rng)
 }
 
-/// Allocates a new Decision identifier (`DEC-{hex4+}`) using the provided random generator.
-/// Generates 4 random hex characters, extending to 6 and 8 on file collisions under `docs/state/decisions/`.
+/// Allocates a new Decision identifier (`DEC-{hex4+}`) using the provided random generator,
+/// assuming the default `[storage]` layout and no cache.
+///
+/// **Against a workspace with a configured `[storage]` this asks about the wrong tree**; against
+/// an initialised workspace it cannot see ids that live only in the cache. Use
+/// [`allocate_decision_id_in_with_rng`] for either.
 pub fn allocate_decision_id_with_rng<R: rand::Rng>(
     workspace_root: &Path,
     rng: &mut R,
-) -> Identifier {
-    allocate_decision_id_in_with_rng(workspace_root, &StorageConfig::default(), rng)
+) -> Result<Identifier, QdevError> {
+    allocate_decision_id_in_with_rng(workspace_root, &StorageConfig::default(), rng, None)
 }
 
-/// `allocate_decision_id_with_rng`, scanning `storage.state_dir` rather than the default.
+/// Allocates a new Decision identifier (`DEC-{hex4+}`) from the workspace's in-use id set — the
+/// same one question [`allocate_deferred_work_id_in_with_rng`] asks, with the same strategy over
+/// the answer.
 pub fn allocate_decision_id_in_with_rng<R: rand::Rng>(
     workspace_root: &Path,
     storage: &StorageConfig,
     rng: &mut R,
-) -> Identifier {
-    let hash = allocate_hex_id_with_rng(
-        workspace_root,
-        &format!("{}/decisions", storage.state_dir),
-        "DEC",
-        rng,
-    );
-    Identifier::Decision { hash }
+    store: Option<&dyn crate::store::Store>,
+) -> Result<Identifier, QdevError> {
+    let used = crate::validate::ids_in_use(workspace_root, storage, store)?;
+    let hash = allocate_hex_id_with_rng(&used, "DEC", rng);
+    Ok(Identifier::Decision { hash })
 }
 
-/// Allocates a new Decision identifier (`DEC-{hex4+}`).
-/// Generates 4 random hex characters, extending to 6 and 8 on file collisions under `docs/state/decisions/`.
-pub fn allocate_decision_id(workspace_root: &Path) -> Identifier {
+/// Allocates a new Decision identifier (`DEC-{hex4+}`), assuming the default `[storage]` layout
+/// and no cache — see [`allocate_decision_id_with_rng`] for what that costs.
+pub fn allocate_decision_id(workspace_root: &Path) -> Result<Identifier, QdevError> {
     let mut rng = rand::rng();
     allocate_decision_id_with_rng(workspace_root, &mut rng)
 }
