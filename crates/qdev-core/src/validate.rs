@@ -173,8 +173,15 @@ pub fn find_duplicate_planning_ids(
 /// out ids other files already declared. This is that one answer.
 ///
 /// It answers *ownership*, not reservation: two allocations that resolve this set before either
-/// writes its file get the same id. There is no reservation protocol, and none is needed while
-/// every allocator's caller writes under the advisory write lock.
+/// writes its file get the same id, and **there is no reservation protocol**. An earlier version
+/// of this comment claimed none was needed "while every allocator's caller writes under the
+/// advisory write lock"; the pass-3 acceptance gate showed that is false. The callers *write*
+/// under the lock but *allocate* outside it — `handle_create_story` allocates before
+/// `create_story` takes the lock, and `--fix-ids` plans every renumber before its write phase,
+/// deliberately, so the lock is not held across the confirmation prompt. What bounds the damage
+/// is that the loser's occupancy check runs inside the lock, so the expected outcome is a
+/// spurious `file_exists` rather than two entities sharing an id — expected, not demonstrated.
+/// Filed in `deferred-work.md`; do not rebuild a safety argument here.
 pub fn ids_in_use(
     workspace_root: &Path,
     storage: &crate::config::StorageConfig,

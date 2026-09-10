@@ -334,8 +334,12 @@ on collision, then bounded retries — because `DW-`/`DEC-` ids are not sequenti
 become sequential.
 
 Allocation answers ownership, not reservation: two allocations resolving the set before either
-writes get the same id. Every writer holds the advisory write lock, so this is a question for the
-first caller that allocates outside one — filed, not solved here.
+writes get the same id, and nothing reserves it in between. Allocation happens *outside* the
+advisory write lock in both callers — `create story` allocates and then takes the lock,
+`--fix-ids` plans every renumber before its write phase so the lock is not held across the
+prompt — so the window is real rather than hypothetical. The loser's occupancy check runs inside
+the lock, so the expected outcome is a spurious `file_exists` refusal rather than two entities
+sharing an id; that is an expectation, not a demonstrated one. Filed, not solved here.
 
 Because the whole in-use set is checked, `--fix-ids` can meet a duplicate whose file lives outside
 its kind's directory. It refuses that entry, records it as skipped and names the expected path:
