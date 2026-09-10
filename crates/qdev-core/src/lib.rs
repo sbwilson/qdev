@@ -21,7 +21,10 @@ pub use store::{
     SyncStateRecord, ALL_TABLE_NAMES, BUSY_TIMEOUT_MS,
 };
 
-pub use dag::{allowed_kind_pairs, find_dependency_cycle, is_valid_kind_pair, would_create_cycle};
+pub use dag::{
+    allowed_kind_pairs, find_dependency_cycle, is_known_relation, is_valid_kind_pair,
+    relation_names, would_create_cycle,
+};
 
 pub use doctor::{
     default_doctor_sections, CacheDoctorSection, DoctorSection, DoctorSectionReport,

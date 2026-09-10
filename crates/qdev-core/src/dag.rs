@@ -1,29 +1,64 @@
 //! Relation kind-pair validation and `depends_on` cycle detection, per architecture.md §8.
 //!
-//! Used by hydration (to validate every stored relation and record findings for problems) and
+//! Used by hydration (to validate every stored relation and record findings for problems), by
+//! `qdev relate`/`qdev unrelate` (to refuse an unknown relation name before anything else) and
 //! by `qdev relate` (to refuse a bad edge before it is ever written).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::schema::EntityKind;
 
-/// Returns the allowed `(source_kind, target_kind)` pairs for a relation name, per
-/// architecture.md §8's 8-row table. An unknown relation name returns an empty slice, as does
-/// `verifies` (`Gate -> Requirement`): no `Gate` `EntityKind` variant exists yet (deferred to
-/// Epic 3), so `verifies` is unreachable until then even though it is a known relation name.
-pub fn allowed_kind_pairs(relation: &str) -> &'static [(EntityKind, EntityKind)] {
+/// The one list of relations: architecture.md §8's table, in its order, each name beside the
+/// `(source_kind, target_kind)` pairs it allows. `allowed_kind_pairs` and `is_known_relation`
+/// are both derived from this table, so a ninth relation cannot be added to one and not the
+/// other — there is no second list to forget.
+///
+/// `verifies` (`Gate -> Requirement`) has an empty pair list: no `Gate` `EntityKind` variant
+/// exists yet (deferred to Epic 3), so it is unreachable until then even though it is a known
+/// relation name. That is exactly why knowing a name is not the same question as knowing its
+/// pairs, and why both questions are answered from here.
+const RELATION_KIND_PAIRS: &[(&str, &[(EntityKind, EntityKind)])] = {
     use EntityKind::{Adr, DeferredWork, Epic, Hazard, Requirement, Story};
-    match relation {
-        "depends_on" => &[(Story, Story)],
-        "extends" => &[(Story, Story)],
-        "supersedes" => &[(Story, Story), (Story, Epic), (Epic, Story), (Epic, Epic)],
-        "traces_to" => &[(Story, Requirement)],
-        "verifies" => &[],
-        "mitigates" => &[(Story, Hazard)],
-        "closes_dw" => &[(Story, DeferredWork)],
-        "governed_by" => &[(Story, Adr), (Epic, Adr)],
-        _ => &[],
-    }
+    &[
+        ("depends_on", &[(Story, Story)]),
+        ("extends", &[(Story, Story)]),
+        (
+            "supersedes",
+            &[(Story, Story), (Story, Epic), (Epic, Story), (Epic, Epic)],
+        ),
+        ("traces_to", &[(Story, Requirement)]),
+        ("verifies", &[]),
+        ("mitigates", &[(Story, Hazard)]),
+        ("closes_dw", &[(Story, DeferredWork)]),
+        ("governed_by", &[(Story, Adr), (Epic, Adr)]),
+    ]
+};
+
+/// Every relation name architecture.md §8 defines, in the table's order — suitable for naming
+/// the valid choices in a usage error.
+pub fn relation_names() -> impl Iterator<Item = &'static str> {
+    RELATION_KIND_PAIRS.iter().map(|&(name, _)| name)
+}
+
+/// Returns true if `relation` is one of architecture.md §8's relation names, whatever kind pairs
+/// it allows. `verifies` is known even though it allows none yet, so an unknown *name* and a
+/// disallowed *pair* stay distinguishable: the command surface refuses the first as a usage
+/// error (exit 2) and the second as `invalid_relation_kind` (exit 1).
+pub fn is_known_relation(relation: &str) -> bool {
+    RELATION_KIND_PAIRS
+        .iter()
+        .any(|&(name, _)| name == relation)
+}
+
+/// Returns the allowed `(source_kind, target_kind)` pairs for a relation name, per
+/// architecture.md §8's 8-row table. An empty slice means "no pair is allowed", which covers
+/// both an unknown relation name and `verifies`; use `is_known_relation` to tell those apart.
+pub fn allowed_kind_pairs(relation: &str) -> &'static [(EntityKind, EntityKind)] {
+    RELATION_KIND_PAIRS
+        .iter()
+        .find(|&&(name, _)| name == relation)
+        .map(|&(_, pairs)| pairs)
+        .unwrap_or(&[])
 }
 
 /// Returns true if `(relation, source, target)` is one of the allowed kind pairs.

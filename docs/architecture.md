@@ -173,6 +173,14 @@ Epics derive status from their stories: `planning`, `active`, `done`. Sprints: `
 
 Relations are declared in the source entity's frontmatter and validated on hydration; a dangling target is a validation error, not a parse failure.
 
+These eight names are the complete set, and they live in one table in `dag.rs` alongside the
+kind pairs each allows, so a name and its pairs cannot drift apart. The distinction the two
+columns make is user-visible: `qdev relate` and `qdev unrelate` refuse a name that is not in the
+table as a usage error naming the valid ones (exit 2, the same class as an unrecognised
+`--author-type`), while a *known* relation whose source and target kinds are not an allowed pair
+is `invalid_relation_kind` (exit 1). `verifies` is known but allows no pair until Epic 3 models
+gates, so it takes the second refusal, not the first. The name check is at the command surface only: the write path accepts any name it is given, because its job is to merge and write what it was asked for. A file that carries an undefined relation name never reaches the graph at all — `relations` is `additionalProperties: false` in the entity schemas, so such a file is a `schema_violation` and is not hydrated.
+
 ---
 
 <a id="layout"></a>
@@ -449,7 +457,7 @@ Per **AD-3**, **AD-4**, **AD-6**:
 2a. **Revalidate the relation graph** once every file has been parsed — dangling targets, disallowed kind pairs and `depends_on` cycles are re-derived from the whole `entities`/`relations` tables, not just the files touched this pass, so an out-of-band edit elsewhere is caught. The three codes are cleared first, so a relation problem that no longer exists stops being reported.
 3. **Conflict markers** (`<<<<<<<`) produce a `merge_conflict` finding for that file and hydration continues.
 4. **Writes** take the advisory lock, write to a temp file, rename, then upsert the cache row and mark it dirty so the next sweep cannot skip it on a coarse-`mtime` filesystem.
-5. **Optimistic concurrency.** Every entity carries `version`; `qdev update --if-version N` fails with exit code 5 on mismatch.
+5. **Optimistic concurrency.** Every entity carries `version`; `--if-version N` on `qdev update`, `qdev relate` and `qdev unrelate` fails with exit code 5 on mismatch. The comparison precedes the outcome, so a change that would have altered nothing — relating an edge already present, unrelating one already absent — is still refused on a stale expectation: exit 0 under `--if-version` always means the expectation held.
 6. **Worktrees.** The cache lives inside the worktree at `.qdev/cache/`; each worktree has its own. Leases record the worktree path so `qdev next` can avoid double assignment across worktrees.
 
 Target: ≤ 30 ms for 1,000 entities with one change.

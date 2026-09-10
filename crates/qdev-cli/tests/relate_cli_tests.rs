@@ -426,10 +426,22 @@ fn test_relate_with_stale_if_version_is_refused_and_writes_nothing() {
     let before = fs::read_to_string(root.join("docs/specs/stories/E1S1.md")).unwrap();
 
     let mut cmd = Command::cargo_bin("qdev").unwrap();
-    cmd.current_dir(root)
-        .args(["relate", "E1S1", "depends_on", "E1S2", "--if-version", "99"])
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "relate",
+            "E1S1",
+            "depends_on",
+            "E1S2",
+            "--if-version",
+            "99",
+            "--json",
+        ])
         .assert()
-        .failure();
+        .failure()
+        .code(5);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["error"]["code"], "version_mismatch");
 
     assert_eq!(
         fs::read_to_string(root.join("docs/specs/stories/E1S1.md")).unwrap(),
@@ -612,4 +624,359 @@ updated_by:
         !content.contains("depends_on"),
         "a refused relate must write nothing: {content}"
     );
+}
+
+/// The fence has to hold on the path that reports no change, which is where it did not: the
+/// write path returned `Ok(changed: false)` for an edge that was already there before
+/// `--if-version` was ever compared, so exit 0 confirmed a version nothing had looked at.
+#[test]
+fn test_relate_with_stale_if_version_on_an_existing_edge_is_refused() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    create_story(root, "E1S1", "");
+    create_story(root, "E1S2", "");
+
+    let mut first = Command::cargo_bin("qdev").unwrap();
+    first
+        .current_dir(root)
+        .args(["relate", "E1S1", "depends_on", "E1S2"])
+        .assert()
+        .success();
+    let before = read_story(root, "E1S1");
+    assert!(before.contains("version: 2\n"));
+
+    // The edge is already present, so this relate would be an idempotent no-op — but the
+    // expected version is stale, and the fence is compared first.
+    let mut second = Command::cargo_bin("qdev").unwrap();
+    let assert = second
+        .current_dir(root)
+        .args([
+            "relate",
+            "E1S1",
+            "depends_on",
+            "E1S2",
+            "--if-version",
+            "99",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .code(5);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["error"]["code"], "version_mismatch");
+    assert_eq!(val["error"]["details"]["expected_version"], 99);
+    assert_eq!(val["error"]["details"]["current_version"], 2);
+
+    assert_eq!(
+        read_story(root, "E1S1"),
+        before,
+        "a fenced no-op must leave the file untouched"
+    );
+}
+
+/// `--if-version` on `unrelate` means what it means on `relate` and `update`, on the path that
+/// removes an edge.
+#[test]
+fn test_unrelate_with_stale_if_version_is_refused_and_the_edge_survives() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    create_story(root, "E1S1", "");
+    create_story(root, "E1S2", "  depends_on: [\"E1S1\"]\n");
+    let before = read_story(root, "E1S2");
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "unrelate",
+            "E1S2",
+            "depends_on",
+            "E1S1",
+            "--if-version",
+            "99",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .code(5);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["error"]["code"], "version_mismatch");
+
+    assert_eq!(
+        read_story(root, "E1S2"),
+        before,
+        "a refused unrelate must leave the edge and the file alone"
+    );
+}
+
+/// The other no-op path: `unrelate` of an absent edge. The removal would change nothing, so the
+/// comparison is the only thing the caller can be told — and it must still happen.
+#[test]
+fn test_unrelate_absent_edge_with_stale_if_version_is_refused() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    create_story(root, "E1S1", "");
+    create_story(root, "E1S2", "");
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "unrelate",
+            "E1S2",
+            "depends_on",
+            "E1S1",
+            "--if-version",
+            "99",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .code(5);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["error"]["code"], "version_mismatch");
+}
+
+#[test]
+fn test_unrelate_with_matching_if_version_removes_the_edge() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    create_story(root, "E1S1", "");
+    create_story(root, "E1S2", "  depends_on: [\"E1S1\"]\n");
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "unrelate",
+            "E1S2",
+            "depends_on",
+            "E1S1",
+            "--if-version",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .code(0);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["changed"], true);
+    assert_eq!(val["version"], 2);
+
+    let content = read_story(root, "E1S2");
+    assert!(!content.contains("depends_on"), "the edge must be gone");
+    assert!(content.contains("version: 2\n"));
+}
+
+// ---------------------------------------------------------------------------
+// Relation names: an unknown one is a usage error from both commands
+// ---------------------------------------------------------------------------
+
+/// A typo'd relation name used to be swallowed by the idempotent no-op: exit 0, `changed:
+/// false`, and the real `depends_on` edge still in the file — indistinguishable from a genuine
+/// "there was nothing to remove", so a cleanup script reported the edge removed.
+#[test]
+fn test_unrelate_unknown_relation_is_a_usage_error_and_the_real_edge_survives() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    create_story(root, "E1S1", "");
+    create_story(root, "E1S2", "  depends_on: [\"E1S1\"]\n");
+    let before = read_story(root, "E1S2");
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["unrelate", "E1S2", "dependson", "E1S1", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["error"]["code"], "usage_error");
+    let message = val["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("dependson"),
+        "the message must name what was typed: {message}"
+    );
+    for relation in [
+        "depends_on",
+        "extends",
+        "supersedes",
+        "traces_to",
+        "verifies",
+        "mitigates",
+        "closes_dw",
+        "governed_by",
+    ] {
+        assert!(
+            message.contains(relation),
+            "the message must name every valid relation, missing '{relation}': {message}"
+        );
+    }
+
+    assert_eq!(
+        read_story(root, "E1S2"),
+        before,
+        "the real depends_on edge must survive a typo'd unrelate"
+    );
+}
+
+/// The same input on `relate` was reported as `invalid_relation_kind` (exit 1) — factually
+/// wrong: the name is not a relation at all, so there is no kind pair to disallow.
+#[test]
+fn test_relate_unknown_relation_is_a_usage_error_not_invalid_relation_kind() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    create_story(root, "E1S1", "");
+    create_story(root, "E1S2", "");
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["relate", "E1S1", "dependson", "E1S2", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["error"]["code"], "usage_error");
+    let message = val["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("depends_on") && message.contains("governed_by"),
+        "the message must name the valid relations: {message}"
+    );
+
+    let content = read_story(root, "E1S1");
+    assert!(!content.contains("relations:"), "no write must occur");
+}
+
+/// The name check runs before the entity lookups, so a typo is reported as a typo even when the
+/// ids are unresolvable — the usage error the user can act on, not a dangling-target report.
+#[test]
+fn test_relate_unknown_relation_is_reported_before_entity_resolution() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["relate", "E9S9", "dependson", "E9S8", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["error"]["code"], "usage_error");
+    assert!(val["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("dependson"));
+}
+
+/// `verifies` is a known relation with no allowed kind pairs until Epic 3 models gates. It must
+/// be refused as a disallowed pair (exit 1), never as an unknown relation: `allowed_kind_pairs`
+/// returns an empty slice for both cases, which is why the name list exists separately.
+#[test]
+fn test_relate_verifies_is_a_disallowed_pair_not_an_unknown_relation() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    create_story(root, "E1S1", "");
+    create_story(root, "E1S2", "");
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["relate", "E1S1", "verifies", "E1S2", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["error"]["code"], "invalid_relation_kind");
+
+    let content = read_story(root, "E1S1");
+    assert!(!content.contains("relations:"), "no write must occur");
+}
+
+/// `unrelate` accepts every known relation name, `verifies` included: nothing about a name that
+/// cannot yet be written stops an edge under it from being removed.
+#[test]
+fn test_unrelate_verifies_is_accepted_as_a_known_relation() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    create_story(root, "E1S1", "");
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["unrelate", "E1S1", "verifies", "FR-1", "--json"])
+        .assert()
+        .success()
+        .code(0);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["changed"], false);
+}
+
+/// The positive fence on the no-op path: `--if-version` matching, on an edge that already
+/// exists, must still be exit 0 `changed: false`. Its stale twin is covered above, and without
+/// this one an over-eager fence (comparing against the post-bump version, say) would look right.
+#[test]
+fn test_relate_no_op_with_a_satisfied_if_version_is_still_a_no_op() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    create_story(root, "E1S1", "");
+    create_story(root, "E1S2", "");
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["relate", "E1S1", "depends_on", "E1S2", "--json"])
+        .assert()
+        .success();
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let version = val["version"].as_u64().unwrap();
+    assert_eq!(val["changed"], true);
+
+    // The same edge again, fencing against the version the first call left behind.
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "relate",
+            "E1S1",
+            "depends_on",
+            "E1S2",
+            "--if-version",
+            &version.to_string(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .code(0);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["changed"], false, "the edge is already there: {val}");
+    assert_eq!(
+        val["version"], version,
+        "a satisfied fence on a no-op must not bump the version: {val}"
+    );
+}
+
+/// `GRAPH_EDGE_RELATIONS` is a second, hand-written list of relation names (the subset `graph
+/// --dot` draws). It cannot be derived from the kind-pair table — it is a rendering choice, not
+/// the whole set — but every member must still *be* a relation, or the graph silently filters on
+/// a name nothing can hold.
+#[test]
+fn test_graph_edge_relations_are_all_known_relations() {
+    for name in ["depends_on", "extends", "supersedes"] {
+        assert!(
+            qdev_core::is_known_relation(name),
+            "`graph --dot` filters on '{name}', which is not a relation name"
+        );
+    }
 }

@@ -65,7 +65,7 @@ Universal reference resolution: any command that takes an ID accepts any entity 
 | `qdev update <kind> <id> --field value [--if-version N]` | Field-level mutation |
 | `qdev update <kind> <id> --section "Acceptance Criteria" --file ac.md` | Body section replacement |
 | `qdev constraint add E12S4 --kind no_go -- "Do not touch frame buffers"` | Allocates `E12S4/NG-n` |
-| `qdev relate E12S4 depends_on E12S3` / `qdev unrelate ...` | Manage relations |
+| `qdev relate E12S4 depends_on E12S3 [--if-version N]` / `qdev unrelate ... [--if-version N]` | Manage relations |
 
 `qdev create story` and `qdev update` share one write path: it takes the advisory lock on
 `<cache_dir>/write.lock` with a 5-second timeout (`lock_timeout`, exit 5), writes atomically via
@@ -129,6 +129,44 @@ Attribution is resolved from one path for every command that records an author: 
 / `--author-id` first, then `QDEV_AUTHOR_TYPE` / `QDEV_AUTHOR_ID`, then `[identity]
 developer_id`, then `git config user.email`. An author type other than `human` or `agent` is a
 usage error (exit 2) whatever its source, refused before anything is written.
+
+#### Relations, and what `relate`/`unrelate` refuse
+
+The relation name is an enum, exactly like `--author-type`: `depends_on`, `extends`,
+`supersedes`, `traces_to`, `verifies`, `mitigates`, `closes_dw`, `governed_by` (architecture.md
+§8 is authoritative). Anything else — a typo, a hyphen for an underscore — is a usage error
+(exit 2) from `relate` and `unrelate` alike, naming the valid relations, reported before the ids
+are even resolved and before anything is written. `unrelate` in particular never reports a typo
+as an idempotent no-op: exit 0 `changed: false` from `unrelate` means the edge you named is not
+there, never that the relation name was not understood.
+
+Two refusals that read alike are deliberately distinct, and both are `relate`'s:
+
+- **The name is not a relation** → usage error, exit 2, listing the valid names. This one is
+  checked by `relate` *and* `unrelate`.
+- **The name is a relation, but not for these two kinds** → `invalid_relation_kind`, exit 1,
+  naming both kinds (e.g. `traces_to` from a story to an epic). `verifies` is a known relation
+  with no allowed pair until gates are modeled in Epic 3, so it lands here, not above.
+
+`relate` alone also refuses a dangling target (`dangling_relation`, exit 1) and a `depends_on`
+edge that would close a cycle (`dependency_cycle`, exit 1); neither writes anything. **`unrelate`
+validates the relation name and nothing else** — it is removing an edge, so a target that does
+not exist or a pair that would be disallowed are not reasons to refuse.
+
+Removing an edge that is genuinely absent, under a valid relation name, stays an idempotent
+success: exit 0, `changed: false`, no write, no version bump.
+
+#### `--if-version` on the three mutating commands
+
+`qdev update`, `qdev relate` and `qdev unrelate` all accept `--if-version N`, with one meaning:
+the source entity's version must currently be exactly `N`, or the command exits 5
+`version_mismatch` (details carry `expected_version` and `current_version`) and writes nothing.
+
+The comparison happens before any outcome is reported, **including an outcome that would have
+changed nothing** — relating an edge that is already there, or unrelating one that is not. So
+exit 0 from a command given `--if-version` always means the expectation held, which is what makes
+the flag usable as a compare-and-swap fence: an agent can read the version from `qdev get`, act
+on it, and be refused if anything moved in between.
 
 ### Workflow
 

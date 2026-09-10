@@ -1522,6 +1522,31 @@ struct RelatePayload {
     relations: serde_json::Value,
 }
 
+/// Refuses a relation name architecture.md §8 does not define, as a usage error naming the
+/// valid ones — the same class as an unrecognised `--author-type` or entity kind. Both `relate`
+/// and `unrelate` call this before every other check, so a typo can neither be reported as a
+/// disallowed kind pair (`relate` could not tell the two empty pair lists apart) nor be absorbed
+/// by the idempotent no-op (`unrelate` exited 0 while the real edge survived).
+///
+/// A *known* relation whose source and target kinds are not an allowed pair — `verifies`, which
+/// has no pairs until Epic 3 models gates, included — is a different refusal and keeps its own
+/// `invalid_relation_kind` (exit 1). `qdev_core::apply_relation_change` deliberately keeps
+/// accepting any name, because `qdev validate --fix-ids` rewrites the names it finds in files.
+fn validate_relation_name(relation: &str) -> Result<(), QdevError> {
+    if qdev_core::is_known_relation(relation) {
+        return Ok(());
+    }
+    // The list in the message comes from `relation_names()`, never from a literal: the arg help
+    // strings in `cli.rs` do spell the eight out for `--help` readability, and those are the one
+    // place a ninth relation would have to be added by hand — a `#[value_parser]` would fix that
+    // too, at the cost of clap owning the error shape this envelope depends on.
+    Err(QdevError::usage_error(format!(
+        "Unknown relation '{}', must be one of: {}",
+        relation,
+        qdev_core::relation_names().collect::<Vec<_>>().join(", ")
+    )))
+}
+
 fn handle_relate(
     relate_args: &cli::RelateArgs,
     annotated_config: &qdev_core::AnnotatedConfig,
@@ -1530,6 +1555,12 @@ fn handle_relate(
     current_dir: &std::path::Path,
 ) -> ExitCode {
     let root = qdev_core::find_workspace_root(current_dir);
+
+    // Before any other check: an unknown relation name is a usage error, not a kind-pair one.
+    if let Err(err) = validate_relation_name(&relate_args.relation) {
+        let _ = output.emit_error(&err);
+        return err.exit_code();
+    }
 
     let store = match open_query_store(&root, annotated_config) {
         Ok(s) => s,
@@ -1695,6 +1726,13 @@ fn handle_unrelate(
 ) -> ExitCode {
     let root = qdev_core::find_workspace_root(current_dir);
 
+    // Before any other check, and before the write path can report the idempotent no-op that
+    // used to swallow this: an unknown relation name is a usage error naming the valid ones.
+    if let Err(err) = validate_relation_name(&unrelate_args.relation) {
+        let _ = output.emit_error(&err);
+        return err.exit_code();
+    }
+
     let author = match resolve_author(
         unrelate_args.author_type.as_deref(),
         unrelate_args.author_id.as_deref(),
@@ -1716,12 +1754,14 @@ fn handle_unrelate(
         relation: unrelate_args.relation.clone(),
         target_id: unrelate_args.target_id.clone(),
         add: false,
-        if_version: None,
+        if_version: unrelate_args.if_version,
         author,
     };
 
-    // Unrelating an absent entry is an idempotent no-op (exit 0), matching `relate`/`unrelate`'s
-    // I/O contract; apply_relation_change already returns `changed: false` without writing.
+    // Unrelating an absent entry, with a relation name that exists, is an idempotent no-op
+    // (exit 0), matching `relate`/`unrelate`'s I/O contract: `apply_relation_change` returns
+    // `changed: false` without writing. It still compares `--if-version` first, so the fence
+    // holds on that path too (exit 5).
     let res = match qdev_core::apply_relation_change(&opts) {
         Ok(r) => r,
         Err(e) => {

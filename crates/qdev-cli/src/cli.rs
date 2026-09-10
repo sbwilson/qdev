@@ -96,8 +96,9 @@ pub struct RelateArgs {
     /// Source entity identifier (relations live in the source entity's frontmatter), e.g. E12S4
     pub source_id: String,
 
-    /// Relation name (e.g. depends_on, extends, supersedes, traces_to, mitigates, closes_dw,
-    /// governed_by)
+    /// Relation name (see `qdev relate --help` output below, or architecture.md §8): one of
+    /// depends_on, extends, supersedes, traces_to, verifies, mitigates,
+    /// closes_dw, governed_by (anything else is a usage error)
     pub relation: String,
 
     /// Target entity identifier, e.g. E12S1
@@ -121,11 +122,17 @@ pub struct UnrelateArgs {
     /// Source entity identifier (relations live in the source entity's frontmatter), e.g. E12S4
     pub source_id: String,
 
-    /// Relation name (e.g. depends_on)
+    /// Relation name (see `qdev relate --help` output below, or architecture.md §8): one of
+    /// depends_on, extends, supersedes, traces_to, verifies, mitigates,
+    /// closes_dw, governed_by (anything else is a usage error)
     pub relation: String,
 
     /// Target entity identifier, e.g. E12S1
     pub target_id: String,
+
+    /// Optimistic concurrency control: expected existing source entity version
+    #[arg(long = "if-version")]
+    pub if_version: Option<u64>,
 
     /// Attribution author type override ('human' or 'agent')
     #[arg(long = "author-type")]

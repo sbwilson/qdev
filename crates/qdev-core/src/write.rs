@@ -401,65 +401,10 @@ pub fn patch_frontmatter(
         i += 1;
     }
 
-    // Inspect existing version
-    let mut existing_version = None;
-    if let Some(v_block) = blocks.iter().find(|b| b.key == "version") {
-        let mut v_str = String::new();
-        for &line in &fm_lines[v_block.start_line..v_block.end_line] {
-            v_str.push_str(line);
-        }
-        if let Ok(serde_yaml::Value::Mapping(map)) =
-            serde_yaml::from_str::<serde_yaml::Value>(&v_str)
-        {
-            if let Some(val) = map.get(serde_yaml::Value::String("version".to_string())) {
-                match val {
-                    serde_yaml::Value::Number(num) => existing_version = num.as_u64(),
-                    serde_yaml::Value::String(s) => {
-                        existing_version = s.trim().trim_matches(['"', '\'']).parse::<u64>().ok()
-                    }
-                    _ => {}
-                }
-            }
-        } else if let Some((_, rest)) = v_str.split_once(':') {
-            let candidate = rest
-                .split(['#', '\r', '\n'])
-                .next()
-                .unwrap_or("")
-                .trim()
-                .trim_matches(['"', '\'']);
-            existing_version = candidate.parse::<u64>().ok();
-        }
-    }
-
-    // Check optimistic concurrency --if-version
-    if let Some(expected) = options.if_version {
-        match existing_version {
-            Some(v) if v == expected => {}
-            Some(actual) => {
-                return Err(QdevError::conflict(
-                    "version_mismatch",
-                    format!("Version mismatch: expected {}, found {}", expected, actual),
-                )
-                .with_details(serde_json::json!({
-                    "expected_version": expected,
-                    "current_version": actual,
-                })));
-            }
-            None => {
-                return Err(QdevError::conflict(
-                    "version_mismatch",
-                    format!(
-                        "Version mismatch: expected {}, but entity has no version",
-                        expected
-                    ),
-                )
-                .with_details(serde_json::json!({
-                    "expected_version": expected,
-                    "current_version": serde_json::Value::Null,
-                })));
-            }
-        }
-    }
+    // The version this patch fences against, read by the one function that answers that
+    // question for the whole write path (see `frontmatter_version`).
+    let existing_version = frontmatter_version(content);
+    check_if_version(options.if_version, existing_version)?;
 
     let current_version = existing_version.unwrap_or(0);
     let new_version = current_version.checked_add(1).ok_or_else(|| {
@@ -1629,13 +1574,10 @@ pub fn apply_entity_update(options: &EntityUpdateOptions) -> Result<EntityUpdate
         )
     })?;
 
-    // Extract old version for record keeping
-    let old_frontmatter_val = crate::schema::extract_frontmatter(&existing_content).ok();
-    let old_version = old_frontmatter_val
-        .as_ref()
-        .and_then(|v| v.get("version"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    // The version this reports must be the one `patch_frontmatter` fenced and bumped against, so
+    // it comes from the same reader — see `frontmatter_version`. Reading it a second way here
+    // meant one call could return `old_version: 3` for a write that computed `version: 1`.
+    let old_version = frontmatter_version(&existing_content).unwrap_or(0);
 
     // 4. Line-based frontmatter patch
     let patch_opts = FrontmatterPatchOptions {
@@ -2151,6 +2093,93 @@ pub fn create_story(options: &StoryCreateOptions) -> Result<StoryCreateResult, Q
     })
 }
 
+/// The `version:` value a document's frontmatter declares, or `None` when it declares none, or
+/// declares one that is not a whole number. The single reader of that field on the write path:
+/// `patch_frontmatter` fences `--if-version` against it, and `apply_relation_change` reads it
+/// before it can report an idempotent no-op, so the two cannot disagree about what version a
+/// file is at. Only an unindented, non-comment `version:` line counts, matching the top-level
+/// key blocks `patch_frontmatter` rewrites.
+pub(crate) fn frontmatter_version(content: &str) -> Option<u64> {
+    let (frontmatter, _) = crate::schema::extract_frontmatter_str(content).ok()?;
+
+    // YAML first, exactly as hydration reads it. A decimal-only scan is not enough: `0x03`,
+    // `0o3` and `3_000` are all schema-valid YAML integers that `serde_yaml` — and therefore
+    // `qdev get` — reports as numbers, and reading them as "no version" made `--if-version`
+    // refuse the version the entity actually declares *and* an unfenced write reset the counter
+    // to 1, rolling it backwards.
+    if let Ok(serde_yaml::Value::Mapping(map)) =
+        serde_yaml::from_str::<serde_yaml::Value>(frontmatter)
+    {
+        if let Some(version) = map
+            .get(serde_yaml::Value::String("version".to_string()))
+            .and_then(|v| v.as_u64())
+        {
+            return Some(version);
+        }
+    }
+
+    // Fallback for frontmatter YAML cannot parse as a whole — a malformed key elsewhere in the
+    // block must not hide a perfectly readable `version:` from the fence.
+    for line in frontmatter.lines() {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.starts_with([' ', '\t', '#', '-']) {
+            continue;
+        }
+        let Some((key, rest)) = trimmed.split_once(':') else {
+            continue;
+        };
+        if key.trim() != "version" {
+            continue;
+        }
+        let candidate = rest
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_matches(['"', '\'']);
+        return candidate.parse::<u64>().ok();
+    }
+    None
+}
+
+/// Compares an `--if-version` expectation (`expected`) against the version a file actually
+/// declares (`existing`, from `frontmatter_version`), raising the one `version_mismatch`
+/// conflict every mutating command reports. `Ok(())` when no expectation was given.
+///
+/// Every caller compares before it reports an outcome, no-ops included: an agent using
+/// `--if-version` as a compare-and-swap fence reads exit 0 as "my expected version was current",
+/// so a no-op that skipped the comparison would confirm a version it never looked at.
+pub(crate) fn check_if_version(
+    expected: Option<u64>,
+    existing: Option<u64>,
+) -> Result<(), QdevError> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    match existing {
+        Some(v) if v == expected => Ok(()),
+        Some(actual) => Err(QdevError::conflict(
+            "version_mismatch",
+            format!("Version mismatch: expected {}, found {}", expected, actual),
+        )
+        .with_details(serde_json::json!({
+            "expected_version": expected,
+            "current_version": actual,
+        }))),
+        None => Err(QdevError::conflict(
+            "version_mismatch",
+            format!(
+                "Version mismatch: expected {}, but entity has no version",
+                expected
+            ),
+        )
+        .with_details(serde_json::json!({
+            "expected_version": expected,
+            "current_version": serde_json::Value::Null,
+        }))),
+    }
+}
+
 /// Options for applying a relation change (`qdev relate` / `qdev unrelate`).
 #[derive(Debug, Clone)]
 pub struct RelationChangeOptions {
@@ -2164,7 +2193,9 @@ pub struct RelationChangeOptions {
     /// `true` adds `target_id` to `relation`'s target list (`relate`); `false` removes it
     /// (`unrelate`).
     pub add: bool,
-    /// Optimistic concurrency control; only meaningful when `add` is `true` and a write occurs.
+    /// Optimistic concurrency control, compared before any outcome is reported: a stale
+    /// expectation is a `version_mismatch` conflict whether the requested change would have
+    /// altered the file or turned out to be an idempotent no-op.
     pub if_version: Option<u64>,
     pub author: Author,
 }
@@ -2178,8 +2209,10 @@ pub struct RelationChangeResult {
     pub rel_path: String,
     pub old_version: u64,
     pub new_version: u64,
-    /// `false` when `unrelate` targeted an entry that was already absent: an idempotent no-op,
-    /// nothing was written and `new_version == old_version`.
+    /// `false` when the file already had the state asked for — `unrelate` of an absent entry, or
+    /// `relate` of an edge already present: an idempotent no-op, nothing was written and
+    /// `new_version == old_version`. Reaching this outcome still required `if_version` to match,
+    /// so a `false` here never means the version went uncompared.
     pub changed: bool,
     /// The full `relations:` map after the change (or the unchanged map, for a no-op).
     pub relations: serde_json::Value,
@@ -2191,9 +2224,22 @@ pub struct RelationChangeResult {
 /// `apply_entity_update`'s primitives: file resolution, the advisory write lock, the line-based
 /// `patch_frontmatter` engine, schema validation, the atomic write, and the cache upsert.
 ///
-/// Callers (e.g. `qdev relate`) are responsible for pre-write validation (kind-pair, dangling
-/// target, would-be cycle) — this function only merges and writes; hydration is the backstop
-/// that catches relations edited outside `qdev`.
+/// Callers (e.g. `qdev relate`) are responsible for pre-write validation (relation name,
+/// kind-pair, dangling target, would-be cycle) — this function only merges and writes; hydration
+/// is the backstop that catches relations edited outside `qdev`. It deliberately accepts any
+/// relation name it is given, including one architecture.md §8 does not define, because this
+/// function's job is to merge and write what it was asked for — the name enum lives at the
+/// command surface, as `--author-type`'s does.
+///
+/// (An earlier version of this comment justified that with `qdev validate --fix-ids` rewriting
+/// unrecognised names found in files. That is not reachable: `relations` is
+/// `additionalProperties: false` in the entity schemas, so a file carrying an unknown relation
+/// name is a `schema_violation` and never hydrates, and `--fix-ids` therefore never sees such an
+/// edge. The placement stands on its own; the reason did not.)
+///
+/// `options.if_version` is compared before any outcome is reported, the no-op included. It is
+/// then passed on to `patch_frontmatter`, which compares it again — redundant here, but that
+/// second check is the *only* one on the `qdev update` path, so it stays.
 pub fn apply_relation_change(
     options: &RelationChangeOptions,
 ) -> Result<RelationChangeResult, QdevError> {
@@ -2278,10 +2324,16 @@ pub fn apply_relation_change(
             )
         })?;
 
-    let old_version = old_frontmatter_yaml
-        .get("version")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    // The version this call reports and fences against, read through the same function
+    // `patch_frontmatter` uses so a no-op and a write cannot disagree about it.
+    let declared_version = frontmatter_version(&existing_content);
+    let old_version = declared_version.unwrap_or(0);
+
+    // `--if-version` is compared here, above every outcome this function can return — including
+    // the idempotent no-op below, which used to return `Ok(changed: false)` before
+    // `patch_frontmatter` ever saw the expectation, so `relate --if-version 99` on an existing
+    // edge exited 0 and confirmed a version nothing had compared.
+    check_if_version(options.if_version, declared_version)?;
 
     // 4. Merge into the existing relations map: read it, mutate only the one relation's target
     // list, and write the whole map back — never construct a fresh map that drops other keys.
@@ -2378,7 +2430,9 @@ pub fn apply_relation_change(
         did_change
     };
 
-    // Idempotent no-op (unrelate of an absent entry): nothing to write.
+    // Idempotent no-op (unrelate of an absent entry, or relate of an edge already present):
+    // nothing to write. `if_version` was already compared above, so returning here reports an
+    // outcome the caller's expectation was checked against.
     if !changed {
         let relations_out = serde_json::to_value(&relations_obj).map_err(|e| {
             QdevError::infrastructure_failure(

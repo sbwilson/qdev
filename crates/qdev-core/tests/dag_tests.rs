@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use qdev_core::dag::{
-    allowed_kind_pairs, find_dependency_cycle, is_valid_kind_pair, would_create_cycle,
+    allowed_kind_pairs, find_dependency_cycle, is_known_relation, is_valid_kind_pair,
+    relation_names, would_create_cycle,
 };
 use qdev_core::schema::EntityKind;
 use qdev_core::store::{ensure_cache, FindingRecord, SqliteStore, Store};
@@ -58,6 +59,53 @@ fn test_allowed_kind_pairs_covers_exactly_the_8_relations_from_architecture_md()
         ]
     );
     assert!(allowed_kind_pairs("not_a_relation").is_empty());
+}
+
+/// The relation names and their kind pairs come from one table, so this asserts the two views
+/// of it agree: every name `relation_names` yields is `is_known_relation`, exactly the eight
+/// architecture.md §8 defines are yielded, and nothing else is known. A ninth relation added to
+/// the table gets both views at once — the assertion that would fail here is a name added to
+/// this test's expectation and not to the table, or removed from the table and not from here.
+#[test]
+fn test_relation_names_and_kind_pairs_come_from_one_list() {
+    let names: Vec<&str> = relation_names().collect();
+    assert_eq!(
+        names,
+        vec![
+            "depends_on",
+            "extends",
+            "supersedes",
+            "traces_to",
+            "verifies",
+            "mitigates",
+            "closes_dw",
+            "governed_by",
+        ],
+        "relation_names must be architecture.md §8's table, in its order"
+    );
+    for name in &names {
+        assert!(is_known_relation(name), "'{name}' must be known");
+    }
+    for unknown in [
+        "dependson",
+        "depends-on",
+        "",
+        "DEPENDS_ON",
+        "not_a_relation",
+    ] {
+        assert!(!is_known_relation(unknown), "'{unknown}' must not be known");
+    }
+}
+
+/// `verifies` is the case that makes the name list necessary rather than redundant: it is a
+/// known relation whose allowed-pair list is empty, exactly like an unknown name's, so the two
+/// questions cannot be answered by one function.
+#[test]
+fn test_verifies_is_known_but_allows_no_pairs_unlike_an_unknown_name() {
+    assert!(is_known_relation("verifies"));
+    assert!(allowed_kind_pairs("verifies").is_empty());
+    assert!(!is_known_relation("verifiez"));
+    assert!(allowed_kind_pairs("verifiez").is_empty());
 }
 
 #[test]

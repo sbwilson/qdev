@@ -161,6 +161,50 @@ updated_by:
     assert_eq!(err.code(), "version_mismatch");
 }
 
+/// One function reads `version:` for the whole write path (`patch_frontmatter`'s fence and
+/// `apply_relation_change`'s), so the scalar forms it accepts are worth pinning: a quoted value
+/// and a trailing comment both name the same version, and a mismatch against either is still
+/// exit 5. Before that reader was shared, `apply_relation_change` went through `serde_yaml` and
+/// read a quoted version as no version at all.
+#[test]
+fn test_patch_frontmatter_reads_a_quoted_or_commented_version_for_the_fence() {
+    let content = |version: &str| {
+        format!(
+            r#"---
+id: E12S4
+status: draft
+version: {version}
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+"#
+        )
+    };
+    let opts = |if_version: u64| FrontmatterPatchOptions {
+        status: Some("ready".to_string()),
+        title: None,
+        custom_fields: Vec::new(),
+        author: Some(Author::new("human", "simon")),
+        if_version: Some(if_version),
+    };
+
+    for declared in ["\"3\"", "'3'", "3  # bumped by the sweep"] {
+        let text = content(declared);
+        let (patched, new_ver) = patch_frontmatter(&text, &opts(3))
+            .unwrap_or_else(|e| panic!("version {declared} must satisfy --if-version 3: {e:?}"));
+        assert_eq!(new_ver, 4, "version {declared} must count as 3");
+        assert!(patched.contains("version: 4\n"));
+
+        let err = patch_frontmatter(&text, &opts(99)).unwrap_err();
+        assert_eq!(err.code(), "version_mismatch", "version {declared}");
+        assert_eq!(err.exit_code(), ExitCode::Conflict);
+    }
+}
+
 #[test]
 fn test_patch_frontmatter_if_version_missing_in_file() {
     let content = r#"---
@@ -1302,4 +1346,49 @@ fn test_purge_entity_row_for_moved_file_respects_the_source_path_guard() {
     assert!(purged);
     assert!(store.get_entity("E1S1").unwrap().is_none());
     assert!(store.get_story_details("E1S1").unwrap().is_none());
+}
+
+/// The fence must accept every YAML integer form hydration accepts. A decimal-only scan made
+/// `version: 0x03` — schema-valid, reported as `3` by `qdev get` — read as "no version", so
+/// `--if-version 3` refused the version the entity declared *and* an unfenced write reset the
+/// counter to 1, rolling it backwards.
+#[test]
+fn test_frontmatter_version_accepts_every_yaml_integer_form() {
+    for (literal, expected) in [
+        ("3", 3u64),
+        ("\"3\"", 3),
+        ("'3'", 3),
+        ("3  # bumped by the sweep", 3),
+        ("0x03", 3),
+        ("0o3", 3),
+        ("+3", 3),
+    ] {
+        let content = format!(
+            "---\nid: E1S1\ntitle: One\nstatus: draft\nversion: {literal}\ncreated_by:\n  \
+             type: human\n  id: simon\nupdated_by:\n  type: human\n  id: simon\n---\n\n## AC\n- one\n"
+        );
+
+        // The fence is satisfied by the declared value...
+        let opts = FrontmatterPatchOptions {
+            status: Some("ready".to_string()),
+            title: None,
+            custom_fields: Vec::new(),
+            author: Some(Author::new("human", "simon")),
+            if_version: Some(expected),
+        };
+        let (patched, new_version) = patch_frontmatter(&content, &opts).unwrap_or_else(|e| {
+            panic!("version literal {literal:?} must satisfy the fence: {e:?}")
+        });
+
+        // ...and the counter moves forward from it, never back to 1.
+        assert_eq!(
+            new_version,
+            expected + 1,
+            "version literal {literal:?} must bump from {expected}"
+        );
+        assert!(
+            patched.contains(&format!("version: {}", expected + 1)),
+            "version literal {literal:?} produced: {patched}"
+        );
+    }
 }
