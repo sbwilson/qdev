@@ -263,7 +263,8 @@ CREATE TABLE entities (           -- common index for every entity kind
     id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT, status TEXT,
     owners TEXT, source_path TEXT NOT NULL, content_hash TEXT NOT NULL,
     version INTEGER, created_by_type TEXT, created_by_id TEXT,
-    updated_by_type TEXT, updated_by_id TEXT, updated_at TEXT
+    updated_by_type TEXT, updated_by_id TEXT, updated_at TEXT,
+    stale INTEGER NOT NULL DEFAULT 0  -- last parse failed; row kept, marked stale
 );
 
 CREATE TABLE stories (
@@ -339,9 +340,24 @@ CREATE TABLE soup_dependencies (
 );
 
 CREATE TABLE sync_state (path TEXT PRIMARY KEY, mtime INTEGER, size INTEGER, content_hash TEXT);
+
+-- Hydration bookkeeping. `sync_state` above answers "has this file changed"; these three
+-- answer "what did the last pass find", "what must the next pass re-read regardless of
+-- mtime", and "when did we last sweep".
+CREATE TABLE findings (
+    path TEXT NOT NULL, code TEXT NOT NULL, severity TEXT NOT NULL,
+    message TEXT, message_key TEXT NOT NULL, found_at TEXT NOT NULL,
+    PRIMARY KEY (path, code, message_key)   -- message_key: several findings of one code per file
+);
+
+CREATE TABLE dirty_entities (id TEXT PRIMARY KEY, dirty_at TEXT);
+
+CREATE TABLE sync_meta (id INTEGER PRIMARY KEY CHECK (id = 1), last_synced_at TEXT NOT NULL);
 ```
 
-Requirements, hazards, ADRs, PRDs, and releases use the `entities` table plus kind-specific detail tables of the same shape.
+That is 16 tables (`ALL_TABLE_NAMES` in `store/sqlite.rs` is the authority; `inspect_cache_schema`
+requires every one of them to be present). Requirements, hazards, ADRs, PRDs, and releases use the
+`entities` table plus kind-specific detail tables of the same shape.
 
 ---
 
@@ -352,7 +368,8 @@ Requirements, hazards, ADRs, PRDs, and releases use the `entities` table plus ki
 Per **AD-3**, **AD-4**, **AD-6**:
 
 1. **Boot sweep.** Stat every file under the configured spec and state directories. Compare `mtime` and size to `sync_state`. For changed files, hash the content; re-parse only if the hash differs.
-2. **Parse and upsert** frontmatter and relations in one transaction. Dangling relations and schema violations are recorded as validation findings, not fatal errors.
+2. **Parse and upsert** frontmatter and relations in one transaction. Schema violations are recorded as validation findings, not fatal errors, and the file keeps its previous cache row marked `stale`.
+2a. **Revalidate the relation graph** once every file has been parsed — dangling targets, disallowed kind pairs and `depends_on` cycles are re-derived from the whole `entities`/`relations` tables, not just the files touched this pass, so an out-of-band edit elsewhere is caught. The three codes are cleared first, so a relation problem that no longer exists stops being reported.
 3. **Conflict markers** (`<<<<<<<`) produce a `merge_conflict` finding for that file and hydration continues.
 4. **Writes** take the advisory lock, write to a temp file, rename, then upsert the cache row and mark it dirty so the next sweep cannot skip it on a coarse-`mtime` filesystem.
 5. **Optimistic concurrency.** Every entity carries `version`; `qdev update --if-version N` fails with exit code 5 on mismatch.

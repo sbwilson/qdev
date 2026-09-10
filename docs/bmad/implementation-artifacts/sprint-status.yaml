@@ -1,3 +1,13 @@
+# Story key lifecycle: backlog -> in-progress -> review -> done.
+#   backlog      the story is specified (or not yet) and unstarted
+#   in-progress  a dev session owns it; bmad-build sets this at step-03
+#   review       code is committed and the review pass has run; bmad-build sets this at step-05
+#   done         accepted; set when the work is handed off, not when the code lands
+# Advance the key as the story moves. All five of epic 1's bmad-build stories were left at
+# `review` after being committed as done, so the file said work was outstanding that had shipped
+# — and the epic could not be closed from it. The status file is the only place sprint progress
+# is legible; a stale key is a wrong answer, not a missing one.
+# `action_items` below follow the same rule: flip to `done` in the commit that resolves them.
 # generated: 09-06-2026 08:48
 # regenerated: 09-06-2026 after specification review re-cut
 # project: qdev
@@ -6,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-10-2026 13:00
+last_updated: 09-10-2026 15:00
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -116,7 +126,7 @@ action_items:
     action: "Reconcile architecture.md sections 10 and 11 with the shipped 16-table
       cache and state the cache schema version"
     owner: "Simon"
-    status: open
+    status: done
     ref: "docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md"
   - id: "epic-1-retro-item-7-delete-the-duplicate-author-resolution-c"
     epic: 1
@@ -137,14 +147,14 @@ action_items:
     action: "Process: advance sprint-status story keys when a story completes; all
       five bmad-build stories were left at review"
     owner: "Simon"
-    status: open
+    status: done
     ref: "docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md"
   - id: "epic-1-retro-item-10-process-give-deferred-work-items-a-revie"
     epic: 1
     action: "Process: give deferred-work items a review-by point or owning story;
       two deferred after story 1.7 went on to cause defects B1 and B2"
     owner: "Simon"
-    status: open
+    status: done
     ref: "docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md"
   - id: "epic-1-retro-item-11-process-run-a-cross-story-review-before"
     epic: 1
