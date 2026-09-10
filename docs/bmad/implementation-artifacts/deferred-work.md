@@ -191,3 +191,34 @@ stories named at the end of that document. The medium and low findings are recor
 - source_spec: `docs/bmad/implementation-artifacts/spec-init-uses-the-merged-config.md`
   summary: Every write path resolves its advisory-lock directory as `storage.as_ref().map(..).unwrap_or(".qdev/cache")`, so a caller that omits `storage` locks a different file than one that supplies it — and two locks means no mutual exclusion.
   evidence: Four call sites in `crates/qdev-core/src/write.rs`. The CLI always supplies `storage`, so no caller diverges today; this is the last place a hardcoded default layout survives after `8220a63` and this story. Making `WriteOptions::storage` non-optional is a public API change across the write path. Review by: epic 2 story 2.3 (story leases), the first feature with a second lock to coordinate.
+
+## Scheduled from: epic 1 cross-story review pass 2 (2026-09-10)
+
+Full evidence in `epic-1-cross-story-review-2026-09-10-pass-2.md`. The eight high and medium-high
+findings there are **blocking for epic 1 acceptance** and are not deferred. Recorded here are the
+two pass-1 findings that were dropped by mistake and the mediums.
+
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10.md`
+  summary: H8 — `--if-version` is not a fence on `qdev relate`: a no-op relate exits 0 reporting the current version without comparing it, and `unrelate` does not accept the flag at all.
+  evidence: **Triaged as high and blocking in pass 1, then never scheduled or filed** — a tracking failure, not a missed defect. Re-verified as reproducing verbatim at pass 2. `apply_relation_change` returns before `patch_frontmatter` on the no-op path, so the version is never checked; an agent using the flag as a compare-and-swap fence reads exit 0 as confirmation. Also undocumented: `cli-reference.md` documents `--if-version` on `update` only. Review by: **before epic 1 acceptance** — it is one of pass 1's eight blocking findings.
+  - source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10.md`
+  summary: M1 — `qdev unrelate` with an unknown relation name exits 0 reporting `changed: false` while the real edge survives; `relate` reports the same input as `invalid_relation_kind` with a message that misdescribes it.
+  evidence: Filed in pass 1 with "review by: with the identity-resolution story"; that story shipped as `61cebe7` without touching it, so the review-by point elapsed silently. Re-verified as reproducing at pass 2. Review by: **before epic 1 acceptance**, with H8 — both are in the relation write path.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10-pass-2.md`
+  summary: `qdev validate --fix-ids` exits 0 on a workspace whose plain `qdev validate` exits 1, whenever there are no duplicate ids to fix.
+  evidence: Early `return ExitCode::Success` when the duplicate scan is empty (`main.rs:2198`), contradicting the exit rule stated in that function's own comment. A CI step running `--fix-ids --yes` as self-healing validation goes green on a workspace with error-severity findings. Review by: with the H8/M1 contract work — same command family.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10-pass-2.md`
+  summary: `qdev update --field schema_version=99` emits a JSON document with two `schema_version` keys, so a lenient parser reads the envelope's contract version as 99.
+  evidence: `MANAGED_FIELDS` blocks `id`/`version`/`updated_by`/`created_by` but not `schema_version`, and the update payload is `#[serde(flatten)]`ed into the envelope. `DoctorSectionReport`'s serializer has a duplicate-key `debug_assert` for exactly this hazard. Review by: epic 3 story 3.2, which freezes the payload contract — or sooner, since the fix is one entry in a list.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10-pass-2.md`
+  summary: `qdev init` is the only cache mutator that does not take `<cache_dir>/write.lock`, so its drop-and-recreate is serialized against concurrent writers only by SQLite's own locking.
+  evidence: Reported independently by two reviewers; verified that `init` proceeds immediately while every other command exits 5 `lock_timeout` against a held lock. No wrong end state was constructed — the Markdown files are the source of truth and `init` clears `sync_state` — so this is an unenforced invariant rather than a demonstrated defect. Review by: with the NEW-1/NEW-2 migration work, which is already in `initialize_cache`.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10-pass-2.md`
+  summary: A `./`-prefixed layout value defeats the normalization added by `60f509d` — `.gitignore` gets entries git cannot honour, and `parent_dir_of("./cache")` scaffolds `gates/` at the repo root where `"cache"` puts it under `.qdev`.
+  evidence: Verified with `git status`: the live cache is untracked-but-committable. The loader trims whitespace and a trailing `/` but not a leading `./`, and `parent_dir_of`'s fallback differs between the two spellings of one directory. Review by: with the remaining layout work — it is the same class as the empty/absolute guard already added.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10-pass-2.md`
+  summary: `--fix-ids` renames within the file's current directory, ignoring the directory half of the identity rule, so it reports a repair that leaves the entity readable but not writable.
+  evidence: Reproduced: a duplicate in `docs/specs/stories/epic1/` is renamed to `epic1/E1S2.md` and reported at exit 0, after which `get E1S2` works and `update E1S2` fails "Entity file not found". This is the state `61cebe7` says the rename removes; the off-convention warning names the correct destination, so the information is available. Review by: with NEW-3, which is the same story's blind spot on the other side.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10-pass-2.md`
+  summary: `payload-doctor.json`'s `finding_count` description still says four computed checks; there are five.
+  evidence: The doctor doc comments were corrected when the fifth check landed and the schema description was not. Review by: next time a payload schema is touched.
