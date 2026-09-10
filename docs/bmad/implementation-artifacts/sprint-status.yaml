@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-10-2026 15:00
+last_updated: 09-10-2026 16:00
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -161,5 +161,5 @@ action_items:
     action: "Process: run a cross-story review before closing an epic; per-story review
       is structurally blind to seam defects"
     owner: "Simon"
-    status: open
+    status: done
     ref: "docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md"

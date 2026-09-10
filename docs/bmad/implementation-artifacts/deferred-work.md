@@ -118,3 +118,34 @@ Confirmed by re-checking every section-D claim against the tree at `a706c85`; se
 - source_spec: `docs/bmad/implementation-artifacts/spec-1-14-cache-version-stamp-hardening.md`
   summary: Flaky test — `sweep_tests::test_real_v1_cache_rebuilds_to_current_schema_and_matches_a_fresh_sweep` failed once in a full `cargo test --workspace` run and did not reproduce in 3 isolated and 7 further full runs.
   evidence: Observed 2026-09-10 during story verification; the assertion text was not captured. The test compares a rebuilt cache against a fresh sweep of the same tree, so the likely suspects are mtime/size granularity in `sync_state` or a timestamp captured either side of a second boundary. A flake in exactly the "rebuild equals sweep" invariant is worth pinning down rather than re-running. Review by: first time it fails again, or epic 2 planning — whichever comes first.
+
+## Scheduled from: epic 1 cross-story review (2026-09-10)
+
+Full evidence and reproductions in `epic-1-cross-story-review-2026-09-10.md`. The eight high
+findings are **blocking for epic 1 acceptance** and are not deferred — they cluster into three
+stories named at the end of that document. The medium and low findings are recorded here.
+
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10.md`
+  summary: `qdev unrelate` with a misspelled relation name exits 0 reporting `changed: false` while the real edge survives; `relate` reports the same input as `invalid_relation_kind` with a message that misdescribes it.
+  evidence: Re-verified by the reviewing session. `dag.rs:14-27` returns an empty slice for an unrecognised relation, so `main.rs:1485` cannot distinguish "unknown relation" from "disallowed kind pair", and `handle_unrelate` (`main.rs:1605-1630`) does no relation-name check at all. Every other enum-valued argument is an exit-2 usage error. A cleanup script reads exit 0 as "edge removed". Review by: with the identity-resolution story, which already touches the relation write path.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10.md`
+  summary: `duplicate_planning_id` scans `specs_dir` only, so id collisions among sprints, DW, decisions, releases and SOUP in `state_dir` are never reported — and then trigger the purge defect when one file is deleted.
+  evidence: Reproduced: two files in `docs/state/sprints/` both declaring `sprint-1` yield `findings: []`. `validate.rs:38` joins `specs_dir` alone where hydration collects from both directories (`sqlite.rs:2922`). Review by: with the purge/re-hydration story — the two defects compound.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10.md`
+  summary: Schema validation before a write resolves the entity kind by directory-then-grammar; hydration resolves it by frontmatter `kind:` first, so `update` can exit 0 on a file the next boot records a `schema_violation` for.
+  evidence: Reproduced with an ADR file declaring `kind: story`. `--fix-ids` is the only writer that resolves kind the way hydration does, and its comment at `main.rs:2469` names the invariant the others break. Blast radius is limited to the `appetite`/`safety_class` enums today and widens as the schemas differentiate. Review by: with the identity-resolution story.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10.md`
+  summary: "Entity does not exist" carries three error codes across two exit classes, and a malformed entity file gets five different answers from five commands — `relate` reporting "not found" for an entity that exists with a corrupt file.
+  evidence: Reproduced across `get`/`update`/`relate`/`sync`/`validate`. A `relate` target that does not exist is exit 1 `dangling_relation` while a missing source is exit 2 `usage_error`, so one mistyped id lands in either "your invocation was wrong" or "the workspace has a defect". Review by: epic 3 story 3.2, which freezes the failure taxonomy — but the `relate` source/target split is worth fixing sooner.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10.md`
+  summary: `find_workspace_root` accepts `.git` as a root marker while the workspace guards require `qdev.toml`, so a submodule or vendored clone inside a workspace becomes a shadow root that `create story` will write duplicate ids into.
+  evidence: Reproduced: from a nested directory containing a `.git` file, `qdev list stories` exits 2 while `qdev create story E1` exits 0 and writes a duplicate id no sweep will see. Two guards at the same seam disagree about the same cwd. Review by: with the configuration-merge story, which owns root and layout resolution.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10.md`
+  summary: `qdev init` treats an unparseable `qdev.toml` as absent where every other command treats it as fatal, so it reports success on a workspace no command can use and scaffolds the default layout over a configured one.
+  evidence: Reproduced. `init.rs:44-49` swallows the parse error; `config/mod.rs:1216` makes it an exit-2 usage error before dispatch — which also means `doctor` can never diagnose a bad config. Review by: with the configuration-merge story.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10.md`
+  summary: `qdev doctor` exits 5 on advisory-lock contention, contradicting the "a report, never a gate" promise added to `cli-reference.md` on 2026-09-10.
+  evidence: Reproduced by holding `write.lock`: `get`, `list` and `doctor` all exit 5 after the 5 s timeout, because boot's sweep takes the lock. Read-only commands blocking on a writer was adjudicated as intended by spec 1.7, but the doctor promise post-dates that and is now false. Either doctor skips the boot sweep or the doc is corrected. Review by: before the first tagged release — a diagnostic that fails when the system is busy is the diagnostic you need most.
+- source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10.md`
+  summary: Eight low findings — `create_story`'s weaker cache predicate, `init` reporting hardcoded default paths, `payload-fix-ids.json` missing its `error` field, `cli-reference.md` self-contradictions on payload schemas and `--json` coverage, `sync`'s partial `findings=` count, `delete_entity` not being the purge cascade, off-convention files being readable but not writable, and story-id allocation outside the lock.
+  evidence: Each reproduced or read directly; see the Low section of the cross-story review for sites and scenarios. Grouped as one ledger entry because they are cheap individually and none loses state. Review by: epic 2 planning, to be swept up with whichever stories touch those files.
