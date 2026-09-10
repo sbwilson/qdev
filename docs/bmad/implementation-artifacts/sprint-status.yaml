@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-10-2026 16:00
+last_updated: 09-10-2026 17:00
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -39,6 +39,8 @@ development_status:
   1-13-qdev-schema: done
   1-14-cache-version-stamp-hardening: done
   epic-1-retrospective: done
+  # Post-retrospective work, tracked here so the epic's state is legible from one file.
+  1-15-identity-resolution-seam: done
 
   epic-2: backlog
   2-1-state-machine-lifecycle-hooks: backlog

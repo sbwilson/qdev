@@ -131,7 +131,7 @@ Per **AD-7**, IDs never encode a sprint and are immutable once committed.
 | Deferred work / Decision | `DW-{hex4+}`, `DEC-{hex4+}` | Random; length grows on collision |
 | Citation | `[E12S4]`, `[AD-43]`, `[DW-7f3a]`, `[E12S4/NG-2]` | Language-appropriate comment prefix |
 
-Sequential planning IDs are allocated by `qdev create`, which scans existing files. `qdev validate` reports duplicates arising from concurrent planning on separate branches and offers a guided renumber that rewrites citations, which is the only sanctioned rename. Sub-stories are expressed with the `extends` relation, not with suffixes.
+Sequential planning IDs are allocated by `qdev create`, which scans existing files. `qdev validate` reports duplicates arising from concurrent planning on separate branches and offers a guided renumber that rewrites citations and renames the file to carry the new id, which is the only sanctioned rename. Sub-stories are expressed with the `extends` relation, not with suffixes.
 
 ---
 
@@ -235,6 +235,26 @@ updated_by: { type: agent, id: claude-code }
 ## Acceptance Criteria
 ...
 ```
+
+### Identity: a file is named for the entity it holds
+
+One rule answers "which file is entity `X`?" for every reader and every writer. `X` lives in its
+kind's directory above, in a file named `X.md`, `X-<slug>.md` or `X_<slug>.md`. Hydration answers
+from the frontmatter `id` and records the file's path; the write path answers from the file name,
+which under this convention is the same file — so it needs no cache dependency and `qdev create
+story` still works outside an initialised workspace. Frontmatter `id` remains the entity's
+identity; the file name is how a writer finds it.
+
+The convention is enforced rather than assumed: `qdev validate` reports
+`entity_file_off_convention` (`warning`) for a hydrated entity whose file name does not carry its
+id or that lives outside every entity directory — readable, since hydration walks both trees
+recursively, but not writable. Two files matching one id is a usage error naming both. The only
+sanctioned rename is `qdev validate --fix-ids`, which renames as it renumbers so the renumbered
+entity is immediately writable, and reports the move in its payload.
+
+An entity's *kind* is resolved by one rule too — frontmatter `kind:`, then the directory, then
+the identifier grammar, then `Story` — used by hydration and by every writer, so a write
+validates against the schema the following sweep validates against.
 
 Frontmatter edits by qdev are line-based patches that preserve comments and ordering.
 

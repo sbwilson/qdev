@@ -734,3 +734,147 @@ fn test_rewrite_citations_preserves_a_non_bracket_citation_syntax() {
     assert_eq!(count, 1);
     assert_eq!(out, "see {{E1S9}} and {{E1S2}}");
 }
+
+// ---------------------------------------------------------------------------
+// entity_file_off_convention: the identity rule every writer resolves by
+// ---------------------------------------------------------------------------
+
+/// A file whose name carries its id, in the standard directory for its kind, is the convention —
+/// nothing to report.
+#[test]
+fn test_on_convention_entity_file_yields_no_finding() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    store
+        .upsert_entity(&entity(
+            "E1S2",
+            EntityKind::Story,
+            "docs/specs/stories/E1S2.md",
+        ))
+        .unwrap();
+    // A `-slug` suffix after the id is part of the convention, not a deviation.
+    store
+        .upsert_entity(&entity(
+            "E1S3",
+            EntityKind::Story,
+            "docs/specs/stories/E1S3-buffer-layout.md",
+        ))
+        .unwrap();
+
+    let findings =
+        qdev_core::find_off_convention_entity_files(&store, &Config::default().storage).unwrap();
+    assert!(findings.is_empty(), "{:?}", findings);
+}
+
+/// A filename that does not carry its entity's id is exactly what the write path cannot resolve:
+/// reported, at `warning` severity so a workspace that was legal before does not start failing.
+#[test]
+fn test_filename_not_carrying_its_id_is_a_warning_naming_the_expected_name() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    store
+        .upsert_entity(&entity(
+            "E1S9",
+            EntityKind::Story,
+            "docs/specs/stories/login-flow.md",
+        ))
+        .unwrap();
+
+    let findings =
+        qdev_core::find_off_convention_entity_files(&store, &Config::default().storage).unwrap();
+    assert_eq!(findings.len(), 1, "{:?}", findings);
+    assert_eq!(findings[0].code, "entity_file_off_convention");
+    assert_eq!(findings[0].severity, "warning");
+    assert_eq!(findings[0].path, "docs/specs/stories/login-flow.md");
+    let message = findings[0].message.as_deref().unwrap();
+    assert!(
+        message.contains("docs/specs/stories/login-flow.md"),
+        "{message}"
+    );
+    assert!(message.contains("docs/specs/stories/E1S9.md"), "{message}");
+    // Not an error: `qdev validate` must still exit 0 on it.
+    assert!(!qdev_core::has_error_finding(&findings));
+}
+
+/// The other half of the rule: a file outside every standard entity directory is readable
+/// (hydration walks recursively) but unresolvable by the write path.
+#[test]
+fn test_entity_file_outside_the_standard_directories_is_a_warning() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    store
+        .upsert_entity(&entity(
+            "E1S9",
+            EntityKind::Story,
+            "docs/specs/misc/E1S9.md",
+        ))
+        .unwrap();
+
+    let findings =
+        qdev_core::find_off_convention_entity_files(&store, &Config::default().storage).unwrap();
+    assert_eq!(findings.len(), 1, "{:?}", findings);
+    assert_eq!(findings[0].severity, "warning");
+    assert!(findings[0]
+        .message
+        .as_deref()
+        .unwrap()
+        .contains("outside every standard entity directory"));
+}
+
+/// A frontmatter `kind:` that disagrees with the file's directory is a kind question, not an
+/// identity one: the write path's cross-kind fallback resolves the id in any standard directory,
+/// so this must not be reported — otherwise the kind-disagreement case would start emitting a
+/// finding on every sweep.
+#[test]
+fn test_kind_disagreeing_with_a_standard_directory_is_not_off_convention() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    // An ADR file (in the ADR directory) whose frontmatter declares `kind: story`, so hydration
+    // recorded it as a Story.
+    store
+        .upsert_entity(&entity(
+            "AD-9",
+            EntityKind::Story,
+            "docs/specs/adrs/AD-9.md",
+        ))
+        .unwrap();
+
+    let findings =
+        qdev_core::find_off_convention_entity_files(&store, &Config::default().storage).unwrap();
+    assert!(findings.is_empty(), "{:?}", findings);
+}
+
+/// The check honours a configured layout rather than the default one.
+#[test]
+fn test_off_convention_check_follows_configured_storage_dirs() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    store
+        .upsert_entity(&entity("E1S2", EntityKind::Story, "spec/stories/E1S2.md"))
+        .unwrap();
+
+    let mut config = Config::default();
+    config.storage.specs_dir = "spec".to_string();
+    let findings = qdev_core::find_off_convention_entity_files(&store, &config.storage).unwrap();
+    assert!(findings.is_empty(), "{:?}", findings);
+
+    // The same row is off-convention under the default layout.
+    let default_findings =
+        qdev_core::find_off_convention_entity_files(&store, &Config::default().storage).unwrap();
+    assert_eq!(default_findings.len(), 1);
+}
+
+/// `run_validation` reports it alongside the other computed checks, and it alone must not change
+/// the exit-code decision.
+#[test]
+fn test_run_validation_includes_the_off_convention_check_without_failing_the_run() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteStore::open_in_memory().unwrap();
+    store
+        .upsert_entity(&entity(
+            "E1S9",
+            EntityKind::Story,
+            "docs/specs/stories/login-flow.md",
+        ))
+        .unwrap();
+
+    let findings = qdev_core::run_validation(&store, temp.path(), &Config::default()).unwrap();
+    assert_eq!(findings.len(), 1, "{:?}", findings);
+    assert_eq!(findings[0].code, "entity_file_off_convention");
+    assert!(!qdev_core::has_error_finding(&findings));
+}

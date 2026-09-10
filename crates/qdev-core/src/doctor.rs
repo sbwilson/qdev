@@ -86,7 +86,7 @@ pub trait DoctorSection {
 ///
 /// Its `finding_count` is deliberately narrow: it is the number of rows in the `findings` table,
 /// i.e. the findings *hydration* recorded. It is not the answer to "is my workspace healthy?" —
-/// four of `qdev validate`'s eight checks are computed fresh at request time and never written
+/// five of `qdev validate`'s checks are computed fresh at request time and never written
 /// to that table, so they cannot appear here. The `validation` section reports those.
 pub struct CacheDoctorSection;
 
@@ -169,8 +169,9 @@ impl DoctorSection for CacheDoctorSection {
 /// for this workspace, plus a per-code breakdown.
 ///
 /// This exists because the `cache` section structurally cannot answer the question `doctor` is
-/// asked. Four checks (`duplicate_planning_id`, `orphan_deferred_work`,
-/// `dw_missing_rationale`, `target_module_not_registered`) are computed fresh and never written
+/// asked. Five checks (`duplicate_planning_id`, `orphan_deferred_work`,
+/// `dw_missing_rationale`, `target_module_not_registered`, `entity_file_off_convention`) are
+/// computed fresh and never written
 /// to the `findings` table, so a table read reports half the evidence — and reports `0` on a
 /// workspace with real defects. Running `run_validation` keeps one definition of "what is wrong
 /// with this workspace" shared with `qdev validate`, and keeps it read-only: a persisted

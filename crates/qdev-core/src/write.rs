@@ -832,6 +832,138 @@ pub struct RelationRowChange {
     pub add: bool,
 }
 
+/// Deletes one entity's own rows — `entities`, its `stories` detail row, and its
+/// `dirty_entities` marker — and nothing else.
+///
+/// Not the hydration purge cascade (`purge_entity_with_children`): it deliberately leaves
+/// `relations` and `constraints` alone. Every caller here is repairing a row that names an id
+/// its file no longer declares, while the edges pointing at that id are being redirected by a
+/// separate write; a cascade would delete those edges instead of moving them.
+fn delete_entity_row_shallow(tx: &rusqlite::Transaction, id: &str) -> Result<(), QdevError> {
+    // The detail row is deleted through hydration's own kind mapping rather than a second copy
+    // of it: hardcoding `stories` here would leave an orphan row for every other kind — a
+    // renumbered deferred-work item, decision, sprint, SOUP entry or evidence record keyed on
+    // an id no file declares any more.
+    let kind: Option<String> = tx
+        .query_row(
+            "SELECT kind FROM entities WHERE id = ?1;",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to read the kind of entity '{}': {}", id, e),
+            )
+        })?;
+    if let Some(kind) = kind
+        .as_deref()
+        .and_then(|k| EntityKind::from_str_loose(k).ok())
+    {
+        crate::store::sqlite::delete_kind_detail_row(tx, id, kind)?;
+    }
+
+    for (sql, what) in [
+        // Constraints are owned by the entity and keyed on its id, so they are orphaned by an
+        // id edit exactly as the detail row is. `relations` are deliberately *not* deleted —
+        // `--fix-ids` redirects the inbound edges after the renumber, and a cascade here would
+        // delete the edges it is about to rewrite.
+        (
+            "DELETE FROM constraints WHERE owner_id = ?1;",
+            "constraint rows",
+        ),
+        ("DELETE FROM dirty_entities WHERE id = ?1;", "dirty marker"),
+        ("DELETE FROM entities WHERE id = ?1;", "entity row"),
+    ] {
+        tx.execute(sql, rusqlite::params![id]).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to delete {} for entity '{}': {}", what, id, e),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Drops the cache row for `id` when — and only when — it still claims `source_path`, together
+/// with that path's `sync_state` and `findings` rows.
+///
+/// This is the write path's answer to a file that *moved*: `qdev validate --fix-ids` renames a
+/// renumbered file, so the row naming the old id at the old path describes a file that no longer
+/// exists there. Left in place it is a second row for one entity, and `qdev get <old id>` keeps
+/// answering from it. The guard on `source_path` is what makes this safe in the duplicate case:
+/// when the old id's row belongs to the *keeper* file (which still holds that id, on disk and
+/// unchanged), the path does not match and the row is left exactly as it is.
+///
+/// `relations` are untouched, for the reason given on [`delete_entity_row_shallow`].
+pub fn purge_entity_row_for_moved_file(
+    cache_db_path: &Path,
+    id: &str,
+    source_path: &str,
+) -> Result<bool, QdevError> {
+    if !cache_db_path.exists() {
+        return Ok(false);
+    }
+    let store = crate::store::SqliteStore::open(cache_db_path)?;
+    store.with_conn_mut(|conn| {
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!("Failed to begin purge transaction: {}", e),
+                )
+            })?;
+
+        let claims: bool = tx
+            .query_row(
+                "SELECT COUNT(*) FROM entities WHERE id = ?1 AND source_path = ?2;",
+                rusqlite::params![id, source_path],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!("Failed to check the cache row for '{}': {}", id, e),
+                )
+            })?;
+
+        if claims {
+            delete_entity_row_shallow(&tx, id)?;
+        }
+
+        // The path itself is gone either way: its `sync_state` row would otherwise let a later
+        // incremental sweep believe a vanished file was already accounted for, and its findings
+        // would be reported against a file that no longer exists.
+        for sql in [
+            "DELETE FROM sync_state WHERE path = ?1;",
+            "DELETE FROM findings WHERE path = ?1;",
+        ] {
+            tx.execute(sql, rusqlite::params![source_path])
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to clear cache rows for '{}': {}", source_path, e),
+                    )
+                })?;
+        }
+
+        tx.commit().map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to commit purge transaction for '{}': {}", id, e),
+            )
+        })?;
+        Ok(claims)
+    })
+}
+
 /// Upserts an updated entity into the SQLite cache `entities` (and kind-specific) table,
 /// records its dirty status in `dirty_entities`, and invalidates `sync_state`.
 /// Configures WAL mode and `busy_timeout = 5000ms`.
@@ -882,6 +1014,51 @@ pub fn upsert_cache_with_relation(
             Some(ref a) => (Some(a.author_type.clone()), Some(a.id.clone())),
             None => (None, None),
         };
+
+        // 0. Drop any row still claiming this file under a different id, the way hydration does
+        // (`sqlite.rs`, "in-place id edit"). `ON CONFLICT(id)` alone cannot see that collision,
+        // so an id edit — `qdev validate --fix-ids` is the only writer that makes one — left two
+        // `entities` rows pointing at one file, one of them naming an id the file no longer
+        // declares.
+        //
+        // Deliberately narrower than hydration's cascade: `relations` rows are left alone.
+        // `--fix-ids` redirects inbound edges through `qdev relate`'s own write path *after* the
+        // renumber, so deleting `relations WHERE target_id = <old id>` here would delete the
+        // edges it is about to redirect and lose them silently.
+        let stale_path_ids: Vec<String> = {
+            let mut stmt = tx
+                .prepare("SELECT id FROM entities WHERE source_path = ?1 AND id <> ?2;")
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to prepare source_path conflict scan: {}", e),
+                    )
+                })?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![entity.source_path, entity.id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to scan for rows claiming '{}': {}", entity.source_path, e),
+                    )
+                })?;
+            let mut ids = Vec::new();
+            for r in rows {
+                ids.push(r.map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to read conflicting row id: {}", e),
+                    )
+                })?);
+            }
+            ids
+        };
+        for stale_id in &stale_path_ids {
+            delete_entity_row_shallow(&tx, stale_id)?;
+        }
 
         // 1. Upsert into entities table (preserve existing created_by via COALESCE if omitted)
         tx.execute(
@@ -1029,7 +1206,11 @@ ON CONFLICT(id) DO UPDATE SET dirty_at = excluded.dirty_at;
 }
 
 /// Standard entity file resolution directory map with optional storage config.
-fn directory_for_kind(storage: Option<&StorageConfig>, kind: EntityKind) -> PathBuf {
+///
+/// This is the directory half of the one identity rule stated on [`resolve_entity_file`]:
+/// `qdev validate` reports an entity file that lives outside every directory this map names, so
+/// the convention the write path assumes is enforced rather than merely hoped for.
+pub(crate) fn directory_for_kind(storage: Option<&StorageConfig>, kind: EntityKind) -> PathBuf {
     let default_storage = StorageConfig::default();
     let st = storage.unwrap_or(&default_storage);
     match kind {
@@ -1049,34 +1230,70 @@ fn directory_for_kind(storage: Option<&StorageConfig>, kind: EntityKind) -> Path
     }
 }
 
+/// Does `file_name` carry `id`, i.e. is it `<id>.md`, `<id>-<slug>.md` or `<id>_<slug>.md`
+/// (case-insensitively)? This is the filename half of the one identity rule stated on
+/// [`resolve_entity_file`], and the single place that rule is spelled out: `find_file_in_dir`
+/// resolves writes with it and `qdev validate` reports a file that fails it.
+pub(crate) fn filename_carries_id(file_name: &str, id: &str) -> bool {
+    if !file_name.ends_with(".md") {
+        return false;
+    }
+    let name_lower = file_name.to_ascii_lowercase();
+    let id_lower = id.to_ascii_lowercase();
+    name_lower == format!("{}.md", id_lower)
+        || name_lower.starts_with(&format!("{}-", id_lower))
+        || name_lower.starts_with(&format!("{}_", id_lower))
+}
+
+/// The canonical file name for an entity: `<id>.md`. Reported as the expected name by
+/// `qdev validate`'s off-convention check, and the rename target `--fix-ids` writes to.
+pub fn canonical_file_name(id: &str) -> String {
+    format!("{}.md", id)
+}
+
+/// The file name an entity's file must take when its id changes from `old_id` to `new_id`, so
+/// the renamed file still carries its id and stays resolvable by [`resolve_entity_file`].
+///
+/// A `-slug`/`_slug` suffix is preserved (`E1S1-buffer-layout.md` -> `E1S2-buffer-layout.md`);
+/// the id part is replaced with `new_id` as written, so the new name is canonically cased even
+/// when the old one was not. A name that does not carry `old_id` at all cannot have a suffix
+/// identified, so it becomes the canonical `<new_id>.md`.
+pub fn renamed_file_name(current_name: &str, old_id: &str, new_id: &str) -> String {
+    if filename_carries_id(current_name, old_id) {
+        let suffix = current_name.get(old_id.len()..).unwrap_or("");
+        format!("{}{}", new_id, suffix)
+    } else {
+        canonical_file_name(new_id)
+    }
+}
+
 /// Finds a file matching `id.md` or `id-*.md` or `id_*.md` in `dir` (case-insensitively).
 /// Returns an error if multiple files match the entity ID.
+/// The write path's "which file holds this id?" question, for callers outside this module.
+///
+/// Answers with the one file in `dir` whose name carries `id` per the identity rule, `None` if
+/// there is none, and a usage error naming every candidate if more than one does — which is what
+/// makes it the right pre-flight check before renaming a file *to* an id.
+pub fn find_file_in_dir_for_id(dir: &Path, id: &str) -> Result<Option<PathBuf>, QdevError> {
+    find_file_in_dir(dir, id)
+}
+
 fn find_file_in_dir(dir: &Path, id: &str) -> Result<Option<PathBuf>, QdevError> {
     if !dir.exists() {
         return Ok(None);
     }
-    let direct = dir.join(format!("{}.md", id));
+    let direct = dir.join(canonical_file_name(id));
     let mut matches = Vec::new();
     if direct.is_file() {
         matches.push(direct);
     }
 
     if let Ok(entries) = fs::read_dir(dir) {
-        let id_lower = id.to_ascii_lowercase();
-        let exact_lower = format!("{}.md", id_lower);
-        let prefix_dash_lower = format!("{}-", id_lower);
-        let prefix_underscore_lower = format!("{}_", id_lower);
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file() {
                 if let Some(name) = entry.file_name().to_str() {
-                    let name_lower = name.to_ascii_lowercase();
-                    if (name_lower == exact_lower
-                        || name_lower.starts_with(&prefix_dash_lower)
-                        || name_lower.starts_with(&prefix_underscore_lower))
-                        && name.ends_with(".md")
-                        && !matches.contains(&path)
-                    {
+                    if filename_carries_id(name, id) && !matches.contains(&path) {
                         matches.push(path);
                     }
                 }
@@ -1103,7 +1320,27 @@ fn find_file_in_dir(dir: &Path, id: &str) -> Result<Option<PathBuf>, QdevError> 
     }
 }
 
-/// Resolves an entity file path and entity kind given workspace root, optional kind, ID, and optional storage config.
+/// Resolves an entity file path and entity kind given workspace root, optional kind, ID, and
+/// optional storage config. **The single entry point every writer uses** — no caller grows its
+/// own lookup.
+///
+/// # The one identity rule
+///
+/// **A file is named for the entity it holds.** An entity with frontmatter `id: X` lives in
+/// `<specs_dir|state_dir>/<kind-dir>/` (see [`directory_for_kind`]) in a file named `X.md`,
+/// `X-<slug>.md` or `X_<slug>.md` (see [`filename_carries_id`]). Reads answer "which file is
+/// entity X?" from frontmatter `id` and remember the path; writes answer it from the file name,
+/// which under this convention is the same file — so the write path needs no cache dependency
+/// and `qdev create story` keeps working outside an initialised workspace.
+///
+/// The convention is enforced, not assumed: `qdev validate` reports a `warning`-severity
+/// `entity_file_off_convention` finding for every hydrated entity whose file breaks either half
+/// of it, and `qdev validate --fix-ids` renames as it renumbers so a renumbered entity is
+/// immediately writable. A file that breaks it is still readable (hydration walks the spec and
+/// state trees recursively) but may not be resolvable here; the finding names it and the name it
+/// should have.
+///
+/// Ambiguity is never a guess: two files matching one id produce a usage error naming both.
 pub fn resolve_entity_file(
     workspace_root: &Path,
     kind_opt: Option<EntityKind>,
@@ -1194,6 +1431,30 @@ pub fn resolve_entity_file(
                 .collect::<Vec<_>>()
         ))),
     }
+}
+
+/// The kind a writer validates against, resolved the way hydration resolves it.
+///
+/// [`resolve_entity_file`] answers "which file?" from the file name; it must not also be the
+/// authority on "which kind?", because it reads the directory and the identifier grammar while
+/// hydration prefers frontmatter `kind:`. A writer that trusted it validated against one schema
+/// and the next boot sweep validated the file it had just written against another, recording an
+/// error-severity `schema_violation` on a write that had exited 0.
+///
+/// So kind collapses onto [`crate::store::determine_entity_kind`] — hydration's own rule —
+/// applied to the content this write is about to leave on disk, which is exactly what the next
+/// sweep will read. `resolved_kind` is the fallback for content whose frontmatter cannot be
+/// extracted at all (the caller reports that failure on its own terms).
+pub fn kind_for_write(file_path: &Path, content: &str, resolved_kind: EntityKind) -> EntityKind {
+    let frontmatter = match crate::schema::extract_frontmatter(content) {
+        Ok(v) => v,
+        Err(_) => return resolved_kind,
+    };
+    let id = frontmatter
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    crate::store::determine_entity_kind(file_path, id, &frontmatter)
 }
 
 /// Options for applying an entity update.
@@ -1324,7 +1585,10 @@ pub fn apply_entity_update(options: &EntityUpdateOptions) -> Result<EntityUpdate
         patched_content = replace_markdown_section(&patched_content, &heading, &new_body)?;
     }
 
-    // 6. Validate updated frontmatter against JSON Schema
+    // 6. Validate updated frontmatter against JSON Schema, against the kind hydration will
+    // resolve for this file once it is written (frontmatter `kind:` first) — not the kind the
+    // filename lookup happened to use, so this write and the next sweep agree.
+    let kind = kind_for_write(&file_path, &patched_content, kind);
     validate_frontmatter(kind, &patched_content).map_err(|errs| {
         QdevError::logical_failure(
             "schema_validation_failed",
@@ -1912,6 +2176,11 @@ pub fn apply_relation_change(
         )
     })?;
 
+    // The kind this write validates against is hydration's, not the filename lookup's (see
+    // `kind_for_write`). A relate/unrelate never edits `kind:`, so resolving it once from the
+    // content just read also covers the idempotent no-op return below.
+    let kind = kind_for_write(&file_path, &existing_content, kind);
+
     // Parse the raw frontmatter YAML directly (rather than through `schema::extract_frontmatter`,
     // whose `serde_json::Value` uses an unordered/sorted `Map`) so the `relations:` map's key
     // order — and the order of other relation kinds within it — survives the round trip. A parse
@@ -2076,7 +2345,9 @@ pub fn apply_relation_change(
 
     let (patched_content, new_version) = patch_frontmatter(&existing_content, &patch_opts)?;
 
-    // 6. Validate updated frontmatter against JSON Schema
+    // 6. Validate updated frontmatter against JSON Schema, against hydration's own kind rule
+    // (see `kind_for_write`, resolved from the file content in step 3) so this write and the
+    // next sweep validate against one schema.
     validate_frontmatter(kind, &patched_content).map_err(|errs| {
         QdevError::logical_failure(
             "schema_validation_failed",

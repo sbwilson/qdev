@@ -1115,3 +1115,173 @@ updated_by:
     assert!(content.contains("type: agent"), "got: {}", content);
     assert!(content.contains("id: claude-code"), "got: {}", content);
 }
+
+// ---------------------------------------------------------------------------
+// Kind agreement between a write and the sweep that follows it (identity seam)
+// ---------------------------------------------------------------------------
+
+/// A file's frontmatter `kind:` is what hydration believes, so it is what a write must validate
+/// against. Before this, writers took the kind from the directory: an update validated against
+/// the ADR schema, exited 0, and the next boot sweep recorded an error-severity
+/// `schema_violation` on the file it had just written.
+#[test]
+fn test_update_validates_against_frontmatter_kind_not_the_directory() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    // In the ADR directory, but declaring `kind: story`. `appetite` is a free-form extra field
+    // under the ADR schema and an enum under the story schema, so the two schemas disagree
+    // about this file.
+    let adrs = root.join("docs/specs/adrs");
+    fs::create_dir_all(&adrs).unwrap();
+    fs::write(
+        adrs.join("AD-9.md"),
+        r#"---
+id: AD-9
+kind: story
+title: Buffer layout decision
+status: draft
+version: 1
+appetite: bogus
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Decision
+- Chosen.
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["update", "AD-9", "--status", "ready", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["error"]["code"], "schema_validation_failed");
+    // Nothing was written: the file still says draft.
+    let content = fs::read_to_string(adrs.join("AD-9.md")).unwrap();
+    assert!(content.contains("status: draft\n"), "{content}");
+}
+
+/// The other side of the same rule: when the write does succeed on a file whose `kind:`
+/// disagrees with its directory, the next boot sweep must record no new `schema_violation` for
+/// it — the write and the sweep now validate against one schema.
+#[test]
+fn test_update_on_a_kind_disagreeing_file_leaves_no_schema_violation_behind() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let adrs = root.join("docs/specs/adrs");
+    fs::create_dir_all(&adrs).unwrap();
+    fs::write(
+        adrs.join("AD-9.md"),
+        r#"---
+id: AD-9
+kind: story
+title: Buffer layout decision
+status: draft
+version: 1
+appetite: small
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Decision
+- Chosen.
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["update", "AD-9", "--status", "ready"])
+        .assert()
+        .success();
+
+    // The next command boots, sweeps, and validates: no finding may have appeared for the file
+    // the update just wrote.
+    let mut validate = Command::cargo_bin("qdev").unwrap();
+    let assert = validate
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .success()
+        .code(0);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let findings = val["findings"].as_array().unwrap();
+    assert!(
+        !findings
+            .iter()
+            .any(|f| f["path"] == "docs/specs/adrs/AD-9.md"),
+        "the sweep must record nothing for the file the write just validated: {val}"
+    );
+}
+
+/// The kind is resolved from the *patched* content, not the content that was read — so an update
+/// that itself edits `kind:` is validated against the kind it is creating. That choice is the
+/// only reason to prefer patched over existing content, and it was the one case no test covered:
+/// both other kind tests use files that already declare `kind:` before the update, where the two
+/// answers coincide.
+#[test]
+fn test_update_that_changes_kind_validates_against_the_new_kind() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    // A conventional ADR: no `kind:` field, so it reads as an ADR by directory. `appetite` is a
+    // free-form extra field under the ADR schema and an enum under the story schema.
+    let adrs = root.join("docs/specs/adrs");
+    fs::create_dir_all(&adrs).unwrap();
+    fs::write(
+        adrs.join("AD-8.md"),
+        r#"---
+id: AD-8
+title: Kind flip decision
+status: draft
+version: 1
+appetite: bogus
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Decision
+- Chosen.
+"#,
+    )
+    .unwrap();
+
+    // Flipping it to a story must be judged by the story schema, which rejects `appetite: bogus`.
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["update", "AD-8", "--field", "kind=story", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["error"]["code"], "schema_validation_failed");
+
+    let content = fs::read_to_string(adrs.join("AD-8.md")).unwrap();
+    assert!(
+        !content.contains("kind: story"),
+        "a refused update must leave the file alone: {content}"
+    );
+}

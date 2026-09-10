@@ -2260,36 +2260,86 @@ fn handle_fix_ids(
     let lock_path = root.join(&storage.cache_dir).join("write.lock");
     let lock_timeout = std::time::Duration::from_millis(5000);
 
+    // True once the workspace has been touched at all. The reconcile below is gated on this,
+    // not on `renumbered`: the relation and citation steps are fallible, so a run that aborted
+    // in one of them had already written a file whose id the cache does not know yet.
+    let mut wrote_anything = false;
+    // Entries refused for their own reason (an occupied rename target) rather than aborting the
+    // run, and entries never reached because the run aborted. Both end up in `skipped`; these
+    // carry the detail the payload would otherwise lose.
+    let mut refused: Vec<QdevError> = Vec::new();
+    let mut unprocessed: Vec<String> = Vec::new();
+
     for planned in &plan {
         // The renumber writes the entity file and its cache row directly, so it takes the same
         // advisory lock `qdev update` and `qdev relate` take. The lock is scoped to each write
         // rather than held across the whole loop, because `apply_relation_change` below acquires
         // it for itself and the lock is not reentrant.
         let renumber_result = match qdev_core::acquire_write_lock(&lock_path, lock_timeout) {
-            Ok(_guard) => renumber_duplicate_file(
-                root,
-                annotated_config,
-                &planned.path,
-                &planned.new_id,
-                &author,
-            ),
+            Ok(_guard) => {
+                // Set before the call, not after: a failure inside it can still have written
+                // the renamed file, and the reconcile is what makes that state coherent.
+                wrote_anything = true;
+                renumber_duplicate_file(
+                    root,
+                    annotated_config,
+                    &planned.path,
+                    &planned.new_id,
+                    &author,
+                )
+            }
             Err(e) => Err(e),
         };
-        if let Err(e) = renumber_result {
-            aborted = Some(e);
-            break;
-        }
+        let new_path = match renumber_result {
+            Ok(new_path) => new_path,
+            // A refused rename target is one entry's problem, not the run's: the frozen matrix
+            // says refuse *that entry* and record it as skipped, so the remaining duplicate
+            // groups — which the user already confirmed at the prompt — still get repaired.
+            // Anything else aborts the loop, because a failure we cannot attribute to this one
+            // file may well repeat on the next.
+            Err(e) if e.code() == "rename_target_exists" => {
+                skipped.push(planned.path.clone());
+                refused.push(e);
+                continue;
+            }
+            Err(e) => {
+                skipped.push(planned.path.clone());
+                aborted = Some(e);
+                // Everything still planned is reported too, so the payload never leaves a
+                // planned file in neither list.
+                unprocessed.extend(
+                    plan.iter()
+                        .skip_while(|p| p.path != planned.path)
+                        .skip(1)
+                        .map(|p| p.path.clone()),
+                );
+                break;
+            }
+        };
+
+        // Recorded the moment the file is written, before the two fallible steps below: an abort
+        // in either of them must still report the write that already happened. Gating the report
+        // on reaching the end of the loop body is what lost it before.
+        renumbered.push(FixIdsEntry {
+            old_path: planned.path.clone(),
+            new_path,
+            old_id: planned.old_id.clone(),
+            new_id: planned.new_id.clone(),
+            relations_rewritten: Vec::new(),
+            citations_rewritten: 0,
+        });
+        let entry = renumbered.len() - 1;
 
         // References follow the renumbered entity. Each `apply_relation_change` takes the write
         // lock for its own write, so this runs outside the guard above.
-        let relations_rewritten = match rewrite_relations_to(
+        match rewrite_relations_to(
             root,
             annotated_config,
             &planned.old_id,
             &planned.new_id,
             &author,
         ) {
-            Ok(sources) => sources,
+            Ok(sources) => renumbered[entry].relations_rewritten = sources,
             Err(e) => {
                 aborted = Some(e);
                 break;
@@ -2305,21 +2355,13 @@ fn handle_fix_ids(
             ),
             Err(e) => Err(e),
         };
-        let citations_rewritten = match citation_result {
-            Ok(count) => count,
+        match citation_result {
+            Ok(count) => renumbered[entry].citations_rewritten = count,
             Err(e) => {
                 aborted = Some(e);
                 break;
             }
         };
-
-        renumbered.push(FixIdsEntry {
-            path: planned.path.clone(),
-            old_id: planned.old_id.clone(),
-            new_id: planned.new_id.clone(),
-            relations_rewritten,
-            citations_rewritten,
-        });
     }
 
     // Reconcile the cache with what is now on disk before anything reads it back. The renumber
@@ -2329,8 +2371,17 @@ fn handle_fix_ids(
     // Runs even when the loop aborted: a partial renumber is exactly the case where the cache
     // and the workspace have diverged, and skipping it there would leave the keeper's id absent
     // from the cache with its `sync_state` row intact, so no later incremental sweep would
-    // restore it.
-    if !renumbered.is_empty() {
+    // restore it. That is why the guard is "did we write anything" and not "did an entry make it
+    // all the way through the loop body" — the latter is false in precisely the case that needs
+    // the repair most.
+    skipped.extend(unprocessed);
+    // A run whose only failures were per-entry refusals still reports one of them, so the
+    // command does not exit 0 having silently declined work the user confirmed.
+    if aborted.is_none() {
+        aborted = refused.into_iter().next();
+    }
+
+    if wrote_anything {
         let reconcile = open_query_store(root, annotated_config).and_then(|store| {
             // Dropping each keeper's `sync_state` row forces the sweep to re-parse it even
             // though its content is unchanged, so the id it kept is hydrated back into the
@@ -2365,8 +2416,11 @@ fn handle_fix_ids(
         for entry in &renumbered {
             println!(
                 "Renumbered {} ({} -> {})",
-                entry.path, entry.old_id, entry.new_id
+                entry.old_path, entry.old_id, entry.new_id
             );
+            if entry.new_path != entry.old_path {
+                println!("  Renamed {} -> {}", entry.old_path, entry.new_path);
+            }
             if !entry.relations_rewritten.is_empty() || entry.citations_rewritten > 0 {
                 println!(
                     "  {} relation source(s) and {} citation(s) redirected to {}",
@@ -2410,7 +2464,13 @@ fn handle_fix_ids(
 
 #[derive(Serialize)]
 struct FixIdsEntry {
-    path: String,
+    /// The file's path before the renumber. The rename is performed as a write of the new path
+    /// followed by a delete of this one, so git sees a delete/add pair whose rename detection is
+    /// heuristic — this field and `new_path` are what make the move legible regardless.
+    old_path: String,
+    /// The file's path after the renumber: renamed to carry `new_id`, preserving any
+    /// `-slug`/`_slug` suffix. Equal to `old_path` only if the name already carried `new_id`.
+    new_path: String,
     old_id: String,
     new_id: String,
     /// Source entity ids whose relations were redirected from `old_id` to `new_id`.
@@ -2448,15 +2508,21 @@ struct FixIdsPayload {
 }
 
 /// Rewrites one duplicate file's frontmatter `id`, bumping `version`/`updated_by` via the same
-/// line-based patch engine `qdev update` uses, then validates and atomically writes it, and
-/// upserts the cache the same way `apply_entity_update` does.
+/// line-based patch engine `qdev update` uses, then validates and atomically writes it —
+/// **renaming the file to carry the new id** — and upserts the cache the same way
+/// `apply_entity_update` does. Returns the file's new workspace-relative path.
+///
+/// The rename is what makes the renumbered entity writable. Every writer resolves an entity by
+/// file name (`resolve_entity_file`), so rewriting the frontmatter id alone manufactured an
+/// entity `qdev get` could read and `qdev update` could not find. The `-slug`/`_slug` suffix is
+/// preserved (`renamed_file_name`), and an occupied target is refused rather than clobbered.
 fn renumber_duplicate_file(
     root: &std::path::Path,
     annotated_config: &qdev_core::AnnotatedConfig,
     rel_path: &str,
     new_id: &str,
     author: &qdev_core::Author,
-) -> Result<(), QdevError> {
+) -> Result<String, QdevError> {
     let abs_path = root.join(rel_path);
     let existing = std::fs::read_to_string(&abs_path).map_err(|e| {
         QdevError::infrastructure_failure(
@@ -2474,7 +2540,62 @@ fn renumber_duplicate_file(
         .get("id")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let kind = qdev_core::determine_entity_kind(&abs_path, existing_id, &existing_frontmatter);
+    // The same rule the other two writers use, so all three validate against the kind the next
+    // sweep will classify the file as.
+    // `EntityKind::Story` is the fallback only for content whose frontmatter cannot be
+    // extracted, and it is what `determine_entity_kind` itself defaults to — so the fallback
+    // agrees with hydration too.
+    let kind = qdev_core::kind_for_write(&abs_path, &existing, qdev_core::EntityKind::Story);
+
+    // The file must end up named for the id it declares. Refuse an occupied target rather than
+    // clobbering a file that is very likely a real entity of its own: this runs on a workspace
+    // that is already known to be damaged, and overwriting here would destroy the only copy.
+    let old_name = match rel_path.rsplit_once('/') {
+        Some((_, name)) => name,
+        None => rel_path,
+    };
+    let new_name = qdev_core::renamed_file_name(old_name, existing_id, new_id);
+    // `rsplit_once('/')` alone would treat a backslash-separated path as having no directory
+    // and write the renamed file into the workspace root.
+    let rel_path_slashed = rel_path.replace('\\', "/");
+    let rel_path = rel_path_slashed.as_str();
+    let new_rel_path = match rel_path.rsplit_once('/') {
+        Some((dir, _)) => format!("{}/{}", dir, new_name),
+        None => new_name.clone(),
+    };
+    let new_abs_path = root.join(&new_rel_path);
+    if new_rel_path != rel_path {
+        // `symlink_metadata` rather than `exists`, which follows a symlink and answers `false`
+        // for a dangling one — writing through that link is exactly what refusing means to
+        // prevent. The directory is then checked for *any* file the write path would resolve
+        // for the new id, not just the exact target name: leaving an `E1S2-old.md` beside a
+        // fresh `E1S2.md` makes every later write fail "multiple entity files match", which
+        // would defeat the acceptance criterion this rename exists to satisfy.
+        let occupied = new_abs_path.symlink_metadata().is_ok();
+        let sibling = new_abs_path
+            .parent()
+            .map(|dir| qdev_core::find_file_in_dir_for_id(dir, new_id))
+            .transpose()?
+            .flatten()
+            .filter(|found| *found != root.join(rel_path));
+        if occupied || sibling.is_some() {
+            let blocker = if occupied {
+                new_rel_path.clone()
+            } else {
+                sibling
+                    .map(|p| p.strip_prefix(root).unwrap_or(&p).display().to_string())
+                    .unwrap_or_else(|| new_rel_path.clone())
+            };
+            return Err(QdevError::logical_failure(
+                "rename_target_exists",
+                format!(
+                    "Renumbering '{}' to '{}' requires renaming it to '{}', but '{}' already \
+                     claims that id; refusing to overwrite or shadow it",
+                    rel_path, new_id, new_rel_path, blocker
+                ),
+            ));
+        }
+    }
 
     let id_rewritten = qdev_core::rewrite_frontmatter_id(&existing, new_id)?;
 
@@ -2497,7 +2618,21 @@ fn renumber_duplicate_file(
         )
     })?;
 
-    qdev_core::write_file_atomic(&abs_path, &patched)?;
+    // Write the renamed file first, then drop the old one: an interruption between the two
+    // leaves both copies on disk (a duplicate id, which is the condition already being repaired
+    // and which `validate` reports) rather than no copy at all.
+    qdev_core::write_file_atomic(&new_abs_path, &patched)?;
+    if new_rel_path != rel_path {
+        std::fs::remove_file(&abs_path).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "io_error",
+                format!(
+                    "Renumbered '{}' was written to '{}' but the original could not be removed: {}",
+                    rel_path, new_rel_path, e
+                ),
+            )
+        })?;
+    }
 
     let updated_frontmatter = qdev_core::extract_frontmatter(&patched).map_err(|e| {
         QdevError::infrastructure_failure(
@@ -2554,7 +2689,7 @@ fn renumber_duplicate_file(
         title: title_val,
         status: status_val,
         owners: owners_val,
-        source_path: rel_path.to_string(),
+        source_path: new_rel_path.clone(),
         content_hash,
         version: new_version,
         created_by: c_author,
@@ -2571,7 +2706,17 @@ fn renumber_duplicate_file(
     let cache_db_path = root
         .join(&annotated_config.config.storage.cache_dir)
         .join("cache.sqlite");
-    qdev_core::upsert_cache_and_mark_dirty(&cache_db_path, &record)
+    qdev_core::upsert_cache_and_mark_dirty(&cache_db_path, &record)?;
+
+    // Two rows must not describe one entity. The row naming the old id at the old path now
+    // describes a file that is not there any more, and `qdev get <old id>` would keep answering
+    // from it. It is dropped only if it still claims *this* path: in the duplicate case that row
+    // may belong to the keeper file, which legitimately holds the old id and is untouched.
+    if new_rel_path != rel_path && !existing_id.is_empty() {
+        qdev_core::purge_entity_row_for_moved_file(&cache_db_path, existing_id, rel_path)?;
+    }
+
+    Ok(new_rel_path)
 }
 
 /// Redirects every relation in the workspace that targets `old_id` to target `new_id` instead,

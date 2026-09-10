@@ -1127,3 +1127,179 @@ fn test_create_story_waits_on_the_advisory_lock_then_succeeds_once_released() {
     assert_eq!(res.id, "E12S1");
     assert!(root.join("docs/specs/stories/E12S1.md").is_file());
 }
+
+// ---------------------------------------------------------------------------
+// The one identity rule: a file is named for the entity it holds
+// ---------------------------------------------------------------------------
+
+/// `--fix-ids` renames as it renumbers, so the renamed file still carries its id and stays
+/// resolvable by the write path. A `-slug`/`_slug` suffix is part of the convention and survives.
+#[test]
+fn test_renamed_file_name_replaces_the_id_and_keeps_the_slug() {
+    assert_eq!(
+        qdev_core::renamed_file_name("E1S1.md", "E1S1", "E1S2"),
+        "E1S2.md"
+    );
+    assert_eq!(
+        qdev_core::renamed_file_name("E1S1-buffer-layout.md", "E1S1", "E1S2"),
+        "E1S2-buffer-layout.md"
+    );
+    assert_eq!(
+        qdev_core::renamed_file_name("E1S1_buffer.md", "E1S1", "E1S2"),
+        "E1S2_buffer.md"
+    );
+    // The id part is rewritten canonically cased even from a differently cased file name.
+    assert_eq!(
+        qdev_core::renamed_file_name("e1s1-dup.md", "E1S1", "E1S2"),
+        "E1S2-dup.md"
+    );
+    // A name that never carried the old id has no identifiable suffix: it becomes canonical.
+    assert_eq!(
+        qdev_core::renamed_file_name("login-flow.md", "E1S1", "E1S2"),
+        "E1S2.md"
+    );
+}
+
+/// A renamed file is exactly what `resolve_entity_file` then finds — the round trip that makes a
+/// renumbered entity writable with no manual `mv`.
+#[test]
+fn test_renamed_file_is_resolvable_under_the_new_id() {
+    let tmp = TempDir::new().unwrap();
+    let stories_dir = tmp.path().join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    let new_name = qdev_core::renamed_file_name("E1S1-dup.md", "E1S1", "E1S2");
+    fs::write(stories_dir.join(&new_name), "---").unwrap();
+
+    let (kind, _, path) = qdev_core::resolve_entity_file(tmp.path(), None, "E1S2", None).unwrap();
+    assert_eq!(kind, EntityKind::Story);
+    assert!(path.ends_with("E1S2-dup.md"));
+    // And the old id no longer resolves to it.
+    assert!(qdev_core::resolve_entity_file(tmp.path(), None, "E1S1", None).is_err());
+}
+
+/// Kind is hydration's answer, not the directory's: frontmatter `kind:` wins, so a write
+/// validates against the schema the next sweep will validate against.
+#[test]
+fn test_kind_for_write_prefers_frontmatter_kind_over_the_directory() {
+    let adr_path = std::path::Path::new("docs/specs/adrs/AD-9.md");
+    let declares_story = "---\nid: AD-9\nkind: story\n---\n";
+    assert_eq!(
+        qdev_core::kind_for_write(adr_path, declares_story, EntityKind::Adr),
+        EntityKind::Story
+    );
+
+    // With no `kind:`, the directory still decides, so conventional files are unaffected.
+    let no_kind = "---\nid: AD-9\n---\n";
+    assert_eq!(
+        qdev_core::kind_for_write(adr_path, no_kind, EntityKind::Adr),
+        EntityKind::Adr
+    );
+
+    // Content with no extractable frontmatter falls back to the resolved kind; the caller
+    // reports the parse failure on its own terms.
+    assert_eq!(
+        qdev_core::kind_for_write(adr_path, "no frontmatter here", EntityKind::Adr),
+        EntityKind::Adr
+    );
+}
+
+/// Two `entities` rows must never point at one file. `ON CONFLICT(id)` cannot see that
+/// collision, so the upsert purges the row claiming the same `source_path` under another id, as
+/// hydration does — but without hydration's relation cascade, since `--fix-ids` redirects the
+/// edges through the relate write path afterwards.
+#[test]
+fn test_upsert_cache_purges_a_row_claiming_the_same_path_under_another_id() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".qdev/cache/cache.sqlite");
+    fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+    let mut record = EntityRecord {
+        id: "E1S1".to_string(),
+        kind: EntityKind::Story,
+        title: Some("Story".to_string()),
+        status: Some("draft".to_string()),
+        owners: None,
+        source_path: "docs/specs/stories/E1S1.md".to_string(),
+        content_hash: sha256_digest(b"one"),
+        version: 1,
+        created_by: Some(Author::new("human", "simon")),
+        updated_by: Some(Author::new("human", "simon")),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+        stale: false,
+        epic_id: Some("E1".to_string()),
+        seq: Some(1),
+        appetite: None,
+        safety_class: None,
+        target_modules: None,
+    };
+    upsert_cache_and_mark_dirty(&db_path, &record).unwrap();
+
+    let store = SqliteStore::open(&db_path).unwrap();
+    store
+        .upsert_relation(&qdev_core::store::RelationRecord {
+            source_id: "E1S5".to_string(),
+            relation: "depends_on".to_string(),
+            target_id: "E1S1".to_string(),
+        })
+        .unwrap();
+
+    // The same file now declares a different id (an in-place id edit).
+    record.id = "E1S2".to_string();
+    record.seq = Some(2);
+    record.content_hash = sha256_digest(b"two");
+    upsert_cache_and_mark_dirty(&db_path, &record).unwrap();
+
+    assert!(store.get_entity("E1S1").unwrap().is_none());
+    assert!(store.get_story_details("E1S1").unwrap().is_none());
+    assert_eq!(
+        store.get_entity("E1S2").unwrap().unwrap().source_path,
+        "docs/specs/stories/E1S1.md"
+    );
+    // The inbound edge survives: it is redirected by a later write, not deleted here.
+    assert_eq!(store.list_relations().unwrap().len(), 1);
+}
+
+/// The renamed-away row is dropped only when it still claims the path that moved. In the
+/// duplicate case the old id belongs to the keeper file, which is on disk and untouched.
+#[test]
+fn test_purge_entity_row_for_moved_file_respects_the_source_path_guard() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".qdev/cache/cache.sqlite");
+    fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+    let record = EntityRecord {
+        id: "E1S1".to_string(),
+        kind: EntityKind::Story,
+        title: Some("Story".to_string()),
+        status: Some("draft".to_string()),
+        owners: None,
+        source_path: "docs/specs/stories/E1S1-dup.md".to_string(),
+        content_hash: sha256_digest(b"keeper"),
+        version: 1,
+        created_by: Some(Author::new("human", "simon")),
+        updated_by: Some(Author::new("human", "simon")),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+        stale: false,
+        epic_id: Some("E1".to_string()),
+        seq: Some(1),
+        appetite: None,
+        safety_class: None,
+        target_modules: None,
+    };
+    upsert_cache_and_mark_dirty(&db_path, &record).unwrap();
+    let store = SqliteStore::open(&db_path).unwrap();
+
+    // The row belongs to the keeper file, not to the file that was renamed away: left alone.
+    let purged =
+        qdev_core::purge_entity_row_for_moved_file(&db_path, "E1S1", "docs/specs/stories/E1S1.md")
+            .unwrap();
+    assert!(!purged);
+    assert!(store.get_entity("E1S1").unwrap().is_some());
+
+    // When it does claim the moved path, it goes.
+    let purged =
+        qdev_core::purge_entity_row_for_moved_file(&db_path, "E1S1", &record.source_path).unwrap();
+    assert!(purged);
+    assert!(store.get_entity("E1S1").unwrap().is_none());
+    assert!(store.get_story_details("E1S1").unwrap().is_none());
+}

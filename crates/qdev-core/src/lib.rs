@@ -62,18 +62,19 @@ pub use schema::{
 pub use serde_yaml;
 pub use validate::{
     collect_workspace_files_matching, filter_by_changed, find_duplicate_planning_ids,
-    find_dw_missing_rationale, find_orphan_deferred_work, find_unregistered_target_modules,
-    git_changed_files, glob_match, has_error_finding, module_path_patterns, next_available_id,
-    rewrite_citations, rewrite_frontmatter_id, run_validation, scan_duplicate_planning_ids,
-    sort_findings, DuplicateIdScan,
+    find_dw_missing_rationale, find_off_convention_entity_files, find_orphan_deferred_work,
+    find_unregistered_target_modules, git_changed_files, glob_match, has_error_finding,
+    module_path_patterns, next_available_id, rewrite_citations, rewrite_frontmatter_id,
+    run_validation, scan_duplicate_planning_ids, sort_findings, DuplicateIdScan,
 };
 pub use write::{
-    acquire_write_lock, apply_entity_update, apply_relation_change, create_story, current_iso8601,
-    iso8601_from_timestamp, patch_frontmatter, replace_markdown_section, resolve_entity_file,
-    sha256_digest, upsert_cache_and_mark_dirty, upsert_cache_with_relation, write_file_atomic,
-    AdvisoryLockGuard, Author, EntityUpdateOptions, EntityUpdateResult, FrontmatterPatchOptions,
-    RelationChangeOptions, RelationChangeResult, RelationRowChange, StoryCreateOptions,
-    StoryCreateResult,
+    acquire_write_lock, apply_entity_update, apply_relation_change, canonical_file_name,
+    create_story, current_iso8601, find_file_in_dir_for_id, iso8601_from_timestamp, kind_for_write,
+    patch_frontmatter, purge_entity_row_for_moved_file, renamed_file_name,
+    replace_markdown_section, resolve_entity_file, sha256_digest, upsert_cache_and_mark_dirty,
+    upsert_cache_with_relation, write_file_atomic, AdvisoryLockGuard, Author, EntityUpdateOptions,
+    EntityUpdateResult, FrontmatterPatchOptions, RelationChangeOptions, RelationChangeResult,
+    RelationRowChange, StoryCreateOptions, StoryCreateResult,
 };
 
 use serde::{Deserialize, Serialize};

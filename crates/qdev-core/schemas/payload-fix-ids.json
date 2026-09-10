@@ -18,16 +18,21 @@
       "items": {
         "type": "object",
         "required": [
-          "path",
+          "old_path",
+          "new_path",
           "old_id",
           "new_id",
           "relations_rewritten",
           "citations_rewritten"
         ],
         "properties": {
-          "path": {
+          "old_path": {
             "type": "string",
-            "description": "Workspace-relative path of the renumbered file."
+            "description": "Workspace-relative path the renumbered file had before the renumber."
+          },
+          "new_path": {
+            "type": "string",
+            "description": "Workspace-relative path the renumbered file has after the renumber. A renumber renames the file so its name carries new_id (any '-slug'/'_slug' suffix is preserved), keeping it resolvable by the write path; reporting both paths keeps the git-visible move from being silent. Equal to old_path only when the name already carried new_id."
           },
           "old_id": {
             "type": "string",

@@ -1,4 +1,4 @@
-//! `qdev validate` (spec-1-11): aggregates hydration-recorded findings with four freshly
+//! `qdev validate` (spec-1-11): aggregates hydration-recorded findings with five freshly
 //! computed integrity checks, `--changed` filtering against a git merge-base diff, and the
 //! pure logic backing the guided `--fix-ids` duplicate-planning-id renumber.
 
@@ -15,6 +15,10 @@ use crate::store::{EntityFilter, FindingRecord, Store};
 use crate::write::current_iso8601;
 
 const ERROR_SEVERITY: &str = "error";
+/// Severity of `entity_file_off_convention`. Deliberately not `error`: a workspace that was
+/// legal before the identity-seam story shipped must not start failing `qdev validate`, and
+/// `has_error_finding` gates the exit code on `error` alone.
+const WARNING_SEVERITY: &str = "warning";
 
 /// The result of scanning `specs_dir` for frontmatter `id` collisions: every planning id that is
 /// declared by two or more files (sorted paths), plus the full set of ids in use (needed by
@@ -217,7 +221,93 @@ pub fn find_unregistered_target_modules(
     Ok(findings)
 }
 
-/// Runs every hydration-derived finding (`Store::list_findings`, reused verbatim) plus the four
+/// `entity_file_off_convention`: a hydrated entity's file breaks the identity convention every
+/// writer resolves by (see `write::resolve_entity_file`) — its name does not carry its
+/// frontmatter `id`, or it lives outside every standard entity directory. Such a file is
+/// readable (hydration walks the spec and state trees recursively) but the write path cannot
+/// resolve it, which is how an entity `qdev get` returns comes back "not found" from
+/// `qdev update`. Reporting it makes the convention enforceable rather than assumed.
+///
+/// `warning` severity by design: files like this were legal until the convention was stated, so
+/// the finding must not flip `qdev validate` to exit 1 on a workspace that was previously clean.
+///
+/// The *directory* half is checked against the whole standard set rather than the one directory
+/// for the entity's kind, because that is exactly what the write path accepts: its cross-kind
+/// fallback resolves an id in any standard directory, so a `kind:` that disagrees with its
+/// directory is not itself an identity problem. The expected name reported names the directory
+/// for the entity's kind, which is where a new file of that kind belongs.
+pub fn find_off_convention_entity_files(
+    store: &dyn Store,
+    storage: &crate::config::StorageConfig,
+) -> Result<Vec<FindingRecord>, QdevError> {
+    let standard_dirs: HashSet<String> = EntityKind::all()
+        .iter()
+        .map(|kind| normalize_rel(&crate::write::directory_for_kind(Some(storage), *kind)))
+        .collect();
+    let found_at = current_iso8601();
+    let mut findings = Vec::new();
+
+    for entity in store.list_entities(&EntityFilter::default())? {
+        let rel = entity.source_path.replace('\\', "/");
+        // The convention covers markdown entity files; evidence JSON and scratchpad JSONL are
+        // named for their run and their story, not for an entity id.
+        if !rel.ends_with(".md") {
+            continue;
+        }
+        let (dir, file_name) = match rel.rsplit_once('/') {
+            Some((dir, name)) => (dir.to_string(), name.to_string()),
+            None => (String::new(), rel.clone()),
+        };
+
+        let name_carries_id = crate::write::filename_carries_id(&file_name, &entity.id);
+        let dir_is_standard = standard_dirs.contains(&dir);
+        if name_carries_id && dir_is_standard {
+            continue;
+        }
+
+        let expected = format!(
+            "{}/{}",
+            normalize_rel(&crate::write::directory_for_kind(
+                Some(storage),
+                entity.kind
+            )),
+            crate::write::canonical_file_name(&entity.id)
+        );
+        let reason = match (name_carries_id, dir_is_standard) {
+            (false, true) => "its name does not carry that id",
+            (true, false) => "it is outside every standard entity directory",
+            _ => {
+                "its name does not carry that id and it is outside every standard entity directory"
+            }
+        };
+        findings.push(FindingRecord {
+            path: rel.clone(),
+            code: "entity_file_off_convention".to_string(),
+            severity: WARNING_SEVERITY.to_string(),
+            message: Some(format!(
+                "'{}' holds entity '{}' but {}; the write path resolves entities by file name, so {} it to '{}' (a '-slug' or '_slug' suffix after the id is allowed)",
+                rel,
+                entity.id,
+                reason,
+                if dir_is_standard { "rename" } else { "move" },
+                expected
+            )),
+            found_at: found_at.clone(),
+        });
+    }
+    Ok(findings)
+}
+
+/// A workspace-relative path as a `/`-separated string, with any trailing separator removed, so
+/// configured storage directories and cached `source_path` values compare as written.
+fn normalize_rel(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Runs every hydration-derived finding (`Store::list_findings`, reused verbatim) plus the five
 /// freshly computed checks above, merged into one flat list. Cache-native findings are never
 /// duplicated: this only ever reads from `list_findings`, never writes back to the `findings`
 /// table.
@@ -234,6 +324,7 @@ pub fn run_validation(
     findings.extend(find_orphan_deferred_work(store)?);
     findings.extend(find_dw_missing_rationale(store)?);
     findings.extend(find_unregistered_target_modules(store, config)?);
+    findings.extend(find_off_convention_entity_files(store, &config.storage)?);
     Ok(findings)
 }
 

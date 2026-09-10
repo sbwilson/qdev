@@ -282,22 +282,27 @@ fn test_fix_ids_with_yes_renumbers_duplicate_and_leaves_workspace_clean() {
         .args(["validate", "--fix-ids", "--non-interactive", "--yes"])
         .assert()
         .success()
-        .code(0);
+        .code(0)
+        // The move is reported in text mode too, not only to `--json` consumers: a user who is
+        // not told about the rename sees an unexplained rename in `git status`.
+        .stdout(predicates::str::contains(
+            "Renamed docs/specs/stories/E1S1.md -> docs/specs/stories/E1S2.md",
+        ));
 
     // The lexicographically-first path keeps the id ("E1S1-dup.md" sorts before "E1S1.md" because
     // '-' < '.'); the other duplicate is renumbered to the next available Story id for the same
-    // epic, with its version bumped. Check both files rather than assuming which one wins.
-    let a = read_story(&stories_dir, "E1S1");
-    let b = read_story(&stories_dir, "E1S1-dup");
-    let a_keeps_id = a.contains("id: E1S1\n");
-    let b_keeps_id = b.contains("id: E1S1\n");
-    assert_ne!(
-        a_keeps_id, b_keeps_id,
-        "exactly one file must keep id E1S1; a={:?} b={:?}",
-        a, b
+    // epic, with its version bumped — and renamed to carry that id, so it stays writable.
+    let keeper = read_story(&stories_dir, "E1S1-dup");
+    assert!(
+        keeper.contains("id: E1S1\n"),
+        "the group's first file keeps the id: {keeper}"
     );
-    let renumbered = if a_keeps_id { &b } else { &a };
-    assert!(!renumbered.contains("id: E1S1\n"));
+    assert!(
+        !stories_dir.join("E1S1.md").exists(),
+        "the renumbered file must have been renamed away from its old id"
+    );
+    let renumbered = read_story(&stories_dir, "E1S2");
+    assert!(renumbered.contains("id: E1S2\n"));
     assert!(renumbered.contains("version: 2"));
 
     // A follow-up plain validate call must now be clean.
@@ -539,7 +544,17 @@ fn test_fix_ids_accepting_the_prompt_renumbers() {
     assert_eq!(renumbered.len(), 1, "accepting must renumber the duplicate");
     assert_eq!(renumbered[0]["old_id"], "E1S2");
     assert!(val["skipped"].as_array().unwrap().is_empty());
-    assert!(!read_story(&stories_dir, "E1S2").contains("id: E1S2\n"));
+    // The renumber renames the file to carry the new id, so the old name is gone and the new one
+    // holds the new id. (This assertion previously read `E1S2.md` back in place, which is the
+    // manufactured divergence the identity-seam story removed.)
+    assert_eq!(renumbered[0]["old_path"], "docs/specs/stories/E1S2.md");
+    let new_id = renumbered[0]["new_id"].as_str().unwrap();
+    assert_eq!(
+        renumbered[0]["new_path"],
+        format!("docs/specs/stories/{}.md", new_id)
+    );
+    assert!(!stories_dir.join("E1S2.md").exists());
+    assert!(read_story(&stories_dir, new_id).contains(&format!("id: {}\n", new_id)));
 }
 
 // ---------------------------------------------------------------------------
@@ -854,14 +869,378 @@ updated_by:
         "the abort must be reported inside the payload: {val}"
     );
 
-    // The successfully renumbered file really is on disk, and the cache was reconciled with it
-    // despite the abort.
-    assert!(!read_story(&stories_dir, "E1S2").contains("id: E1S2\n"));
+    // The successfully renumbered file really is on disk under its new name, and the cache was
+    // reconciled with it despite the abort.
     let new_id = val["renumbered"][0]["new_id"].as_str().unwrap().to_string();
+    assert!(!stories_dir.join("E1S2.md").exists());
+    assert!(read_story(&stories_dir, &new_id).contains(&format!("id: {}\n", new_id)));
     let mut get_cmd = Command::cargo_bin("qdev").unwrap();
     get_cmd
         .current_dir(root)
         .args(["get", &new_id, "--json"])
         .assert()
         .success();
+}
+
+// ---------------------------------------------------------------------------
+// The identity seam: what `--fix-ids` leaves behind must be writable
+// ---------------------------------------------------------------------------
+
+/// The headline defect: `--fix-ids` used to rewrite the frontmatter id without renaming the
+/// file, manufacturing an entity `qdev get` could read and no writer could resolve. A renumbered
+/// entity must accept `qdev update` and `qdev relate` immediately, with no manual `mv`.
+#[test]
+fn test_renumbered_entity_accepts_update_and_relate_with_no_manual_step() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    write_story(&stories_dir, "E1S1");
+    fs::write(
+        stories_dir.join("E1S1-dup.md"),
+        fs::read_to_string(stories_dir.join("E1S1.md")).unwrap(),
+    )
+    .unwrap();
+    // A relate target that is not part of the duplicate group.
+    write_story(&stories_dir, "E1S5");
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "validate",
+            "--fix-ids",
+            "--non-interactive",
+            "--yes",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let entry = &val["renumbered"][0];
+    let new_id = entry["new_id"].as_str().unwrap().to_string();
+
+    // The move is reported, not silent: old and new path as well as old and new id.
+    assert_eq!(entry["old_id"], "E1S1");
+    assert_eq!(entry["old_path"], "docs/specs/stories/E1S1.md");
+    assert!(
+        entry.get("path").is_none(),
+        "the duplicated `path` field is gone: after the rename it named a deleted file"
+    );
+    assert_eq!(
+        entry["new_path"],
+        format!("docs/specs/stories/{}.md", new_id)
+    );
+
+    // `get` reads it...
+    let mut get_cmd = Command::cargo_bin("qdev").unwrap();
+    get_cmd
+        .current_dir(root)
+        .args(["get", &new_id, "--json"])
+        .assert()
+        .success();
+
+    // ...and so do both writers, which is what used to fail with "Entity file not found".
+    let mut update_cmd = Command::cargo_bin("qdev").unwrap();
+    update_cmd
+        .current_dir(root)
+        .args(["update", &new_id, "--status", "ready"])
+        .assert()
+        .success();
+
+    let mut relate_cmd = Command::cargo_bin("qdev").unwrap();
+    relate_cmd
+        .current_dir(root)
+        .args(["relate", &new_id, "depends_on", "E1S5"])
+        .assert()
+        .success();
+}
+
+/// H3: the reconcile is gated on "did we write anything", not on an entry surviving the two
+/// fallible steps after the write. When the relation step aborts, the keeper's id must still be
+/// in the cache — asserted through `qdev get`, not by reading the cache, so it survives a change
+/// of resolution rule.
+#[test]
+fn test_fix_ids_abort_in_the_relation_step_still_reports_and_reconciles() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    write_story(&stories_dir, "E1S2");
+    fs::write(
+        stories_dir.join("E1S2-dup.md"),
+        fs::read_to_string(stories_dir.join("E1S2.md")).unwrap(),
+    )
+    .unwrap();
+
+    // A referencing story in a file whose name does not carry its id: readable by hydration,
+    // unresolvable by the write path, so redirecting its `depends_on` edge fails. That is
+    // exactly the abort the old code turned into "renumbered: []" plus a lost keeper.
+    fs::write(
+        stories_dir.join("misnamed.md"),
+        r#"---
+id: E1S8
+title: "Story E1S8"
+status: draft
+version: 1
+relations:
+  depends_on: ["E1S2"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "validate",
+            "--fix-ids",
+            "--non-interactive",
+            "--yes",
+            "--json",
+        ])
+        .assert()
+        .failure();
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout)
+        .expect("the abort report must stay a single parseable JSON document");
+
+    // The write that happened before the abort is reported, with its move.
+    let renumbered = val["renumbered"].as_array().unwrap();
+    assert_eq!(renumbered.len(), 1, "{val}");
+    let new_id = renumbered[0]["new_id"].as_str().unwrap().to_string();
+    assert_ne!(renumbered[0]["new_path"], renumbered[0]["old_path"]);
+    assert!(val["error"].is_object(), "{val}");
+
+    // The keeper's id is present in the cache afterwards: the reconcile ran despite the abort.
+    let mut keeper_get = Command::cargo_bin("qdev").unwrap();
+    keeper_get
+        .current_dir(root)
+        .args(["get", "E1S2", "--json"])
+        .assert()
+        .success();
+
+    // And so is the renumbered entity, under its new id.
+    let mut new_get = Command::cargo_bin("qdev").unwrap();
+    new_get
+        .current_dir(root)
+        .args(["get", &new_id, "--json"])
+        .assert()
+        .success();
+}
+
+/// An occupied rename target is refused rather than clobbered: the entry is reported as skipped
+/// and the run exits per the refusal's own error.
+#[test]
+fn test_fix_ids_refuses_an_occupied_rename_target_instead_of_clobbering() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    write_story(&stories_dir, "E1S1");
+    fs::write(
+        stories_dir.join("E1S1-dup.md"),
+        fs::read_to_string(stories_dir.join("E1S1.md")).unwrap(),
+    )
+    .unwrap();
+
+    // `E1S2.md` is occupied by a file declaring a different id, so `E1S2` is still the next
+    // available id while its canonical file name is already taken.
+    let occupant = r#"---
+id: E1S7
+title: "Story E1S7"
+status: draft
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#;
+    fs::write(stories_dir.join("E1S2.md"), occupant).unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "validate",
+            "--fix-ids",
+            "--non-interactive",
+            "--yes",
+            "--json",
+        ])
+        .assert()
+        .failure();
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+
+    assert!(val["renumbered"].as_array().unwrap().is_empty(), "{val}");
+    assert_eq!(
+        val["skipped"].as_array().unwrap(),
+        &vec![Value::from("docs/specs/stories/E1S1.md")],
+        "the refused entry must be reported as skipped: {val}"
+    );
+    assert_eq!(val["error"]["code"], "rename_target_exists");
+
+    // The occupant is untouched, and so is the file that would have been renamed onto it.
+    assert_eq!(
+        fs::read_to_string(stories_dir.join("E1S2.md")).unwrap(),
+        occupant
+    );
+    assert!(read_story(&stories_dir, "E1S1").contains("id: E1S1\n"));
+}
+
+// ---------------------------------------------------------------------------
+// The convention is enforced, not assumed
+// ---------------------------------------------------------------------------
+
+/// A story whose filename does not carry its id is reported once, at `warning` severity, naming
+/// the file and the name it should have — and `qdev validate` still exits 0, so a workspace that
+/// was legal before this shipped does not start failing.
+#[test]
+fn test_off_convention_filename_is_a_warning_and_validate_still_exits_0() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    fs::write(
+        stories_dir.join("login-flow.md"),
+        r#"---
+id: E1S9
+title: "Story E1S9"
+status: draft
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .success()
+        .code(0);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let findings = val["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "{val}");
+    assert_eq!(findings[0]["code"], "entity_file_off_convention");
+    assert_eq!(findings[0]["severity"], "warning");
+    assert_eq!(findings[0]["path"], "docs/specs/stories/login-flow.md");
+    let message = findings[0]["message"].as_str().unwrap();
+    assert!(message.contains("docs/specs/stories/E1S9.md"), "{message}");
+}
+
+/// Every other `--fix-ids` test renumbers a Story. Non-Story planning kinds go through the same
+/// renumber, rename and cache-purge path, and the purge's detail-row deletion is kind-dependent —
+/// so one non-Story case belongs in the suite.
+#[test]
+fn test_fix_ids_renumbers_a_non_story_kind_and_renames_it() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let adrs = root.join("docs/specs/adrs");
+    fs::create_dir_all(&adrs).unwrap();
+    let adr = |title: &str| {
+        format!(
+            r#"---
+id: AD-1
+title: "{title}"
+status: draft
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Decision
+- Chosen.
+"#
+        )
+    };
+    fs::write(adrs.join("AD-1.md"), adr("Keeper")).unwrap();
+    fs::write(adrs.join("AD-1-copy.md"), adr("Copy")).unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "validate",
+            "--fix-ids",
+            "--non-interactive",
+            "--yes",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .code(0);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let entry = &val["renumbered"][0];
+    let new_id = entry["new_id"].as_str().unwrap().to_string();
+    assert!(new_id.starts_with("AD-"), "got {new_id}");
+    assert_eq!(
+        entry["new_path"],
+        format!("docs/specs/adrs/{}.md", new_id),
+        "the renamed file must carry the new id: {entry}"
+    );
+    assert!(adrs.join(format!("{}.md", new_id)).is_file());
+    assert!(!adrs.join("AD-1.md").exists());
+
+    // Readable and writable under the new id, with no manual step — and the keeper survives.
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["update", &new_id, "--status", "ready"])
+        .assert()
+        .success();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["get", "AD-1", "--json"])
+        .assert()
+        .success();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .success();
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(
+        val["findings"].as_array().unwrap().len(),
+        0,
+        "the workspace must be clean afterwards: {val}"
+    );
 }

@@ -541,3 +541,75 @@ relations:
         "an unsupported relations shape must not be rewritten away"
     );
 }
+
+/// `relate` adopts hydration's kind rule too, and that half was pinned by nothing: every fixture
+/// in this file is written into the directory matching its kind, so the frontmatter kind and the
+/// directory kind always agree and the rule cannot be observed. Deleting the `kind_for_write`
+/// call from `apply_relation_change` left the whole suite green.
+///
+/// Reaching the write path with a kind disagreement takes two steps, because the ADR schema is
+/// strictly more permissive than the story schema: the file must first hydrate while it is still
+/// valid, so that the later story-invalid edit leaves the previous row in the cache (marked
+/// stale) for `relate`'s precheck to find, instead of the entity being absent entirely.
+#[test]
+fn test_relate_validates_against_frontmatter_kind_not_the_directory() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    create_story(root, "E1S5", "");
+
+    // In the ADR directory, declaring `kind: story`, and valid under both schemas for now.
+    let adrs = root.join("docs/specs/adrs");
+    fs::create_dir_all(&adrs).unwrap();
+    let adr_path = adrs.join("AD-9.md");
+    let adr = |appetite: &str| {
+        format!(
+            r#"---
+id: AD-9
+kind: story
+title: Buffer layout decision
+status: draft
+version: 1
+{appetite}created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Decision
+- Chosen.
+"#
+        )
+    };
+    fs::write(&adr_path, adr("")).unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root).args(["status"]).assert().success();
+
+    // Now make it invalid under the story schema only. `appetite` is an enum there and a
+    // free-form extra field under the ADR schema, so the two schemas disagree about this file.
+    fs::write(&adr_path, adr("appetite: bogus\n")).unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["relate", "AD-9", "depends_on", "E1S5", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(
+        val["error"]["code"], "schema_validation_failed",
+        "relate must judge the file by its frontmatter kind, as the next sweep will: {val}"
+    );
+
+    // Refused before the write: the file is unchanged.
+    let content = fs::read_to_string(&adr_path).unwrap();
+    assert!(
+        !content.contains("depends_on"),
+        "a refused relate must write nothing: {content}"
+    );
+}

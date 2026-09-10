@@ -3990,7 +3990,7 @@ fn sprint_number(id: &str) -> i64 {
 /// `sprint_assignments`, `deferred_work`, `decisions`, `soup_dependencies`, `gate_runs`).
 /// Shared by the purge cascade and by re-parse, which must drop the previous kind's row when
 /// an entity changes kind in place.
-fn delete_kind_detail_row(
+pub(crate) fn delete_kind_detail_row(
     tx: &rusqlite::Transaction,
     id: &str,
     kind: EntityKind,

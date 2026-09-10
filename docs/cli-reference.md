@@ -80,6 +80,30 @@ the field, and no file is created — refuses a create whose target path is alre
 Run outside an initialized workspace, `create story` writes only the story file: it creates no
 cache and takes no lock, so no `.qdev/` directory is left behind.
 
+#### How qdev finds your entity
+
+**A file is named for the entity it holds.** One rule answers "which file is entity `X`?" for
+reads and writes alike: `X` lives under its kind's directory (`docs/specs/stories/`,
+`docs/specs/adrs/`, `docs/state/dw/`, … per `[storage]`) in a file named `X.md`, `X-<slug>.md` or
+`X_<slug>.md`. Reads answer from the frontmatter `id`; writes answer from the file name, which
+under this convention is the same file — so `qdev get`, `qdev update` and `qdev relate` never
+disagree about which file an entity is, and `create story` still works with no cache present.
+
+Consequences worth knowing:
+
+- Two files matching one id is a usage error (exit 2) naming both, never a guess.
+- A file whose name does not carry its id, or that lives outside every entity directory, is
+  still *read* (hydration walks the spec and state trees recursively) but cannot be written.
+  `qdev validate` reports it as `entity_file_off_convention` at `warning` severity, naming the
+  file and the name it should have; a warning alone keeps `validate` at exit 0.
+- Renaming is never done behind your back. The one exception is `qdev validate --fix-ids`, which
+  renames as it renumbers — a renumbered entity accepts `qdev update` immediately, with no manual
+  `mv` — and reports `old_path`/`new_path` alongside `old_id`/`new_id` so the git-visible move is
+  never silent. An occupied rename target is refused, not clobbered.
+- The entity's *kind* comes from its frontmatter `kind:` first, then its directory, then the
+  identifier grammar — the same rule hydration uses, so a write validates against the schema the
+  next boot sweep will validate against.
+
 Attribution is resolved from one path for every command that records an author: `--author-type`
 / `--author-id` first, then `QDEV_AUTHOR_TYPE` / `QDEV_AUTHOR_ID`, then `[identity]
 developer_id`, then `git config user.email`. An author type other than `human` or `agent` is a
@@ -430,19 +454,19 @@ workspace reports the same total.
 
 The set covers both the findings hydration recorded in the cache (`schema_violation`,
 `read_error`, `dangling_relation`, `invalid_relation_kind`, `dependency_cycle`,
-`merge_conflict`) and the four computed fresh at request time (`duplicate_planning_id`,
-`orphan_deferred_work`, `dw_missing_rationale`, `target_module_not_registered`). Computed
-findings are never written back to the cache: a persisted one would outlive the defect it
-describes.
+`merge_conflict`) and the five computed fresh at request time (`duplicate_planning_id`,
+`orphan_deferred_work`, `dw_missing_rationale`, `target_module_not_registered`,
+`entity_file_off_convention`). Computed findings are never written back to the cache: a
+persisted one would outlive the defect it describes.
 
-Because those four checks re-read the workspace's spec files, `doctor` now costs a directory walk
+Because those checks re-read the workspace's spec files, `doctor` now costs a directory walk
 that it did not before — noticeable only on large workspaces, where the cheap sections still
 report first.
 
 #### The `cache` section's `finding_count` is cache-native only
 
 The `cache` section reports on the cache database itself, and its `finding_count` is a count of
-rows in the `findings` table — the findings *hydration* recorded, nothing else. The four computed
+rows in the `findings` table — the findings *hydration* recorded, nothing else. The computed
 checks above are deliberately never written there, so they cannot appear in it. Read that field
 as "how much did hydration flag", not as "is my workspace healthy"; a `finding_count` of `0` in
 the `cache` section is not a clean bill of health. The `validation` section answers the health
