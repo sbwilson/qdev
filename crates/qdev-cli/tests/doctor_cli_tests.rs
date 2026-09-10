@@ -1,5 +1,6 @@
-//! `qdev doctor` CLI tests (spec-1-12): cache section fields present, `--json` shape, and the
-//! uninitialized-workspace usage error.
+//! `qdev doctor` CLI tests: cache section fields present, `--json` shape, and the
+//! uninitialized-workspace usage error (spec-1-12); plus the `validation` section reporting the
+//! same checks `qdev validate` runs (spec-doctor-sees-computed-findings).
 
 use std::fs;
 use std::path::Path;
@@ -313,5 +314,493 @@ fn test_doctor_reports_ok_after_a_stale_cache_is_healed_at_boot() {
     assert_eq!(
         cache["entity_count"], 1,
         "the rebuild must not have lost the workspace's entities"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The `validation` section (spec-doctor-sees-computed-findings)
+//
+// The `cache` section's `finding_count` reads the `findings` table, which structurally holds
+// only the findings hydration wrote. Four of `qdev validate`'s eight checks are computed fresh
+// and never persisted, so `doctor` reported `finding_count: 0` on a workspace `validate` found
+// defects in. The `validation` section runs `run_validation` — the same checks `validate` runs.
+// ---------------------------------------------------------------------------
+
+/// Writes a second file declaring an id another file already declares — the retrospective's
+/// exact reproduction (finding C3): two `duplicate_planning_id` findings from `validate`, zero
+/// from `doctor`.
+fn write_duplicate_of(dir: &Path, id: &str, dup_name: &str) {
+    fs::write(
+        dir.join(format!("{}.md", dup_name)),
+        fs::read_to_string(dir.join(format!("{}.md", id))).unwrap(),
+    )
+    .unwrap();
+}
+
+fn write_orphan_dw(root: &Path, id: &str) {
+    let dw_dir = root.join("docs/state/dw");
+    fs::create_dir_all(&dw_dir).unwrap();
+    fs::write(
+        dw_dir.join(format!("{}.md", id)),
+        format!(
+            r#"---
+id: {id}
+title: "Deferred thing"
+status: open
+target_module: core
+origin_story_id: E9S9
+safety_risk: negligible
+rationale: "Not urgent."
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Notes
+- Origin story E9S9 does not exist.
+"#
+        ),
+    )
+    .unwrap();
+}
+
+/// Seeds a `schema_violation`: a story frontmatter missing the required `status` field is never
+/// hydrated, and hydration records the finding against its path.
+fn write_schema_violation(dir: &Path, id: &str) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(
+        dir.join(format!("{}.md", id)),
+        format!(
+            r#"---
+id: {id}
+title: "Missing status"
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#
+        ),
+    )
+    .unwrap();
+}
+
+fn doctor_sections(root: &Path) -> Vec<Value> {
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["doctor", "--json"])
+        .assert()
+        // Reporting findings never changes doctor's exit code: it is a report, not a gate.
+        .success()
+        .code(0);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    val["sections"].as_array().unwrap().clone()
+}
+
+fn section<'a>(sections: &'a [Value], name: &str) -> &'a Value {
+    sections
+        .iter()
+        .find(|s| s["name"] == name)
+        .unwrap_or_else(|| panic!("a '{}' doctor section must be present", name))
+}
+
+/// `validate --json`'s finding count, whatever its exit code.
+fn validate_finding_count(root: &Path) -> u64 {
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let output = cmd
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .get_output()
+        .clone();
+    let val: Value = serde_json::from_slice(&output.stdout).unwrap();
+    val["findings"].as_array().unwrap().len() as u64
+}
+
+#[test]
+fn test_doctor_validation_section_matches_validate_on_duplicate_planning_ids() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    write_story(&stories_dir, "E1S2", "Two");
+    write_duplicate_of(&stories_dir, "E1S2", "E1S2-dup");
+
+    let expected = validate_finding_count(root);
+    assert_eq!(
+        expected, 2,
+        "the retrospective's reproduction is two duplicate_planning_id findings"
+    );
+
+    let sections = doctor_sections(root);
+    let validation = section(&sections, "validation");
+    assert_eq!(validation["status"], "ok");
+    assert_eq!(
+        validation["finding_count"].as_u64().unwrap(),
+        expected,
+        "doctor must report the same count validate reports: {}",
+        validation
+    );
+    assert_eq!(validation["findings_by_code"]["duplicate_planning_id"], 2);
+
+    // The half-answer that misled the reader in the first place: the cache section still
+    // reports zero, because a duplicate planning id is invisible to the `findings` table.
+    assert_eq!(section(&sections, "cache")["finding_count"], 0);
+}
+
+#[test]
+fn test_doctor_counts_a_hydration_only_finding_exactly_once() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    write_schema_violation(&root.join("docs/specs/stories"), "E1S1");
+
+    let sections = doctor_sections(root);
+    let validation = section(&sections, "validation");
+
+    assert_eq!(validation["status"], "ok");
+    assert_eq!(
+        validation["finding_count"], 1,
+        "a cache-native finding must be counted once, not once per source: {}",
+        validation
+    );
+    assert_eq!(validation["findings_by_code"]["schema_violation"], 1);
+    assert_eq!(
+        validation["finding_count"].as_u64().unwrap(),
+        validate_finding_count(root)
+    );
+    // The cache section keeps meaning cache-native findings, so this one appears there too.
+    assert_eq!(section(&sections, "cache")["finding_count"], 1);
+}
+
+#[test]
+fn test_doctor_validation_section_reports_the_sum_of_both_finding_kinds() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    write_schema_violation(&root.join("docs/specs/stories"), "E1S1");
+    write_orphan_dw(root, "DW-a1b2");
+
+    let sections = doctor_sections(root);
+    let validation = section(&sections, "validation");
+
+    assert_eq!(validation["findings_by_code"]["schema_violation"], 1);
+    assert_eq!(validation["findings_by_code"]["orphan_deferred_work"], 1);
+    assert_eq!(
+        validation["finding_count"], 2,
+        "the total is the sum of cache-native and computed findings: {}",
+        validation
+    );
+    assert_eq!(
+        validation["finding_count"].as_u64().unwrap(),
+        validate_finding_count(root)
+    );
+    // Only the schema_violation lives in the findings table.
+    assert_eq!(section(&sections, "cache")["finding_count"], 1);
+}
+
+#[test]
+fn test_doctor_clean_workspace_reports_zero_validation_findings() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    write_story(&root.join("docs/specs/stories"), "E1S1", "One");
+
+    let sections = doctor_sections(root);
+    let validation = section(&sections, "validation");
+
+    assert_eq!(validation["status"], "ok");
+    assert_eq!(validation["finding_count"], 0);
+    assert_eq!(
+        validation["findings_by_code"],
+        serde_json::json!({}),
+        "no defects means an empty breakdown, not absent fields: {}",
+        validation
+    );
+    assert_eq!(validate_finding_count(root), 0);
+}
+
+#[test]
+fn test_doctor_section_order_is_cache_then_validation_with_no_duplicate_keys() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    // Determinism: compare two runs to *each other*, not to a literal.
+    let first = doctor_sections(root);
+    let second = doctor_sections(root);
+    let names: Vec<&str> = first.iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        vec!["cache", "validation"],
+        "cache must be reported before validation"
+    );
+    assert_eq!(
+        first.iter().map(|s| s["name"].clone()).collect::<Vec<_>>(),
+        second.iter().map(|s| s["name"].clone()).collect::<Vec<_>>(),
+        "section order must not vary between runs"
+    );
+
+    // Serde would have silently collapsed a duplicated key on the way in, so the raw text is
+    // the only place a collision within a section is observable.
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["doctor", "--json"])
+        .assert()
+        .success();
+    let raw = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let cache_at = raw.find("\"cache\"").unwrap();
+    let validation_at = raw.find("\"validation\"").unwrap();
+    assert!(
+        cache_at < validation_at,
+        "sections must be serialized cache-first: {}",
+        raw
+    );
+    // Asserted per section rather than as a global count, so a third section added by a later
+    // epic — which `default_doctor_sections` exists to allow — does not fail this test. The raw
+    // text of each section object is recovered by brace matching, because serde silently
+    // collapses a duplicated key on the way in.
+    let parsed: Value = serde_json::from_str(&raw).unwrap();
+    let sections_at = raw.find("\"sections\"").unwrap();
+    let array_start = raw[sections_at..].find('[').unwrap() + sections_at;
+    let mut object_texts: Vec<String> = Vec::new();
+    let mut depth = 0usize;
+    let mut current_start = 0usize;
+    for (idx, ch) in raw[array_start..].char_indices() {
+        match ch {
+            '{' => {
+                if depth == 0 {
+                    current_start = idx;
+                }
+                depth += 1;
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    object_texts
+                        .push(raw[array_start + current_start..=array_start + idx].to_string());
+                }
+            }
+            ']' if depth == 0 => break,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        object_texts.len(),
+        parsed["sections"].as_array().unwrap().len(),
+        "failed to recover each section's raw text from {}",
+        raw
+    );
+    for (section_value, section_text) in parsed["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(&object_texts)
+    {
+        let name = section_value["name"].as_str().unwrap();
+        for key in section_value.as_object().unwrap().keys() {
+            assert_eq!(
+                section_text.matches(&format!("\"{}\":", key)).count(),
+                1,
+                "key {} appears more than once inside section {}: {}",
+                key,
+                name,
+                section_text
+            );
+        }
+    }
+}
+
+/// The per-code breakdown is documented as code-sorted and stable across runs, which needs at
+/// least two distinct codes to mean anything — with one code, any order is sorted.
+#[test]
+fn test_doctor_findings_by_code_is_code_sorted_and_stable() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    write_story(&stories_dir, "E1S1", "One");
+    write_duplicate_of(&stories_dir, "E1S1", "E1S1-dup");
+    write_schema_violation(&stories_dir, "E1S9");
+    write_orphan_dw(root, "DW-a1b2");
+
+    let raw_of = |root: &Path| -> String {
+        let mut cmd = Command::cargo_bin("qdev").unwrap();
+        let assert = cmd
+            .current_dir(root)
+            .args(["doctor", "--json"])
+            .assert()
+            .success();
+        String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+    };
+
+    let raw = raw_of(root);
+    let parsed: Value = serde_json::from_str(&raw).unwrap();
+    let validation = section(parsed["sections"].as_array().unwrap(), "validation");
+    let codes: Vec<&str> = validation["findings_by_code"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    assert!(
+        codes.len() >= 2,
+        "the fixture must produce at least two codes, got {:?}",
+        codes
+    );
+
+    // Key order in the serialized text, not just in the parsed map.
+    let breakdown_at = raw.find("\"findings_by_code\"").unwrap();
+    let breakdown = &raw[breakdown_at..];
+    let mut positions: Vec<usize> = Vec::new();
+    for code in &codes {
+        positions.push(breakdown.find(&format!("\"{}\"", code)).unwrap());
+    }
+    let mut sorted_positions = positions.clone();
+    sorted_positions.sort_unstable();
+    assert_eq!(
+        positions, sorted_positions,
+        "codes must be emitted in sorted order: {:?} at {:?}",
+        codes, positions
+    );
+
+    assert_eq!(raw_of(root), raw, "two runs must produce identical output");
+}
+
+#[test]
+fn test_doctor_text_output_contains_validation_section() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    let stories_dir = root.join("docs/specs/stories");
+    write_story(&stories_dir, "E1S2", "Two");
+    write_duplicate_of(&stories_dir, "E1S2", "E1S2-dup");
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd.current_dir(root).args(["doctor"]).assert().success();
+    let text = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(text.contains("[validation]"), "text output: {}", text);
+    assert!(text.contains("finding_count = 2"), "text output: {}", text);
+    assert!(
+        text.find("[cache]").unwrap() < text.find("[validation]").unwrap(),
+        "text output: {}",
+        text
+    );
+}
+
+/// The `validation` section is only as good as the workspace root and `[storage]` layout it is
+/// constructed with. Replacing either with a default keeps every other test green, because their
+/// fixtures use the default layout and run from the root — and on a configured workspace the
+/// duplicate-id scan would then walk a directory that does not exist, returning zero findings
+/// with `status: ok`: exactly the confident `0` this change exists to remove.
+#[test]
+fn test_doctor_validation_honours_configured_specs_dir_and_runs_from_a_subdirectory() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let toml_path = root.join("qdev.toml");
+    let mut toml = fs::read_to_string(&toml_path).unwrap();
+    toml.push_str("\n[storage]\nspecs_dir = \"planning/specs\"\n");
+    fs::write(&toml_path, toml).unwrap();
+
+    let stories_dir = root.join("planning/specs/stories");
+    write_story(&stories_dir, "E1S1", "One");
+    write_duplicate_of(&stories_dir, "E1S1", "E1S1-dup");
+
+    let expected = validate_finding_count(root);
+    assert_eq!(
+        expected, 2,
+        "the fixture must produce the two duplicate-id findings validate reports"
+    );
+
+    let sections = doctor_sections(root);
+    let validation = section(&sections, "validation");
+    assert_eq!(validation["status"], "ok");
+    assert_eq!(
+        validation["finding_count"].as_u64().unwrap(),
+        expected,
+        "doctor must count the configured layout's findings, not the default layout's"
+    );
+    assert_eq!(validation["findings_by_code"]["duplicate_planning_id"], 2);
+
+    // Run from a nested subdirectory: the section's root must be the workspace root, not the cwd.
+    let nested = root.join("planning/specs/stories");
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(&nested)
+        .args(["doctor", "--json"])
+        .assert()
+        .success();
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let from_subdir = section(val["sections"].as_array().unwrap(), "validation");
+    assert_eq!(
+        from_subdir["finding_count"].as_u64().unwrap(),
+        expected,
+        "invoking from a subdirectory must not change the count"
+    );
+}
+
+/// The payload schema is only exercised against a clean workspace elsewhere, so the two shapes
+/// most likely to violate it — a non-empty breakdown, and the all-null `unavailable` report —
+/// were never validated. This pins the defective-workspace shape against the printed schema.
+#[test]
+fn test_doctor_defective_workspace_output_matches_its_printed_schema() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    write_story(&stories_dir, "E1S1", "One");
+    write_duplicate_of(&stories_dir, "E1S1", "E1S1-dup");
+    write_schema_violation(&stories_dir, "E1S9");
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let schema_assert = cmd
+        .current_dir(root)
+        .args(["schema", "payload", "doctor"])
+        .assert()
+        .success();
+    let schema: Value = serde_json::from_slice(&schema_assert.get_output().stdout).unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let doctor_assert = cmd
+        .current_dir(root)
+        .args(["doctor", "--json"])
+        .assert()
+        .success();
+    let payload: Value = serde_json::from_slice(&doctor_assert.get_output().stdout).unwrap();
+
+    let validator = jsonschema::validator_for(&schema).expect("the printed schema must compile");
+    let errors: Vec<String> = validator
+        .iter_errors(&payload)
+        .map(|e| e.to_string())
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "defective-workspace doctor output must validate against its own schema: {errors:?}"
+    );
+
+    let validation = section(payload["sections"].as_array().unwrap(), "validation");
+    assert!(
+        validation["findings_by_code"].as_object().unwrap().len() >= 2,
+        "the fixture must exercise a non-empty, multi-code breakdown"
     );
 }

@@ -5,12 +5,17 @@
 //! sections are wired in; later epics (gates, leases, hygiene) append their own `DoctorSection`
 //! impl there without touching the CLI dispatch or the registry mechanism itself.
 
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
 use serde::ser::SerializeMap;
 use serde::Serialize;
 
+use crate::config::Config;
 use crate::errors::QdevError;
 use crate::store::sqlite::CACHE_SCHEMA_VERSION;
 use crate::store::{EntityFilter, Store};
+use crate::validate::run_validation;
 
 /// One diagnostic section's report: a name plus an ordered list of `(field, value)` pairs.
 /// A `Vec` rather than a `HashMap` so JSON output has deterministic field order across runs.
@@ -63,6 +68,14 @@ pub trait DoctorSection {
     fn name(&self) -> &'static str;
 
     /// Runs the check against `store` and returns its structured report.
+    ///
+    /// Convention for new sections: report health as a `status` field taking `ok` /
+    /// `unavailable` (add further values as needed) plus an `unavailable_reason` carrying the
+    /// error code when it is not `ok`, and never return `Err` for a condition the section can
+    /// describe — `doctor` is the command a user runs when something is already broken, so a
+    /// section that aborts takes the whole diagnostic down with it. (`cache` predates this and
+    /// spells its own health `schema_status`; it keeps that name because the field is a
+    /// published payload contract.)
     fn run(&self, store: &dyn Store) -> Result<DoctorSectionReport, QdevError>;
 }
 
@@ -70,6 +83,11 @@ pub trait DoctorSection {
 /// one this binary expects, any tables missing from it, entity count, sync freshness, and
 /// finding count. Reading the observed version from the database rather than echoing the
 /// compiled-in constant is what lets this section detect a stale or half-migrated cache at all.
+///
+/// Its `finding_count` is deliberately narrow: it is the number of rows in the `findings` table,
+/// i.e. the findings *hydration* recorded. It is not the answer to "is my workspace healthy?" —
+/// four of `qdev validate`'s eight checks are computed fresh at request time and never written
+/// to that table, so they cannot appear here. The `validation` section reports those.
 pub struct CacheDoctorSection;
 
 impl DoctorSection for CacheDoctorSection {
@@ -147,8 +165,108 @@ impl DoctorSection for CacheDoctorSection {
     }
 }
 
-/// Builds the default set of doctor sections. Currently just the cache section; later epics
-/// append their own `DoctorSection` impl here (gates, leases, hygiene, ...).
-pub fn default_doctor_sections() -> Vec<Box<dyn DoctorSection>> {
-    vec![Box::new(CacheDoctorSection)]
+/// Reports what `qdev validate` reports: the total number of findings `run_validation` computes
+/// for this workspace, plus a per-code breakdown.
+///
+/// This exists because the `cache` section structurally cannot answer the question `doctor` is
+/// asked. Four checks (`duplicate_planning_id`, `orphan_deferred_work`,
+/// `dw_missing_rationale`, `target_module_not_registered`) are computed fresh and never written
+/// to the `findings` table, so a table read reports half the evidence — and reports `0` on a
+/// workspace with real defects. Running `run_validation` keeps one definition of "what is wrong
+/// with this workspace" shared with `qdev validate`, and keeps it read-only: a persisted
+/// computed finding would outlive the defect it describes and be wiped by the next sweep.
+///
+/// `run_validation` needs a workspace root (the duplicate-id scan re-reads the files) and a
+/// `Config` (the module registry), neither of which `DoctorSection::run` carries. They are held
+/// here rather than added to the trait: the trait is public API that later epics implement, so
+/// widening it for one section's needs would break every future implementor.
+pub struct ValidationDoctorSection {
+    workspace_root: PathBuf,
+    config: Config,
+}
+
+impl ValidationDoctorSection {
+    pub fn new(workspace_root: PathBuf, config: Config) -> Self {
+        Self {
+            workspace_root,
+            config,
+        }
+    }
+}
+
+impl DoctorSection for ValidationDoctorSection {
+    fn name(&self) -> &'static str {
+        "validation"
+    }
+
+    fn run(&self, store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
+        // `doctor` is the command a user runs when something is already wrong, so a validation
+        // pass that cannot complete — a half-migrated cache missing a table one of the checks
+        // reads — is reported as `status: unavailable` rather than aborting the command and
+        // taking the rest of the diagnostic down with it. The error's code travels with it in
+        // `unavailable_reason`: the `cache` section's `schema_status` explains a cache-shaped
+        // failure, but nothing else in the payload would explain any other kind.
+        //
+        // This does *not* cover a check that completes while reading less than the whole
+        // workspace: the duplicate-id scan skips a file or directory it cannot read and returns
+        // what it found, so an unreadable specs directory reports `ok` with a count of zero.
+        // `qdev validate` is blind the same way (they share the check), so the two commands
+        // still agree — see `deferred-work.md`, filed against the check itself.
+        let (status, unavailable_reason, finding_count, by_code) =
+            match run_validation(store, &self.workspace_root, &self.config) {
+                Ok(findings) => {
+                    // `BTreeMap` (and `serde_json::Value::Object`'s own `BTreeMap` backing) keeps
+                    // the breakdown in a stable, code-sorted order across runs.
+                    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+                    for finding in &findings {
+                        *counts.entry(finding.code.clone()).or_insert(0) += 1;
+                    }
+                    let by_code = serde_json::Value::Object(
+                        counts
+                            .into_iter()
+                            .map(|(code, count)| (code, serde_json::Value::from(count)))
+                            .collect(),
+                    );
+                    (
+                        "ok",
+                        serde_json::Value::Null,
+                        serde_json::Value::from(findings.len()),
+                        by_code,
+                    )
+                }
+                Err(e) => (
+                    "unavailable",
+                    serde_json::Value::from(e.code()),
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                ),
+            };
+
+        Ok(DoctorSectionReport {
+            name: self.name().to_string(),
+            fields: vec![
+                ("status".to_string(), serde_json::Value::from(status)),
+                ("unavailable_reason".to_string(), unavailable_reason),
+                ("finding_count".to_string(), finding_count),
+                ("findings_by_code".to_string(), by_code),
+            ],
+        })
+    }
+}
+
+/// Builds the default set of doctor sections, in the order `qdev doctor` reports them: `cache`
+/// first, then `validation`. This stays the single wiring point — later epics append their own
+/// `DoctorSection` impl here (gates, leases, hygiene, ...) and take whatever context they need
+/// from the arguments already threaded through, without widening the trait.
+pub fn default_doctor_sections(
+    workspace_root: &Path,
+    config: &Config,
+) -> Vec<Box<dyn DoctorSection>> {
+    vec![
+        Box::new(CacheDoctorSection),
+        Box::new(ValidationDoctorSection::new(
+            workspace_root.to_path_buf(),
+            config.clone(),
+        )),
+    ]
 }

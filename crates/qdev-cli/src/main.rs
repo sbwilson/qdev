@@ -1949,6 +1949,24 @@ fn render_doctor_text(sections: &[qdev_core::DoctorSectionReport]) -> String {
     for section in sections {
         out.push_str(&format!("[{}]\n", section.name));
         for (key, value) in &section.fields {
+            // An object is a breakdown (e.g. `findings_by_code`), and this is the output a
+            // human reads when something is already wrong — so it gets one indented line per
+            // entry rather than a JSON blob on the value line.
+            if let serde_json::Value::Object(map) = value {
+                if map.is_empty() {
+                    out.push_str(&format!("  {} = none\n", key));
+                } else {
+                    out.push_str(&format!("  {}:\n", key));
+                    for (entry_key, entry_value) in map {
+                        let rendered = match entry_value {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        out.push_str(&format!("    {} = {}\n", entry_key, rendered));
+                    }
+                }
+                continue;
+            }
             let rendered = match value {
                 serde_json::Value::Null => "null".to_string(),
                 serde_json::Value::String(s) => s.clone(),
@@ -2049,7 +2067,10 @@ fn handle_doctor(
     };
 
     let mut sections = Vec::new();
-    for section in qdev_core::default_doctor_sections() {
+    // `default_doctor_sections` needs the workspace root and config for the sections that
+    // inspect the workspace itself rather than just the cache (the `validation` section runs
+    // `qdev validate`'s own checks); `handle_doctor` already holds both.
+    for section in qdev_core::default_doctor_sections(&root, &annotated_config.config) {
         match section.run(&store) {
             Ok(report) => sections.push(report),
             Err(e) => {

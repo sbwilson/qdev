@@ -43,7 +43,7 @@ Universal reference resolution: any command that takes an ID accepts any entity 
 | --- | --- |
 | `qdev` | Pulse: environment, active sprints, what to do next |
 | `qdev init [--non-interactive --name --developer --team ...]` | Scaffold config, directories, cache, hooks |
-| `qdev doctor` | Environment, cache, gates, skills, MCP, hooks |
+| `qdev doctor` | Environment, cache, validation findings, gates, skills, MCP, hooks (a report — findings never change its exit code) |
 | `qdev validate [--changed] [--fix-ids] [--yes]` | Dangling relations, cycles, ID collisions, schema, orphan DW, missing rationale |
 | `qdev sync [--rebuild]` | Force hydration or rebuild the cache |
 | `qdev schema <entity-kind>` | Print JSON Schema for an entity's frontmatter shape (`story`, `epic`, `dw`, ...) |
@@ -403,3 +403,47 @@ $ qdev doctor
 [✓] MCP: registered in .claude settings
 [!] Leases: E12S7 held by amelia in /work/qubric-b, 3 days old
 ```
+
+`qdev doctor` is a report, never a gate: findings never change its exit code, so it exits 0 on a
+workspace full of them. (It can still fail for its own reasons — an unreadable workspace, a
+config that will not parse.) `qdev validate` is the command that exits 1 on an `error`-severity
+finding.
+
+Diagnostics are contributed by independent sections, reported in a fixed order — currently
+`cache`, then `validation`. `qdev doctor --json` emits each as a flat object under `sections`
+(see `qdev schema payload doctor`); later epics append their own.
+
+#### The `validation` section
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `ok`, or `unavailable` when the validation pass could not complete (e.g. a cache too damaged to read) — in which case the count fields are `null` |
+| `unavailable_reason` | The error code that stopped the pass; `null` when `status` is `ok` |
+| `finding_count` | Total findings for the workspace |
+| `findings_by_code` | Per-code counts, code-sorted; `{}` on a clean workspace |
+
+This section runs the same function `qdev validate` runs, so neither command can see a check the
+other cannot. Two differences in what they *report*: `qdev validate --changed` narrows its output
+to findings under the changed files, and `validate`'s exit code keys on `error`-severity findings
+alone, while `finding_count` here counts every severity. A bare `qdev validate` on the same
+workspace reports the same total.
+
+The set covers both the findings hydration recorded in the cache (`schema_violation`,
+`read_error`, `dangling_relation`, `invalid_relation_kind`, `dependency_cycle`,
+`merge_conflict`) and the four computed fresh at request time (`duplicate_planning_id`,
+`orphan_deferred_work`, `dw_missing_rationale`, `target_module_not_registered`). Computed
+findings are never written back to the cache: a persisted one would outlive the defect it
+describes.
+
+Because those four checks re-read the workspace's spec files, `doctor` now costs a directory walk
+that it did not before — noticeable only on large workspaces, where the cheap sections still
+report first.
+
+#### The `cache` section's `finding_count` is cache-native only
+
+The `cache` section reports on the cache database itself, and its `finding_count` is a count of
+rows in the `findings` table — the findings *hydration* recorded, nothing else. The four computed
+checks above are deliberately never written there, so they cannot appear in it. Read that field
+as "how much did hydration flag", not as "is my workspace healthy"; a `finding_count` of `0` in
+the `cache` section is not a clean bill of health. The `validation` section answers the health
+question.

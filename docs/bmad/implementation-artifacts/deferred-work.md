@@ -92,3 +92,18 @@ Confirmed by re-checking every section-D claim against the tree at `a706c85`; se
 - source_spec: `docs/bmad/implementation-artifacts/spec-create-story-via-write-path.md`
   summary: `docs/cli-reference.md`'s entity table advertises `qdev create epic|adr|requirement|hazard|prd`, none of which exist — `Story` is the only `CreateCommands` variant.
   evidence: Pre-existing documentation overclaim, untouched by this story and outside its intent. Either implement them or mark the row as planned. Review by: epic 2 planning, which decides whether those creates land.
+
+## Deferred from: code review of spec-doctor-sees-computed-findings (2026-09-10)
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-doctor-sees-computed-findings.md`
+  summary: `find_duplicate_planning_ids` reports `0` findings with no error when it cannot read the specs directory, so a blind scan is indistinguishable from a clean workspace — in `qdev validate` as much as in `qdev doctor`.
+  evidence: Measured by the edge-case reviewer against the built binary: `chmod 000 docs/specs/stories` with two duplicate ids present yields `{"status":"ok","finding_count":0,"findings_by_code":{}}`. The scan skips unreadable files and directories and returns what it found. Pre-existing in the check (both commands share it), and the doctor story's frozen boundary forbids changing what an existing check reports. Fix: have the scan count what it could not read and surface that as a finding or a partial status. Review by: before epic 3 story 3.9 (hygiene linter), which makes validation output gate-relevant.
+- source_spec: `docs/bmad/implementation-artifacts/spec-doctor-sees-computed-findings.md`
+  summary: `doctor`'s `validation` section reports `finding_count` across all severities, so it cannot tell the reader whether `qdev validate` would actually exit 1 (which keys on `error` severity alone).
+  evidence: Raised independently by two reviewers. A `findings_by_severity` breakdown, or an `error_finding_count`, answers "would this fail the gate?" — the question a user reads doctor to answer. Not added here because it is new reporting surface beyond the story's intent. Review by: epic 3 story 3.6 (transition-bound gates), the first consumer that cares whether validation blocks.
+- source_spec: `docs/bmad/implementation-artifacts/spec-doctor-sees-computed-findings.md`
+  summary: The `cache` and `validation` doctor sections each read findings independently, so a write landing between them can produce one report where `cache.finding_count` exceeds `validation.finding_count`.
+  evidence: Real but narrow — a diagnostic snapshot skew needing a concurrent write mid-report. The fix (one store snapshot shared by every section, or a single `list_findings` passed in) belongs to the section registry rather than to one section. Review by: whenever a third section is added, which is when the registry is next opened.
+- source_spec: `docs/bmad/implementation-artifacts/spec-1-14-cache-version-stamp-hardening.md`
+  summary: Flaky test — `sweep_tests::test_real_v1_cache_rebuilds_to_current_schema_and_matches_a_fresh_sweep` failed once in a full `cargo test --workspace` run and did not reproduce in 3 isolated and 7 further full runs.
+  evidence: Observed 2026-09-10 during story verification; the assertion text was not captured. The test compares a rebuilt cache against a fresh sweep of the same tree, so the likely suspects are mtime/size granularity in `sync_state` or a timestamp captured either side of a second boundary. A flake in exactly the "rebuild equals sweep" invariant is worth pinning down rather than re-running. Review by: first time it fails again, or epic 2 planning — whichever comes first.

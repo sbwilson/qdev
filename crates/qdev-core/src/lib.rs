@@ -23,7 +23,10 @@ pub use store::{
 
 pub use dag::{allowed_kind_pairs, find_dependency_cycle, is_valid_kind_pair, would_create_cycle};
 
-pub use doctor::{default_doctor_sections, DoctorSection, DoctorSectionReport};
+pub use doctor::{
+    default_doctor_sections, CacheDoctorSection, DoctorSection, DoctorSectionReport,
+    ValidationDoctorSection,
+};
 
 pub use config::{
     find_workspace_root, load_config, merge_configs, resolve_git_email, validate_config_table,

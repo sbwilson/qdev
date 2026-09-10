@@ -6,7 +6,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-10-2026 12:00
+last_updated: 09-10-2026 13:00
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -109,7 +109,7 @@ action_items:
     action: "Persist the four computed validation checks or have qdev doctor run them;
       doctor currently reports finding_count 0 where validate finds defects"
     owner: "Simon"
-    status: open
+    status: done
     ref: "docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md"
   - id: "epic-1-retro-item-6-reconcile-architecture-md-sections-10-an"
     epic: 1

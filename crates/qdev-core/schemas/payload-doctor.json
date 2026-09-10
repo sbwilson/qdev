@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Doctor Payload Schema",
-  "description": "Output shape of `qdev doctor --json`. Each section is a flat object whose fields are section-specific; only `name` is common to all of them, and later epics add sections without changing this envelope. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "description": "Output shape of `qdev doctor --json`. Each section is a flat object whose fields are section-specific; only `name` is common to all of them; `qdev doctor` reports the `cache` section first, then `validation`, and later epics add sections without changing this envelope. Section-specific fields are declared inside that section's own branch, so a new section is free to spell its fields however it needs — nothing here constrains a name this schema does not know. Schema changes follow semver on schema_version; additive fields do not bump the major.",
   "type": "object",
   "required": ["schema_version", "sections"],
   "properties": {
@@ -17,33 +17,6 @@
           "name": {
             "type": "string",
             "description": "Stable, short section name (e.g. \"cache\")."
-          },
-          "cache_schema_version": {
-            "type": "integer",
-            "description": "cache section: the version the cache database actually carries, read from it rather than reported back from this binary's own constant."
-          },
-          "expected_cache_schema_version": {
-            "type": "integer",
-            "description": "cache section: the version this binary was built for."
-          },
-          "schema_status": {
-            "type": "string",
-            "enum": ["ok", "mismatch"],
-            "description": "cache section: \"ok\" only when the observed version matches and no table is missing."
-          },
-          "missing_tables": {
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "cache section: expected tables absent from the database."
-          },
-          "entity_count": {
-            "type": ["integer", "null"],
-            "description": "cache section: null when the cache is too damaged to read, in which case schema_status explains why."
-          },
-          "last_synced_at": { "type": ["string", "null"] },
-          "finding_count": {
-            "type": ["integer", "null"],
-            "description": "cache section: null when the cache is too damaged to read."
           }
         },
         "allOf": [
@@ -61,7 +34,70 @@
                 "entity_count",
                 "last_synced_at",
                 "finding_count"
-              ]
+              ],
+              "properties": {
+                "cache_schema_version": {
+                  "type": "integer",
+                  "description": "The version the cache database actually carries, read from it rather than reported back from this binary's own constant."
+                },
+                "expected_cache_schema_version": {
+                  "type": "integer",
+                  "description": "The version this binary was built for."
+                },
+                "schema_status": {
+                  "type": "string",
+                  "enum": ["ok", "mismatch"],
+                  "description": "\"ok\" only when the observed version matches and no table is missing."
+                },
+                "missing_tables": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Expected tables absent from the database."
+                },
+                "entity_count": {
+                  "type": ["integer", "null"],
+                  "description": "Null when the cache is too damaged to read, in which case schema_status explains why."
+                },
+                "last_synced_at": { "type": ["string", "null"] },
+                "finding_count": {
+                  "type": ["integer", "null"],
+                  "description": "The number of rows in the `findings` table, i.e. cache-native (hydration-recorded) findings only — the four computed checks are never written there, so 0 here is not a clean bill of health. See the validation section for the full count. Null when the cache is too damaged to read."
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "name": { "const": "validation" } },
+              "required": ["name"]
+            },
+            "then": {
+              "required": [
+                "status",
+                "unavailable_reason",
+                "finding_count",
+                "findings_by_code"
+              ],
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": ["ok", "unavailable"],
+                  "description": "\"unavailable\" when the validation pass could not complete, in which case finding_count and findings_by_code are null."
+                },
+                "unavailable_reason": {
+                  "type": ["string", "null"],
+                  "description": "The error code that prevented the pass from completing; null when status is \"ok\"."
+                },
+                "finding_count": {
+                  "type": ["integer", "null"],
+                  "description": "The total number of findings `run_validation` computes — the same set `qdev validate` reports. Null when the pass could not complete."
+                },
+                "findings_by_code": {
+                  "type": ["object", "null"],
+                  "additionalProperties": { "type": "integer" },
+                  "description": "Per-finding-code counts, code-sorted; an empty object on a clean workspace, null when the pass could not complete."
+                }
+              }
             }
           }
         ]
