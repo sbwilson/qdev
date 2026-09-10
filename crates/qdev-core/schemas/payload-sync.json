@@ -3,7 +3,13 @@
   "title": "Sync Payload Schema",
   "description": "Output shape of `qdev sync --json` (and `qdev sync --rebuild --json`): the counts from one hydration pass. Schema changes follow semver on schema_version; additive fields do not bump the major.",
   "type": "object",
-  "required": ["schema_version", "parsed", "unchanged", "purged", "findings"],
+  "required": [
+    "schema_version",
+    "parsed",
+    "unchanged",
+    "purged",
+    "findings"
+  ],
   "properties": {
     "schema_version": {
       "type": "string"
@@ -17,6 +23,11 @@
       "type": "integer",
       "minimum": 0,
       "description": "Scanned files whose content hash was unchanged, so they were not re-parsed."
+    },
+    "hashed": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Files whose content this pass read and hashed. A warm sweep that skips every file leaves this at 0; a rebuild reads and hashes everything it finds. Optional: a payload from a build predating this field validates without it."
     },
     "purged": {
       "type": "integer",

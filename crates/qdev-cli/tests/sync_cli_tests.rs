@@ -68,7 +68,7 @@ fn test_sync_json_shape_and_exit_0() {
     let output = assert.get_output();
     let val: Value = serde_json::from_str(std::str::from_utf8(&output.stdout).unwrap()).unwrap();
     assert_eq!(val["schema_version"], "1");
-    for field in ["parsed", "unchanged", "purged", "findings"] {
+    for field in ["parsed", "unchanged", "purged", "findings", "hashed"] {
         assert!(
             val[field].is_u64(),
             "expected numeric field '{}' in sync payload: {}",
@@ -154,6 +154,13 @@ fn test_sync_rebuild_reparses_everything() {
     assert_eq!(val["parsed"], 3);
     assert_eq!(val["unchanged"], 0);
     assert_eq!(val["purged"], 0);
+    // A rebuild reads and hashes everything it finds, which is the field's documented meaning —
+    // removing the rebuild's own `hashed` increments left every test green and the payload
+    // reporting 0 for a tree it had read end to end.
+    assert_eq!(
+        val["hashed"], 3,
+        "the rebuild must report what it read and hashed: {val}"
+    );
 
     // The entity must still be queryable afterwards: rebuild is lossless.
     let mut cmd3 = Command::cargo_bin("qdev").unwrap();

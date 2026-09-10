@@ -243,3 +243,15 @@ two pass-1 findings that were dropped by mistake and the mediums.
 - source_spec: `docs/bmad/implementation-artifacts/spec-one-id-in-use-rule.md`
   summary: `--fix-ids` refusal coverage gaps — no test for a non-story kind (the `kind_for_write` path the check leans on), none for a state-tree duplicate, no exit-code assertion on the refusal, and the occupied-rename-target case narrowed to a directory occupant only.
   evidence: The narrowing is the interesting part and is now correct-by-construction: a *file* at the rename target puts that id in use, so it is never allocated, leaving only a directory able to occupy the name. Worth a test asserting that reasoning rather than assuming it. Review by: with the `--fix-ids` reporting work above.
+
+## Deferred from: code review of spec-change-gate-compares-content (2026-09-10)
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-change-gate-compares-content.md`
+  summary: The "cannot resolve the edit" predicate only recognises a *whole-second* stamp, so a filesystem with millisecond or centisecond timestamp granularity keeps the original hole — a same-length edit inside one coarse tick stays invisible.
+  evidence: The predicate tests `stamp % 1_000_000_000 == 0`, which is the signature of one-second granularity (HFS+, some network mounts) and nothing else. The general fix is to detect the granularity — trailing-zero width of the stamp, or probing it once per workspace — rather than hardcoding one second. No filesystem in the support matrix has sub-second-but-coarse granularity today. Review by: if a coarse-granularity filesystem is ever added to the support matrix, or with the next change to the gate.
+- source_spec: `docs/bmad/implementation-artifacts/spec-change-gate-compares-content.md`
+  summary: A change stamp that saturates at `i64::MAX` compares equal to every other saturated stamp and is never second-aligned, so edits to a file with an absurd or corrupt mtime are never seen.
+  evidence: `i64::try_from(d.as_nanos()).unwrap_or(i64::MAX)` — reachable only with an mtime beyond the year 2262 or a corrupted one. Treating a saturated stamp as "cannot resolve" would close it in one line. Filed with the granularity item; both are the stamp's edges. Review by: with the granularity work.
+- source_spec: `docs/bmad/implementation-artifacts/spec-change-gate-compares-content.md`
+  summary: The convergence test no longer compares `sync_meta` across a sweep and a rebuild, and nothing replaced the assertion, so a rebuild leaving that table empty or duplicated is uncaught.
+  evidence: The exclusion itself is correct — `sync_meta` holds a wall-clock stamp that cannot be equal across two hydrations — but a shape assertion (exactly one row on both paths) would keep the coverage the exclusion dropped. Review by: next time the convergence test is edited.

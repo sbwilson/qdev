@@ -292,10 +292,10 @@ fn test_touch_same_content_no_reparsed() {
         .unwrap()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs() as i64;
+        .as_nanos() as i64;
     assert_eq!(
         stored_mtime, actual_mtime,
-        "sync_state mtime refreshed to file mtime"
+        "sync_state mtime refreshed to file mtime, at full precision"
     );
 }
 
@@ -568,15 +568,13 @@ fn test_dirty_row_with_deleted_sync_state_restored() {
         )
         .ok();
     let (stored_mtime, stored_size, stored_hash) = row.expect("sync_state row restored");
-    let md = fs::metadata(story_path(root, "E1S1")).unwrap();
-    let actual_mtime = md
-        .modified()
-        .unwrap()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let actual_mtime = change_stamp_of(&story_path(root, "E1S1"));
     assert_eq!(stored_mtime, actual_mtime, "restored mtime matches file");
-    assert_eq!(stored_size, md.len() as i64, "restored size matches file");
+    assert_eq!(
+        stored_size,
+        fs::metadata(story_path(root, "E1S1")).unwrap().len() as i64,
+        "restored size matches file"
+    );
     assert!(stored_hash.is_some(), "restored hash present");
 }
 
@@ -1559,6 +1557,13 @@ fn test_real_v1_cache_rebuilds_to_current_schema_and_matches_a_fresh_sweep() {
     assert_eq!(summary.parsed, 0, "the rebuilt cache is already current");
     let swept = dump_tables(&cache_db(root));
     for &table in ALL_TABLE_NAMES {
+        // `sync_meta` stamps *when* each pass ran, not the content it describes, so it is
+        // expected to advance between the rebuild and the sweep that follows - and comparing it
+        // is a second-boundary race. Excluded here for the same reason the convergence test
+        // excludes it, where its shape is asserted instead.
+        if table == "sync_meta" {
+            continue;
+        }
         assert_eq!(
             rebuilt.get(table),
             swept.get(table),
@@ -2167,4 +2172,467 @@ fn test_unreadable_scratch_and_evidence_files_record_read_error_on_both_paths() 
             "sweep must record a read_error for {rel}: {sweep_paths:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The change gate compares content, not proxies for it
+// ---------------------------------------------------------------------------
+
+/// `chmod 000` a file that is **already hydrated**, without rewriting it, so its mtime and size
+/// stay exactly what the cache recorded. `make_unreadable`/`make_unreadable_with` both write the
+/// file first, which moves the mtime and therefore always leaves the sweep a candidate to
+/// re-read — which is why no test could see a file that became unreadable behind unchanged
+/// metadata. Returns false where a 0o000 file is readable anyway (root, or a platform without
+/// POSIX modes), so the caller can skip rather than fail for the wrong reason.
+fn make_unreadable_in_place(root: &Path, rel: &str) -> bool {
+    let path = root.join(rel);
+    let before = fs::metadata(&path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    if fs::read_to_string(&path).is_ok() {
+        return false;
+    }
+    let after = fs::metadata(&path).unwrap();
+    assert_eq!(
+        before.modified().unwrap(),
+        after.modified().unwrap(),
+        "the helper must not move the mtime - that is the whole point of it"
+    );
+    assert_eq!(before.len(), after.len(), "nor the size");
+    true
+}
+
+/// The change stamp production code stores: the later of mtime and ctime, in nanoseconds.
+///
+/// Asserting against mtime alone passes only while the two happen to be equal, so it would not
+/// notice the ctime half of the gate being removed.
+fn change_stamp_of(path: &Path) -> i64 {
+    let md = fs::metadata(path).unwrap();
+    let mtime = md
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64;
+    #[cfg(unix)]
+    let stamp = {
+        use std::os::unix::fs::MetadataExt;
+        let ctime = md
+            .ctime()
+            .saturating_mul(1_000_000_000)
+            .saturating_add(md.ctime_nsec());
+        mtime.max(ctime)
+    };
+    #[cfg(not(unix))]
+    let stamp = mtime;
+    stamp
+}
+
+fn status_of(store: &SqliteStore, id: &str) -> Option<String> {
+    store.get_entity(id).unwrap().unwrap().status
+}
+
+/// Two files of equal length differing only in `status`, so size cannot see the edit either.
+fn story_with_status(id: &str, title: &str, status: &str) -> String {
+    let md = story_md(id, title);
+    let edited = md.replace("status: draft", &format!("status: {status}"));
+    assert_eq!(
+        md.len(),
+        edited.len(),
+        "the fixture must be the same length before and after the edit"
+    );
+    edited
+}
+
+#[test]
+fn test_sub_second_edit_lands() {
+    // 200 ms after hydration, same length: the edit is only invisible if the stored mtime was
+    // truncated to whole seconds.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "One");
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    assert_eq!(status_of(&store, "E1S1").as_deref(), Some("draft"));
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    write_at(
+        root,
+        "docs/specs/stories/E1S1.md",
+        &story_with_status("E1S1", "One", "ready"),
+    );
+
+    store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        status_of(&store, "E1S1").as_deref(),
+        Some("ready"),
+        "a sub-second edit must land"
+    );
+}
+
+#[test]
+fn test_same_second_status_edit_lands() {
+    // No sleep at all: the edit lands in the same wall-clock second as the hydration that
+    // preceded it, at the same length - the shape a machine-speed agent edit has by default.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "One");
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    write_at(
+        root,
+        "docs/specs/stories/E1S1.md",
+        &story_with_status("E1S1", "One", "ready"),
+    );
+
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        status_of(&store, "E1S1").as_deref(),
+        Some("ready"),
+        "a same-second, same-length edit must land"
+    );
+    assert_eq!(summary.parsed, 1);
+}
+
+#[test]
+fn test_same_second_id_edit_leaves_no_ghost_row() {
+    // The worse half of the same defect: a same-length `id` edit left a row for an id no file
+    // declares, which `qdev get` then answered from. The in-place id-edit purge already handles
+    // this - it was simply never reached, because the edit was invisible.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "One");
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    let rel = "docs/specs/stories/E1S1.md";
+    let before = fs::metadata(root.join(rel)).unwrap().len();
+    write_at(root, rel, &story_md("E1S2", "One"));
+    assert_eq!(
+        fs::metadata(root.join(rel)).unwrap().len(),
+        before,
+        "the id edit must not change the file's length"
+    );
+
+    store.sweep_workspace(root, &storage).unwrap();
+    let e1s2 = store.get_entity("E1S2").unwrap();
+    assert_eq!(
+        e1s2.map(|e| e.source_path),
+        Some(rel.to_string()),
+        "the new id must be in the cache"
+    );
+    assert!(
+        store.get_entity("E1S1").unwrap().is_none(),
+        "the old id must leave no ghost row for `qdev get` to answer from"
+    );
+    assert_eq!(
+        count_rows(root, "SELECT COUNT(*) FROM entities;"),
+        1,
+        "one file, one row"
+    );
+}
+
+#[test]
+fn test_unresolved_second_window_is_hashed_not_trusted() {
+    // A whole-second stamp says only "written somewhere inside this second", so an edit later in
+    // that second at the same length is indistinguishable from no edit — which is what a
+    // coarse-granularity filesystem (HFS+, some network mounts) hands us on every write.
+    //
+    // The condition cannot be constructed through the sweep on a fine-grained filesystem: the
+    // stamp folds in ctime, and no API lets a test set ctime. So the decision itself is asserted,
+    // and the sweep's use of it is covered by the sub-second and same-second edit tests above.
+    use qdev_core::store::stamp_cannot_resolve_the_edit as unresolved;
+
+    let whole_second = 1_780_000_000 * 1_000_000_000i64;
+    assert!(
+        unresolved(whole_second, whole_second, 145, 145),
+        "a whole-second stamp with unchanged size cannot rule out an edit inside that second"
+    );
+    assert!(
+        !unresolved(whole_second, whole_second + 200_000_000, 145, 145),
+        "a moved stamp is seen by the ordinary comparison"
+    );
+    assert!(
+        !unresolved(whole_second, whole_second, 145, 146),
+        "a size change is seen by the ordinary comparison"
+    );
+    assert!(
+        !unresolved(
+            whole_second + 200_000_000,
+            whole_second + 200_000_000,
+            145,
+            145
+        ),
+        "a sub-second stamp resolves the edit, so there is nothing to hash for"
+    );
+}
+
+#[test]
+fn test_unreadable_without_metadata_change_records_read_error_on_both_paths() {
+    // `chmod 000` behind unchanged metadata: the sweep used to skip the file outright, so
+    // `qdev validate` exited 0 where `sync --rebuild` exits 1 - falsifying "an unreadable file
+    // produces a read_error from both paths. Neither swallows it."
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "One");
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    let rel = "docs/specs/stories/E1S1.md";
+    if !make_unreadable_in_place(root, rel) {
+        eprintln!("skipping: this environment can read a 0o000 file");
+        return;
+    }
+
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        summary.hashed, 0,
+        "an unreadable file is reported without a successful read"
+    );
+    let swept: Vec<FindingRecord> = store
+        .list_findings()
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.code == "read_error" && f.path == rel)
+        .collect();
+    assert_eq!(swept.len(), 1, "the sweep must report the unreadable file");
+    // Error severity is what makes `qdev validate` exit 1 rather than 0.
+    assert_eq!(swept[0].severity, "error");
+    assert!(
+        entity_stale(&store, "E1S1"),
+        "the retained row must be flagged stale, as on any other unreadable file"
+    );
+
+    // ...and a rebuild of the same tree agrees, which is the invariant that was false.
+    store.reset_and_rebuild(root, &storage).unwrap();
+    let rebuilt: Vec<(String, String)> = store
+        .list_findings()
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.code == "read_error")
+        .map(|f| (f.path, f.severity))
+        .collect();
+    assert_eq!(
+        rebuilt,
+        vec![(rel.to_string(), "error".to_string())],
+        "both paths report the same read_error"
+    );
+
+    // A repeated sweep keeps reporting it rather than settling into silence.
+    store.sweep_workspace(root, &storage).unwrap();
+    assert!(store
+        .list_findings()
+        .unwrap()
+        .iter()
+        .any(|f| f.code == "read_error" && f.path == rel));
+}
+
+#[test]
+fn test_untouched_workspace_is_neither_re_read_nor_re_hashed() {
+    // The other half of the story: narrowing what "unchanged" may mean must not turn the
+    // incremental sweep into a full rehash. Pinned through the summary, so the optimisation is
+    // asserted and not just assumed.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1", "E1S2", "E1S3"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    // On a filesystem that reports whole-second mtimes there is no such thing as a file whose
+    // content is *known* unchanged, and every file is hashed by design (correctness first).
+    let mtime: i64 = rusqlite::Connection::open(cache_db(root))
+        .unwrap()
+        .query_row(
+            "SELECT mtime FROM sync_state WHERE path = 'docs/specs/stories/E1S1.md';",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    if mtime % 1_000_000_000 == 0 {
+        eprintln!("skipping: this filesystem reports whole-second mtimes");
+        return;
+    }
+
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(summary.parsed, 0, "nothing may be re-parsed");
+    assert_eq!(summary.purged, 0);
+    assert_eq!(summary.hashed, 0, "nothing may be re-read or re-hashed");
+    assert_eq!(
+        summary.unchanged, 4,
+        "three stories plus qdev.toml, all skipped"
+    );
+}
+
+#[test]
+fn test_second_granular_sync_state_from_an_older_binary_self_heals() {
+    // The upgrade path. A pre-upgrade `sync_state.mtime` holds whole *seconds*; the current one
+    // holds nanoseconds, so every stored value compares unequal and every file is re-read once.
+    // No schema version bump and no migration: the cache heals itself in one pass.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1", "E1S2", "E1S3"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    rusqlite::Connection::open(cache_db(root))
+        .unwrap()
+        .execute("UPDATE sync_state SET mtime = mtime / 1000000000;", [])
+        .unwrap();
+
+    let healing = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        healing.hashed, 4,
+        "every file is re-read once: three stories plus qdev.toml"
+    );
+    // Re-read, not re-parsed: the content hash is the gate behind the mtime one, and it still
+    // matches, so the pass costs one read per file and no parse at all - which is why the
+    // upgrade needs no migration and no schema version bump.
+    assert_eq!(healing.parsed, 0);
+    assert_eq!(healing.purged, 0);
+
+    let steady = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(steady.hashed, 0, "the following sweep re-reads nothing");
+    assert_eq!(steady.parsed, 0);
+    assert_eq!(steady.unchanged, 4, "everything unchanged");
+}
+
+/// `sync_state.mtime` holds a nanosecond change stamp, and `updated_at` is derived from it when a
+/// file's frontmatter omits one. Feeding nanoseconds to a seconds-based conversion wrote
+/// `56692569348-03-01T04:12:02Z` into every such row — and no test read the column, so the whole
+/// suite stayed green through it.
+#[test]
+fn test_updated_at_falls_back_to_the_files_own_time_not_the_raw_stamp() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    // `story_md` deliberately omits `updated_at`, so the fallback fires.
+    write_story(root, "E1S1", "One");
+    let storage = storage();
+    ensure_cache(root, &storage).unwrap();
+
+    let (updated_at, stamp): (String, i64) = rusqlite::Connection::open(cache_db(root))
+        .unwrap()
+        .query_row(
+            "SELECT e.updated_at, s.mtime FROM entities e \
+             JOIN sync_state s ON s.path = e.source_path WHERE e.id = 'E1S1';",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+
+    let expected = qdev_core::iso8601_from_timestamp(stamp / 1_000_000_000);
+    assert_eq!(
+        updated_at, expected,
+        "updated_at must come from the stamp's seconds, not its nanoseconds"
+    );
+    assert!(
+        updated_at.starts_with("20"),
+        "a plausible year, not one in the billions: {updated_at}"
+    );
+}
+
+/// A file that became unreadable and is readable again must stop being reported: the
+/// `read_error` and the stale flag are cleared, because the content is unchanged and a rebuild of
+/// the same tree has neither. Without that, `qdev validate` exits 1 forever on a healthy
+/// workspace — a convergence break in exactly the case readability detection made reachable.
+#[test]
+fn test_unreadable_then_readable_again_clears_the_finding_and_the_stale_flag() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "One");
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    let rel = "docs/specs/stories/E1S1.md";
+    if !make_unreadable_in_place(root, rel) {
+        eprintln!("skipping: this environment can read a 0o000 file");
+        return;
+    }
+    store.sweep_workspace(root, &storage).unwrap();
+    assert!(
+        store
+            .list_findings()
+            .unwrap()
+            .iter()
+            .any(|f| f.code == "read_error" && f.path == rel),
+        "the unreadable file must be reported first"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(root.join(rel), fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    store.sweep_workspace(root, &storage).unwrap();
+
+    assert!(
+        store.list_findings().unwrap().is_empty(),
+        "a file that reads again must stop being reported: {:?}",
+        store.list_findings().unwrap()
+    );
+    assert!(
+        !store.get_entity("E1S1").unwrap().unwrap().stale,
+        "and its rows are current again, as a rebuild's would be"
+    );
+}
+
+/// The coarse-filesystem window, exercised **through the sweep** rather than as a predicate.
+///
+/// Reachable on a fine-grained filesystem after all: the stamp is `max(mtime, ctime)`, so setting
+/// the file's mtime to a whole second in the *future* makes the stamp that whole second, and the
+/// stored row can then be aligned to it. Without this, deleting the `unresolved_second` disjunct
+/// from the gate left the whole suite green — the predicate was tested, its use was not.
+#[cfg(unix)]
+#[test]
+fn test_sweep_hashes_a_file_whose_stamp_cannot_resolve_the_edit() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    let rel = "docs/specs/stories/E1S1.md";
+    write_story(root, "E1S1", "One");
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    assert_eq!(status_of(&store, "E1S1").as_deref(), Some("draft"));
+
+    // A whole second, far enough ahead that it stays the max of mtime and ctime.
+    let whole_second = 2_000_000_000u64;
+    let stamp = whole_second as i64 * 1_000_000_000;
+    let edited = story_with_status("E1S1", "One", "ready");
+    fs::write(root.join(rel), &edited).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(root.join(rel))
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(whole_second))
+        .unwrap();
+
+    // Make the stored row agree with it: same stamp, same size. Only the boundary alignment is
+    // left to tell the sweep it cannot rule out an edit.
+    rusqlite::Connection::open(cache_db(root))
+        .unwrap()
+        .execute(
+            "UPDATE sync_state SET mtime = ?1, size = ?2 WHERE path = ?3;",
+            rusqlite::params![stamp, edited.len() as i64, rel],
+        )
+        .unwrap();
+
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        summary.hashed, 1,
+        "a stamp on a second boundary must be hashed, not trusted: {summary:?}"
+    );
+    assert_eq!(
+        status_of(&store, "E1S1").as_deref(),
+        Some("ready"),
+        "and the edit the stamp cannot resolve must land"
+    );
 }

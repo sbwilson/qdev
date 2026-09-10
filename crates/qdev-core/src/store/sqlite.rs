@@ -479,12 +479,17 @@ DELETE FROM sync_meta;
             // `parsed` counts only confirmed successful reads + hydrations this pass, matching
             // the meaning `sweep_workspace` gives `SweepSummary.parsed`.
             let mut parsed = 0usize;
+            // Files whose content this pass read and hashed. A rebuild reads everything it
+            // finds; the sweep counts the same thing, which is how a test can pin that a warm
+            // sweep re-reads nothing.
+            let mut hashed = 0usize;
 
             // 1. Process gates from qdev.toml if present (and record its sync_state row)
             if config_path.exists() {
                 match fs::read_to_string(&config_path) {
                     Ok(content) => {
-                        let (mtime, size) = file_mtime_size(&config_path);
+                        hashed += 1;
+                        let (mtime, size) = file_change_stamp(&config_path);
                         let content_hash = sha256_digest(content.as_bytes());
                         upsert_sync_state_row(&tx, "qdev.toml", mtime, size, &content_hash)?;
                         refresh_gates(&tx, &content)?;
@@ -508,6 +513,7 @@ DELETE FROM sync_meta;
                         continue;
                     }
                 };
+                hashed += 1;
                 let outcome = hydrate_markdown_file(&tx, workspace_root, file_path, &content)?;
                 if matches!(outcome, HydrateOutcome::Parsed { .. }) {
                     parsed += 1;
@@ -527,6 +533,7 @@ DELETE FROM sync_meta;
                         continue;
                     }
                 };
+                hashed += 1;
                 hydrate_scratch_file(&tx, workspace_root, file_path, &content)?;
                 parsed += 1;
             }
@@ -540,6 +547,7 @@ DELETE FROM sync_meta;
                         continue;
                     }
                 };
+                hashed += 1;
                 hydrate_evidence_file(&tx, workspace_root, file_path, &content)?;
                 parsed += 1;
             }
@@ -578,6 +586,8 @@ DELETE FROM sync_meta;
             Ok(SweepSummary {
                 parsed,
                 unchanged: 0,
+                // A rebuild reads and hashes every file it finds, by definition.
+                hashed,
                 purged: 0,
                 findings,
             })
@@ -3146,6 +3156,7 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
 
             let mut parsed = 0usize;
             let mut unchanged = 0usize;
+            let mut hashed = 0usize;
             let mut purged = 0usize;
             // Paths whose hydration succeeded this pass. Only these consume a dirty row.
             let mut parsed_paths: HashSet<String> = HashSet::new();
@@ -3179,7 +3190,7 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
 
             // 2. Sweep each on-disk file
             for (rel, abs, role) in &disk {
-                let (mtime, size) = file_mtime_size(abs);
+                let (stamp, size) = file_change_stamp(abs);
                 let size_i64 = size as i64;
                 let is_dirty = dirty_paths.contains(rel);
                 let stored = sync_map.get(rel);
@@ -3187,7 +3198,7 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                 // A file is a re-hash candidate only if its mtime or size differs, its
                 // sync_state row is missing, or its entity is dirty.
                 let meta_changed = match stored {
-                    Some((m, s, _)) => *m != mtime || *s != size_i64,
+                    Some((m, s, _)) => *m != stamp || *s != size_i64,
                     None => true,
                 };
 
@@ -3212,7 +3223,29 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                     && !ids_by_path.contains_key(rel)
                     && !finding_paths.contains(rel);
 
-                if !meta_changed && !is_dirty && !unaccounted {
+                // ...or if the mtime comparison cannot resolve the window the edit could be in.
+                // Stored and current mtime are equal *and* carry no sub-second detail, so all
+                // they establish is that the file was last written somewhere inside that one
+                // second: an edit made later in the same second, to the same length, is
+                // indistinguishable from no edit at all. That means a coarse-granularity
+                // filesystem (HFS+, some network mounts), not a full-precision one, where an
+                // edit moves the nanoseconds and `meta_changed` already sees it.
+                //
+                // Such a file is read and hashed rather than trusted, and the hash then decides
+                // whether it re-parses — so the price is a read, not a parse, and it is paid only
+                // by files whose mtime lands exactly on a second boundary rather than by the
+                // whole workspace on every boot (AD-6's 30 ms budget rules that out).
+                let unresolved_second = match stored {
+                    Some((m, s, _)) => stamp_cannot_resolve_the_edit(*m, stamp, *s, size_i64),
+                    None => false,
+                };
+
+                if !meta_changed && !is_dirty && !unaccounted && !unresolved_second {
+                    // Content and permissions both known unchanged: the stamp compared above is
+                    // the later of mtime and ctime, so a `chmod` that makes the file unreadable
+                    // moves it and the file takes the candidate path below, where the failed read
+                    // is recorded as a `read_error` — the same answer a rebuild gives. See
+                    // `file_mtime_size` for why this is not done by opening every skipped file.
                     unchanged += 1;
                     continue;
                 }
@@ -3228,6 +3261,7 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                         continue;
                     }
                 };
+                hashed += 1;
                 let hash = sha256_digest(content.as_bytes());
                 let hash_changed = match stored {
                     Some((_, _, h)) => h.as_deref() != Some(hash.as_str()),
@@ -3291,14 +3325,25 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                         }
                         SweepFileRole::Config => {
                             refresh_gates(&tx, &content)?;
-                            upsert_sync_state_row(&tx, rel, mtime, size, &hash)?;
+                            upsert_sync_state_row(&tx, rel, stamp, size, &hash)?;
                             parsed += 1;
                             parsed_paths.insert(rel.clone());
                         }
                     }
                 } else {
-                    // Hash unchanged (e.g. touch / same-size edit): refresh mtime+size only
-                    upsert_sync_state_row(&tx, rel, mtime, size, &hash)?;
+                    // Hash unchanged (a touch, a `chmod`, or a same-size edit that turned out to
+                    // be identical): refresh the stamp and size only.
+                    //
+                    // A file that was unreadable and is now readable again arrives here with its
+                    // content unchanged, so its `read_error` finding and its stale flag must be
+                    // cleared — the file is fine now, and a rebuild of the same tree has neither.
+                    // Leaving them would keep `qdev validate` exiting 1 forever on a healthy
+                    // workspace, which is a convergence break in exactly the case the readability
+                    // detection made reachable.
+                    clear_findings_for_path(&tx, rel)?;
+                    finding_paths.remove(rel);
+                    unstale_by_source_path(&tx, rel)?;
+                    upsert_sync_state_row(&tx, rel, stamp, size, &hash)?;
                     unchanged += 1;
                 }
             }
@@ -3402,6 +3447,7 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
             Ok(SweepSummary {
                 parsed,
                 unchanged,
+                hashed,
                 purged,
                 findings,
             })
@@ -3805,16 +3851,85 @@ fn relative_path(workspace_root: &Path, file_path: &Path) -> String {
         .replace('\\', "/")
 }
 
-fn file_mtime_size(file_path: &Path) -> (i64, u64) {
+/// Nanoseconds in a second — the unit `file_mtime_size` reports an mtime in.
+const NANOS_PER_SEC: i64 = 1_000_000_000;
+
+/// The file's modification time in **nanoseconds** since the epoch, at whatever precision the
+/// filesystem actually provides, plus its size.
+///
+/// Whole seconds (what this returned before) made a same-length edit landing in the same
+/// wall-clock second as the previous hydration invisible *forever*, and both APFS and ext4 record
+/// sub-second mtimes. Nanoseconds since 1970 fit an `i64` until 2262, and `sync_state.mtime` is
+/// already an `INTEGER` column, so the wider value needs no schema change: a value written by an
+/// older binary (whole seconds, ~1.7e9) compares unequal to a nanosecond one (~1.7e18), so every
+/// file re-parses once after the upgrade and the cache self-heals.
+///
+/// A whole-second mtime is still possible — a coarse-granularity filesystem, or a file whose
+/// nanoseconds happen to be zero — and the sweep's change gate treats that as unresolved rather
+/// than as proof of no change.
+/// Whether an apparently-unchanged file might still have been edited — the case a stamp
+/// comparison cannot settle.
+///
+/// True when the stamp and size are unchanged *and* the stamp sits exactly on a second boundary.
+/// A whole-second stamp is the signature of a filesystem whose timestamp granularity is one
+/// second (HFS+, some network mounts): there, equality proves "same second", not "same content".
+/// On a full-precision filesystem an edit moves the nanoseconds, so `meta_changed` sees it and
+/// this never fires — which is why the price is paid only where it buys something.
+///
+/// Extracted as a predicate because it is otherwise unreachable in a test on a fine-grained
+/// filesystem: the stamp folds in ctime, which no API lets a test set.
+pub fn stamp_cannot_resolve_the_edit(
+    stored_stamp: i64,
+    stamp: i64,
+    stored_size: i64,
+    size: i64,
+) -> bool {
+    stored_stamp == stamp && stored_size == size && stamp % NANOS_PER_SEC == 0
+}
+
+/// The change stamp stored in `sync_state.mtime`, and the file's size.
+///
+/// The stamp is the **later of mtime and ctime**, in nanoseconds, from the one `stat` the sweep
+/// already makes. Two reasons, both learned the hard way:
+///
+/// - Nanoseconds rather than whole seconds, because a same-length edit inside one wall-clock
+///   second was otherwise invisible forever — including an `id` edit, which left a row for an id
+///   no file declared.
+/// - ctime as well as mtime, because a permission change bumps ctime and leaves mtime alone. That
+///   is how a file becomes unreadable without "changing": the sweep skipped it and recorded no
+///   `read_error` while a rebuild reported one. Folding ctime in costs nothing — it comes from the
+///   same `stat` — where confirming readability by opening every skipped file cost 1,000 syscalls
+///   per boot and doubled the warm sweep (6 ms to 14 ms at N=1000).
+///
+/// ctime is only available on Unix. On Windows the stamp is mtime alone, so a permission-only
+/// change there is not seen until the file is otherwise touched; making a file unreadable on
+/// Windows takes an ACL edit, which no qdev operation performs.
+fn file_change_stamp(file_path: &Path) -> (i64, u64) {
     let metadata = fs::metadata(file_path).ok();
     let mtime = metadata
         .as_ref()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
+        .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
         .unwrap_or(0);
+
+    #[cfg(unix)]
+    let stamp = {
+        use std::os::unix::fs::MetadataExt;
+        let ctime = metadata
+            .as_ref()
+            .map(|m| {
+                let secs = m.ctime().saturating_mul(1_000_000_000);
+                secs.saturating_add(m.ctime_nsec())
+            })
+            .unwrap_or(0);
+        mtime.max(ctime)
+    };
+    #[cfg(not(unix))]
+    let stamp = mtime;
+
     let size = metadata.map(|m| m.len()).unwrap_or(0);
-    (mtime, size)
+    (stamp, size)
 }
 
 fn upsert_sync_state_row(
@@ -4097,6 +4212,28 @@ fn validate_relations_graph(tx: &rusqlite::Transaction) -> Result<(), QdevError>
         depends_on_edges.retain(|(s, t)| !(*s == a && *t == b));
     }
 
+    Ok(())
+}
+
+/// Clears the stale flag on every entity row owned by `source_path`.
+///
+/// The inverse of [`flag_stale_by_source_path`], for a file that failed to parse or read and now
+/// succeeds with content the cache already had: the rows are current again, and a full rebuild of
+/// the same tree would have no stale flag to carry.
+fn unstale_by_source_path(tx: &rusqlite::Transaction, source_path: &str) -> Result<(), QdevError> {
+    tx.execute(
+        "UPDATE entities SET stale = 0 WHERE source_path = ?1;",
+        rusqlite::params![source_path],
+    )
+    .map_err(|e| {
+        QdevError::infrastructure_failure(
+            "sqlite_error",
+            format!(
+                "Failed to clear the stale flag for '{}': {}",
+                source_path, e
+            ),
+        )
+    })?;
     Ok(())
 }
 
@@ -4499,11 +4636,12 @@ fn hydrate_markdown_file(
     content: &str,
 ) -> Result<HydrateOutcome, QdevError> {
     let rel_path = relative_path(workspace_root, file_path);
-    let (mtime, size) = file_mtime_size(file_path);
+    // A change *stamp* in nanoseconds, not an mtime in seconds — see `file_change_stamp`.
+    let (stamp, size) = file_change_stamp(file_path);
     let content_hash = sha256_digest(content.as_bytes());
 
     // Upsert sync_state for every scanned file
-    upsert_sync_state_row(tx, &rel_path, mtime, size, &content_hash)?;
+    upsert_sync_state_row(tx, &rel_path, stamp, size, &content_hash)?;
 
     // Findings are per-path current state: reset this path's findings, then re-record if the
     // file is invalid. A successful parse therefore leaves no findings for the path.
@@ -4611,7 +4749,10 @@ fn hydrate_markdown_file(
         .get("updated_at")
         .and_then(|v| v.as_str())
         .map(str::to_string)
-        .unwrap_or_else(|| crate::write::iso8601_from_timestamp(mtime));
+        // The stamp is nanoseconds; `iso8601_from_timestamp` takes seconds. Passing it straight
+        // through wrote `56692569348-03-01T04:12:02Z` into `updated_at` for every file whose
+        // frontmatter omits it — and no test read the column, so the suite stayed green.
+        .unwrap_or_else(|| crate::write::iso8601_from_timestamp(stamp / NANOS_PER_SEC));
 
     // Upsert entities table (successful parse clears the stale flag)
     tx.execute(
@@ -5071,7 +5212,7 @@ fn hydrate_scratch_file(
     content: &str,
 ) -> Result<(), QdevError> {
     let rel_path = relative_path(workspace_root, file_path);
-    let (mtime, size) = file_mtime_size(file_path);
+    let (mtime, size) = file_change_stamp(file_path);
     let content_hash = sha256_digest(content.as_bytes());
     upsert_sync_state_row(tx, &rel_path, mtime, size, &content_hash)?;
 
@@ -5159,7 +5300,7 @@ fn hydrate_evidence_file(
     content: &str,
 ) -> Result<(), QdevError> {
     let rel_path = relative_path(workspace_root, file_path);
-    let (mtime, size) = file_mtime_size(file_path);
+    let (mtime, size) = file_change_stamp(file_path);
     let content_hash = sha256_digest(content.as_bytes());
     upsert_sync_state_row(tx, &rel_path, mtime, size, &content_hash)?;
 
