@@ -829,8 +829,9 @@ fn test_create_story_advisory_lock_timeout_exits_5() {
 
 /// `qdev create story` is exempt from the workspace check, so it can run in a bare directory.
 /// It must not leave a cache database behind there: `upsert_cache_and_mark_dirty` would create a
-/// 16-table, unstamped `cache.sqlite`, and a later `qdev init` reads that as a v0 cache needing
-/// a confirmed migration — so create-then-init would exit 3 demanding `--yes`.
+/// 16-table, unstamped `cache.sqlite` in a directory that is not a workspace, and a later
+/// `qdev init` reads that as a v0 cache and migrates it — dropping and rebuilding the rows the
+/// create had just written, for a file nothing had asked for.
 #[test]
 fn test_create_story_outside_a_workspace_leaves_no_cache_and_init_still_works() {
     let temp = TempDir::new().unwrap();
@@ -852,10 +853,10 @@ fn test_create_story_outside_a_workspace_leaves_no_cache_and_init_still_works() 
     assert!(
         !root.join(".qdev").exists(),
         "no .qdev tree may be created outside a workspace — neither the cache (an unstamped one \
-         makes the next `qdev init` demand a confirmed migration) nor the advisory lock"
+         is a v0 cache the next `qdev init` would drop and rebuild) nor the advisory lock"
     );
 
-    // And `init` afterwards is not forced into a confirmed migration.
+    // And `init` afterwards initialises a fresh workspace rather than migrating a stray cache.
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     cmd.current_dir(root)
         .env_remove("QDEV_AUTHOR_TYPE")

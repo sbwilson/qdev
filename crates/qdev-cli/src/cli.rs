@@ -294,7 +294,12 @@ pub struct InitArgs {
     #[arg(short = 't', long = "team", value_name = "TEAM")]
     pub team: Vec<String>,
 
-    /// Automatically confirm migrations or prompts
+    /// Retained for compatibility; has no effect (an older cache is migrated without confirming)
+    ///
+    /// The flag existed solely to confirm a cache schema migration. `init` now migrates an older
+    /// cache unconditionally, as every other command's boot already did, so there is nothing
+    /// left for it to confirm. It stays accepted — and deliberately unread — because turning
+    /// `qdev init --yes` into a usage error would break every script and CI job that passes it.
     #[arg(short = 'y', long = "yes")]
     pub yes: bool,
 }

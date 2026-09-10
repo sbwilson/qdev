@@ -153,7 +153,7 @@ So that humans and agents can both bootstrap a repository.
 **When** I run `qdev init --non-interactive --name X --developer y --team z`
 **Then** the same result is produced with no prompt; a missing required flag exits 3 with `needs_confirmation` naming the flag
 **When** I run `qdev init` in an initialised workspace with an older cache schema
-**Then** it reports the migration and applies it only with confirmation or `--yes`
+**Then** ~~it reports the migration and applies it only with confirmation or `--yes`~~ **it reports the migration and applies it, confirming nothing** *(superseded 2026-09-11, human renegotiation: the gate contradicted story 1.6's unconditional boot rebuild, and it fired in the one path that could not perform the migration it refused. `--yes` stays accepted and inert. See `docs/bmad/implementation-artifacts/spec-init-cache-migration.md` and story 1.3's Spec Change Log.)*
 **And** all created paths are relative to the repository root regardless of the current directory.
 
 ### Story 1.4: Entity File Format, Schemas & Attribution

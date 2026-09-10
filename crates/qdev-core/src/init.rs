@@ -149,24 +149,10 @@ pub struct InitOptions {
     pub name: String,
     pub developer: String,
     pub teams: Vec<String>,
-    pub allow_migration: bool,
     /// The resolved `[storage]` layout. `init` does not read configuration itself: the caller has
     /// already loaded it through the loader every other command uses, so what `init` scaffolds,
     /// stamps, gitignores and reports is the layout the next command will use.
     pub layout: InitLayout,
-}
-
-/// Status of the SQLite cache schema in an existing workspace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CacheStatus {
-    NotInitialized,
-    NeedsMigration {
-        current_version: u32,
-        target_version: u32,
-    },
-    UpToDate {
-        version: u32,
-    },
 }
 
 /// Result returned by the core `init` routine.
@@ -184,63 +170,50 @@ pub struct InitResult {
     pub storage: StorageConfig,
     /// The directory hosting `gates/` and `leases/`: `.qdev` in the default layout.
     pub qdev_dir: String,
+    /// Files re-parsed by a cache migration, `None` when nothing was migrated.
+    ///
+    /// A migration drops every table and repopulates from the files under the effective
+    /// `[storage]` layout, so this is the number that says whether it worked: a migration
+    /// reporting `Some(0)` on a workspace full of stories means the rebuild found nothing — a
+    /// wrong `[storage]` layout, say — which would otherwise be an exit 0 with no signal at all.
+    ///
+    /// It counts *files*, which is `SweepSummary::parsed` verbatim and what `sync --rebuild`
+    /// reports: entity Markdown, plus the scratch, evidence and config files a rebuild also
+    /// reads. Deriving an entity count here would be a second, differently-defined number for
+    /// the same pass.
+    pub cache_files_rehydrated: Option<usize>,
 }
 
-/// Inspect the existing SQLite cache database if present to determine its schema state.
+/// Refuse a workspace whose cache was stamped by a newer binary than this one supports.
+///
+/// The one question `init` asks before it touches the filesystem, and the only one whose answer
+/// changes what `init` does: a newer cache is an exit-5 refusal, and every other state — older,
+/// structurally incomplete, absent — is repaired by `initialize_cache` without asking. This used
+/// to be a `check_cache_status` returning a three-variant `CacheStatus`, but with the migration
+/// unconditional the `Ok` variants described a decision nobody made; a reader could not tell the
+/// pre-flight refusal from a report.
+///
+/// Detection runs through `inspect_cache_schema`, the boot path's own inspector, so `init` and
+/// boot classify the same file identically — including a cache stamped current but missing a
+/// table, which a `PRAGMA user_version` comparison called healthy while boot rebuilt it.
 ///
 /// `storage` is the resolved configuration, so the cache inspected here is the cache every other
 /// command opens: a workspace whose effective cache is stamped by a newer binary is refused by
 /// `init` too, naming that file rather than an abandoned one.
-pub fn check_cache_status(root: &Path, storage: &StorageConfig) -> Result<CacheStatus, QdevError> {
+pub fn verify_cache_compatible(root: &Path, storage: &StorageConfig) -> Result<(), QdevError> {
     let cache_db_path = root.join(trim_dir(&storage.cache_dir)).join("cache.sqlite");
     if !cache_db_path.exists() {
-        return Ok(CacheStatus::NotInitialized);
+        return Ok(());
     }
 
-    let conn = rusqlite::Connection::open(&cache_db_path).map_err(|e| {
-        QdevError::infrastructure_failure(
-            "sqlite_error",
-            format!(
-                "Failed to open existing cache database at {}: {}",
-                cache_db_path.display(),
-                e
-            ),
-        )
-    })?;
-
-    conn.pragma_update(None, "busy_timeout", 5000)
-        .map_err(|e| {
-            QdevError::infrastructure_failure(
-                "sqlite_error",
-                format!("Failed to set busy_timeout=5000 on cache database: {}", e),
-            )
-        })?;
-
-    let user_version: u32 = conn
-        .query_row("PRAGMA user_version;", [], |row| row.get(0))
-        .map_err(|e| {
-            QdevError::infrastructure_failure(
-                "sqlite_error",
-                format!("Failed to read user_version from cache database: {}", e),
-            )
-        })?;
-
-    if user_version < CACHE_SCHEMA_VERSION {
-        Ok(CacheStatus::NeedsMigration {
-            current_version: user_version,
-            target_version: CACHE_SCHEMA_VERSION,
-        })
-    } else if user_version > CACHE_SCHEMA_VERSION {
-        // Same conflict `ensure_cache` raises on boot, from the same constructor, so the two
-        // paths cannot drift apart again.
-        Err(crate::store::newer_cache_conflict(
-            user_version,
-            CACHE_SCHEMA_VERSION,
-        ))
-    } else {
-        Ok(CacheStatus::UpToDate {
-            version: user_version,
-        })
+    match crate::store::inspect_cache_schema(&cache_db_path)? {
+        crate::store::CacheSchemaStatus::NewerThanSupported { found, supported } => {
+            // Same conflict `ensure_cache` raises on boot, from the same constructor, so the two
+            // paths cannot drift apart again.
+            Err(crate::store::newer_cache_conflict(found, supported))
+        }
+        // Valid, or a mismatch `initialize_cache` repairs.
+        _ => Ok(()),
     }
 }
 
@@ -274,27 +247,14 @@ pub fn init(options: &InitOptions) -> Result<InitResult, QdevError> {
         );
     }
 
-    // Validate cache status upfront before modifying filesystem
-    match check_cache_status(&options.root, &options.layout.effective)? {
-        CacheStatus::NeedsMigration {
-            current_version,
-            target_version,
-        } if !options.allow_migration => {
-            return Err(QdevError::policy_refusal(
-                "needs_confirmation",
-                format!(
-                    "Cache schema migration from v{} to v{} requires confirmation or --yes",
-                    current_version, target_version
-                ),
-            )
-            .with_details(serde_json::json!({
-                "current_version": current_version,
-                "target_version": target_version,
-                "flag": "--yes",
-            })));
-        }
-        _ => {}
-    }
+    // Inspect the cache upfront, before anything on the filesystem is touched, so a cache
+    // stamped by a newer binary is the exit-5 refusal `verify_cache_compatible` raises and
+    // nothing is scaffolded first. An *older* or structurally incomplete cache is not refused
+    // here or anywhere: `init` rebuilds it, as every other command's boot already does — the
+    // cache is a rebuildable index (AD-3/FR-101), so confirming a rebuild protects nothing, and
+    // a refusal the next command ignores is worse than no refusal. See
+    // spec-init-cache-migration.md.
+    verify_cache_compatible(&options.root, &options.layout.effective)?;
 
     let root = &options.root;
     if !root.exists() {
@@ -380,8 +340,8 @@ pub fn init(options: &InitOptions) -> Result<InitResult, QdevError> {
     }
 
     // 5. Initialize or migrate SQLite cache schema
-    let (cache_schema_version, cache_migrated) =
-        initialize_cache(&cache_db_path, cache_db_existed, options.allow_migration)?;
+    let (cache_schema_version, cache_migrated, migration_summary) =
+        initialize_cache(&cache_db_path, cache_db_existed, root, &layout.effective)?;
     if !cache_db_existed && cache_db_path.exists() {
         created_files.push(cache_db_relpath.clone());
     }
@@ -399,6 +359,7 @@ pub fn init(options: &InitOptions) -> Result<InitResult, QdevError> {
         already_initialized,
         storage: layout.effective.clone(),
         qdev_dir: layout.qdev_dir(),
+        cache_files_rehydrated: migration_summary.map(|s| s.parsed),
     })
 }
 
@@ -463,8 +424,9 @@ fn update_gitignore(gitignore_path: &Path, layout: &InitLayout) -> Result<bool, 
 fn initialize_cache(
     cache_db_path: &Path,
     cache_db_existed: bool,
-    allow_migration: bool,
-) -> Result<(u32, bool), QdevError> {
+    workspace_root: &Path,
+    storage: &crate::config::StorageConfig,
+) -> Result<(u32, bool, Option<crate::store::SweepSummary>), QdevError> {
     // Ensure parent directory exists
     if let Some(parent) = cache_db_path.parent() {
         fs::create_dir_all(parent).map_err(|e| {
@@ -503,15 +465,6 @@ fn initialize_cache(
             )
         })?;
 
-    let user_version: u32 = conn
-        .query_row("PRAGMA user_version;", [], |row| row.get(0))
-        .map_err(|e| {
-            QdevError::infrastructure_failure(
-                "sqlite_error",
-                format!("Failed to read user_version from cache database: {}", e),
-            )
-        })?;
-
     if !cache_db_existed {
         // Fresh database creation wrapped in transaction
         conn.execute_batch("BEGIN IMMEDIATE;").map_err(|e| {
@@ -541,63 +494,51 @@ fn initialize_cache(
                 format!("Failed to commit transaction: {}", e),
             )
         })?;
-        Ok((CACHE_SCHEMA_VERSION, false))
-    } else if user_version < CACHE_SCHEMA_VERSION {
-        // Older cache schema migration
-        if !allow_migration {
-            return Err(QdevError::policy_refusal(
-                "needs_confirmation",
-                format!(
-                    "Cache schema migration from v{} to v{} requires confirmation or --yes",
-                    user_version, CACHE_SCHEMA_VERSION
-                ),
-            )
-            .with_details(serde_json::json!({
-                "current_version": user_version,
-                "target_version": CACHE_SCHEMA_VERSION,
-                "flag": "--yes",
-            })));
-        }
-
-        // Migration wrapped in transaction
-        conn.execute_batch("BEGIN IMMEDIATE;").map_err(|e| {
-            QdevError::infrastructure_failure(
-                "sqlite_error",
-                format!("Failed to begin transaction: {}", e),
-            )
-        })?;
-
-        let res = (|| -> Result<(), QdevError> {
-            drop_all_user_tables(&conn)?;
-            create_schema(&conn)?;
-            // Stamped through the shared writer, not a hand-rolled pragma: one stamping path
-            // means a fresh cache is inspected `Valid` on the very next command instead of
-            // being torn down and rebuilt.
-            stamp_cache_version(&conn)?;
-            Ok(())
-        })();
-
-        if let Err(e) = res {
-            let _ = conn.execute_batch("ROLLBACK;");
-            return Err(e);
-        }
-
-        conn.execute_batch("COMMIT;").map_err(|e| {
-            QdevError::infrastructure_failure(
-                "sqlite_error",
-                format!("Failed to commit transaction: {}", e),
-            )
-        })?;
-        Ok((CACHE_SCHEMA_VERSION, true))
-    } else if user_version > CACHE_SCHEMA_VERSION {
-        // Same conflict `ensure_cache` raises on boot, from the same constructor, so the two
-        // paths cannot drift apart again.
-        Err(crate::store::newer_cache_conflict(
-            user_version,
-            CACHE_SCHEMA_VERSION,
-        ))
+        Ok((CACHE_SCHEMA_VERSION, false, None))
     } else {
-        // Schema is current
-        Ok((user_version, false))
+        // An existing cache is classified by `inspect_cache_schema`, the boot path's own
+        // inspector, rather than by a `PRAGMA user_version` comparison of its own. The pragma
+        // answers a narrower question than boot asks: a cache stamped current but missing a
+        // table or a column is `Mismatch` to boot, which rebuilds it, and was "up to date" to
+        // `init`, which reported `already_initialized` and repaired nothing. One inspector means
+        // `init` and the next command cannot disagree about whether the file is healthy.
+        drop(conn);
+        match crate::store::inspect_cache_schema(cache_db_path)? {
+            crate::store::CacheSchemaStatus::Valid => Ok((CACHE_SCHEMA_VERSION, false, None)),
+            crate::store::CacheSchemaStatus::Mismatch => {
+                // Older or structurally incomplete — rebuilt, unconditionally, needing no
+                // confirmation from anyone.
+                //
+                // Delegated to `reset_and_rebuild`, the boot path's own migration, rather than
+                // reimplemented: a hand-rolled drop/create/stamp here was a second copy kept in
+                // step by comment, and it had already drifted — it stamped *before*
+                // repopulating, so a failed rebuild left a cache stamped current and empty,
+                // where the shared implementation stamps only after the rows are back. One
+                // implementation cannot drift from itself.
+                //
+                // `reset_and_rebuild` deliberately takes no advisory lock (`ensure_cache` holds
+                // it when it calls this), so the lock is acquired here — the same rule
+                // `qdev sync --rebuild` follows. `init` previously dropped and recreated the
+                // cache holding no lock at all.
+                let lock_path = cache_db_path
+                    .parent()
+                    .unwrap_or(cache_db_path)
+                    .join("write.lock");
+                let _guard = crate::write::acquire_write_lock(
+                    &lock_path,
+                    std::time::Duration::from_millis(BUSY_TIMEOUT_MS),
+                )?;
+                let store = crate::store::SqliteStore::open(cache_db_path)?;
+                let summary = store.reset_and_rebuild(workspace_root, storage)?;
+                Ok((CACHE_SCHEMA_VERSION, true, Some(summary)))
+            }
+            // Reachable only by losing a race with a newer binary: `init`'s own pre-flight
+            // (`verify_cache_compatible`) read this same file before anything was scaffolded and
+            // refused then. Raised from the shared constructor rather than asserted away, so the
+            // window closes with a refusal instead of a rebuild over a newer cache.
+            crate::store::CacheSchemaStatus::NewerThanSupported { found, supported } => {
+                Err(crate::store::newer_cache_conflict(found, supported))
+            }
+        }
     }
 }

@@ -322,7 +322,7 @@ fn reject_empty_filter_values(flags: &[(&str, Option<&str>)]) -> Result<(), Qdev
 /// `init` and `schema` are dispatched before this point, and `create story` bootstraps — it is
 /// specified and tested to work in a clean directory, allocating the first id and writing the
 /// story file. Outside a workspace it deliberately leaves no `.qdev/` behind: no cache (an
-/// unstamped one would make the next `qdev init` demand a confirmed migration) and no advisory
+/// unstamped one is a v0 cache the next `qdev init` would drop and rebuild) and no advisory
 /// lock (there is no other writer to serialize against). Everything else reads or writes an
 /// existing cache.
 ///
@@ -477,7 +477,7 @@ fn handle_init(
     let layout =
         qdev_core::InitLayout::new(annotated_config.config.storage.clone(), project_storage);
 
-    let (name, developer, teams, allow_migration) = if interactivity.is_non_interactive() {
+    let (name, developer, teams) = if interactivity.is_non_interactive() {
         // Non-interactive mode: strict flag requirements
         let name = match init_args
             .name
@@ -540,35 +540,10 @@ fn handle_init(
             return ExitCode::PolicyRefusal;
         }
 
-        let allow_migration = init_args.yes;
-        match qdev_core::check_cache_status(&root, &layout.effective) {
-            Ok(qdev_core::CacheStatus::NeedsMigration {
-                current_version,
-                target_version,
-            }) if !allow_migration => {
-                let err = QdevError::policy_refusal(
-                    "needs_confirmation",
-                    format!(
-                        "Cache schema migration from v{} to v{} requires confirmation or --yes",
-                        current_version, target_version
-                    ),
-                )
-                .with_details(serde_json::json!({
-                    "current_version": current_version,
-                    "target_version": target_version,
-                    "flag": "--yes",
-                }));
-                let _ = output.emit_error(&err);
-                return ExitCode::PolicyRefusal;
-            }
-            Err(e) => {
-                let _ = output.emit_error(&e);
-                return e.exit_code();
-            }
-            _ => {}
-        }
-
-        (name, developer, teams, allow_migration)
+        // No cache check here: an older cache needs no confirmation, and `qdev_core::init`
+        // inspects the cache upfront — before it touches the filesystem — so a cache stamped by
+        // a newer binary is still the exit-5 refusal, raised in one place rather than two.
+        (name, developer, teams)
     } else {
         // Interactive mode: TTY prompt wizard
         let name = if let Some(n) = init_args
@@ -677,56 +652,9 @@ fn handle_init(
             }
         }
 
-        let mut allow_migration = init_args.yes;
-        if !allow_migration {
-            match qdev_core::check_cache_status(&root, &layout.effective) {
-                Ok(qdev_core::CacheStatus::NeedsMigration {
-                    current_version,
-                    target_version,
-                }) => {
-                    let prompt = format!(
-                        "Migrate cache schema from v{} to v{}? [y/N]: ",
-                        current_version, target_version
-                    );
-                    match prompt_input(&prompt) {
-                        Ok(resp)
-                            if resp.eq_ignore_ascii_case("y")
-                                || resp.eq_ignore_ascii_case("yes") =>
-                        {
-                            allow_migration = true;
-                        }
-                        Ok(_) => {
-                            let err = QdevError::policy_refusal(
-                                "needs_confirmation",
-                                "Cache schema migration requires confirmation or --yes",
-                            )
-                            .with_details(serde_json::json!({
-                                "current_version": current_version,
-                                "target_version": target_version,
-                                "flag": "--yes",
-                            }));
-                            let _ = output.emit_error(&err);
-                            return ExitCode::PolicyRefusal;
-                        }
-                        Err(e) => {
-                            let err = QdevError::infrastructure_failure(
-                                "io_error",
-                                format!("Failed to read migration confirmation: {}", e),
-                            );
-                            let _ = output.emit_error(&err);
-                            return ExitCode::InfrastructureFailure;
-                        }
-                    }
-                }
-                Err(e) => {
-                    let _ = output.emit_error(&e);
-                    return e.exit_code();
-                }
-                _ => {}
-            }
-        }
-
-        (name, developer, teams, allow_migration)
+        // No migration prompt: the wizard asks about the project, not about the cache. An older
+        // cache is migrated, exactly as it is on every other command's boot.
+        (name, developer, teams)
     };
 
     let options = qdev_core::InitOptions {
@@ -734,7 +662,6 @@ fn handle_init(
         name,
         developer,
         teams,
-        allow_migration,
         layout,
     };
 
@@ -790,7 +717,14 @@ fn handle_init(
             qdev_core::STATE_SUBDIRECTORIES.join(",")
         );
         if result.cache_migrated {
-            println!("✔ cache schema migrated to v{}", CACHE_SCHEMA_VERSION);
+            // The rehydration count is the half that says whether the migration worked: a
+            // migration drops every table, so `0 files` on a populated workspace means the
+            // repopulation found nothing — a wrong `[storage]` layout, say.
+            println!(
+                "✔ cache schema migrated to v{} ({} files rehydrated)",
+                CACHE_SCHEMA_VERSION,
+                result.cache_files_rehydrated.unwrap_or(0)
+            );
         } else if result.already_initialized {
             println!("✔ cache schema v{} up to date", CACHE_SCHEMA_VERSION);
         } else {

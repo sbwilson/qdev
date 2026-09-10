@@ -3516,7 +3516,25 @@ pub fn stamp_cache_version(conn: &rusqlite::Connection) -> Result<(), QdevError>
         })
 }
 
-/// Drops all triggers, views, and tables in the database (disabling foreign keys during drop).
+/// Drops all triggers, views, and tables in the database, suspending foreign-key enforcement for
+/// the duration of the drop.
+///
+/// **Both pragmas are set, and both are load-bearing**, because this helper is called from a
+/// caller that has a transaction open (`init::initialize_cache`) and one that does not
+/// (`SqliteStore::reset_and_rebuild`), and SQLite's two knobs cover one case each:
+///
+/// * `PRAGMA foreign_keys = OFF` is documented as a **no-op inside a transaction**, so it is what
+///   protects the non-transactional caller and nothing else.
+/// * `PRAGMA defer_foreign_keys = ON` works inside a transaction — it postpones enforcement to
+///   `COMMIT`, by which point every child table has been dropped alongside its parent, so there
+///   is no row left to violate anything. SQLite clears it automatically at each `COMMIT` or
+///   `ROLLBACK`, so it needs no reset here.
+///
+/// Enforcement is on by default on every connection: the bundled SQLite is compiled with
+/// `SQLITE_DEFAULT_FOREIGN_KEYS=1` (`libsqlite3-sys`'s `build.rs`), so a caller that never sets
+/// the pragma still enforces. Setting only `foreign_keys = OFF` is what made this helper correct
+/// for one caller and broken for the other: `qdev init` failed the first `DROP TABLE entities`
+/// against any cache holding a child row.
 pub fn drop_all_user_tables(conn: &rusqlite::Connection) -> Result<(), QdevError> {
     // 1. Drop triggers
     let mut stmt = conn
@@ -3601,11 +3619,13 @@ pub fn drop_all_user_tables(conn: &rusqlite::Connection) -> Result<(), QdevError
         .filter_map(|r| r.ok())
         .collect();
 
-    conn.execute_batch("PRAGMA foreign_keys = OFF;")
+    // `foreign_keys` covers the non-transactional caller, `defer_foreign_keys` the transactional
+    // one — see this function's documentation. Neither substitutes for the other.
+    conn.execute_batch("PRAGMA foreign_keys = OFF; PRAGMA defer_foreign_keys = ON;")
         .map_err(|e| {
             QdevError::infrastructure_failure(
                 "sqlite_error",
-                format!("Failed to disable foreign keys: {}", e),
+                format!("Failed to suspend foreign keys: {}", e),
             )
         })?;
 
@@ -3620,6 +3640,8 @@ pub fn drop_all_user_tables(conn: &rusqlite::Connection) -> Result<(), QdevError
             })?;
     }
 
+    // Restores the connection default for the non-transactional caller; a no-op inside a
+    // transaction, where `defer_foreign_keys` is doing the work and SQLite clears it at COMMIT.
     conn.execute_batch("PRAGMA foreign_keys = ON;")
         .map_err(|e| {
             QdevError::infrastructure_failure(
@@ -3633,7 +3655,7 @@ pub fn drop_all_user_tables(conn: &rusqlite::Connection) -> Result<(), QdevError
 
 /// The single `schema_version_mismatch` conflict raised for a cache stamped by a newer binary.
 ///
-/// Shared by `ensure_cache` (boot) and `init::check_cache_status` so both refuse identically:
+/// Shared by `ensure_cache` (boot) and `init::verify_cache_compatible` so both refuse identically:
 /// rebuilding such a cache would silently discard whatever the newer binary recorded. The
 /// message names `qdev sync --rebuild` because that is the documented in-tool recovery, the only
 /// command allowed past this refusal — and also names deleting the cache file, because two of
@@ -3761,7 +3783,7 @@ pub fn inspect_cache_schema(path: &Path) -> Result<CacheSchemaStatus, QdevError>
 /// hydration sweep on every healthy boot.
 ///
 /// A cache stamped *newer* than this binary supports is refused with the same
-/// `schema_version_mismatch` conflict `init::check_cache_status` raises, rather than rebuilt.
+/// `schema_version_mismatch` conflict `init::verify_cache_compatible` raises, rather than rebuilt.
 pub fn ensure_cache(
     workspace_root: &Path,
     storage: &StorageConfig,

@@ -48,7 +48,7 @@ pub use id::{
     ConstraintKind, ConstraintOwner, IdParseError, Identifier, IdentifierKind,
 };
 pub use init::{
-    check_cache_status, gitignore_entries, init, standard_directories, CacheStatus, InitLayout,
+    gitignore_entries, init, standard_directories, verify_cache_compatible, InitLayout,
     InitOptions, InitResult, CACHE_SCHEMA_VERSION, SPEC_SUBDIRECTORIES, STANDARD_DIRECTORIES,
     STATE_SUBDIRECTORIES,
 };

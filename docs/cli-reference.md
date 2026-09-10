@@ -42,7 +42,7 @@ Universal reference resolution: any command that takes an ID accepts any entity 
 | Command | Purpose |
 | --- | --- |
 | `qdev` | Pulse: environment, active sprints, what to do next |
-| `qdev init [--non-interactive --name --developer --team ...]` | Scaffold config, directories, cache, hooks |
+| `qdev init [--non-interactive --name --developer --team ...]` | Scaffold config, directories, cache, hooks (`--yes` accepted, no effect) |
 | `qdev doctor` | Environment, cache, validation findings, gates, skills, MCP, hooks (a report — findings never change its exit code) |
 | `qdev validate [--changed] [--fix-ids] [--yes]` | Dangling relations, cycles, ID collisions, schema, orphan DW, missing rationale |
 | `qdev sync [--rebuild]` | Force hydration or rebuild the cache |
@@ -477,10 +477,36 @@ $ qdev init --non-interactive --name Qubric --developer simon --team core-platfo
 ✔ .qdev/cache/ (gitignored), .qdev/gates/
 ✔ docs/specs/{prd,requirements,epics,stories,adrs,hazards}
 ✔ docs/state/{sprints,releases,dw,decisions,scratch,evidence,baselines,soup}
-✔ cache schema v1
+✔ cache schema v3
 ```
 
-Re-running `init` in an initialised workspace checks the cache schema version and migrates with confirmation (or `--yes`).
+Re-running `init` in an initialised workspace checks the cache schema version. **A cache stamped
+older is migrated, unconditionally and without asking** — dropped, recreated at the current
+schema, and repopulated from the Markdown files — which is exactly what every other command's
+boot already does with one. The cache is a machine-local, rebuildable index (AD-3/FR-101), so
+there is nothing to confirm: no data lives only there. A cache stamped *newer* than the binary
+supports is refused by `init` as by everything else — `schema_version_mismatch`, exit 5,
+recoverable with `qdev sync --rebuild` or by deleting the cache file. A cache stamped current but
+structurally incomplete — a missing table, a missing column — is rebuilt too: `init` classifies
+the file with the same inspector the boot path uses, so it cannot call a cache healthy that the
+next command would drop and rebuild.
+
+A migration reports what it repopulated, because a rebuild that found nothing is otherwise an
+exit 0 with no signal:
+
+```
+✔ cache schema migrated to v3 (184 files rehydrated)
+```
+
+Under `--json` the same numbers are `cache_migrated`, `cache_schema_version` and
+`cache_files_rehydrated`. A `0` there on a workspace full of stories means the rebuild read
+nothing — most likely a `[storage]` layout pointing somewhere else.
+
+`init`'s `-y`/`--yes` flag is **retained for compatibility and has no effect.** It existed solely
+to confirm that migration; it stays accepted so scripts and CI jobs that pass it keep working.
+`init`'s other refusals are unchanged: in non-interactive mode a missing `--name`, `--developer`
+or `--team` is still exit 3 (`needs_confirmation`) naming the flag, and `--yes` never satisfied
+those.
 
 `init` resolves `[storage]` through the same configuration loader as every other command, so the
 paths above are the *configured* layout rather than fixed defaults: the directories it creates,
@@ -511,7 +537,7 @@ Stdio MCP server exposing: `get_entity`, `list_entities`, `context`, `next`, `cl
 ```
 $ qdev doctor
 [✓] Git: develop tracks origin/develop; clean tree
-[✓] Cache: .qdev/cache/cache.sqlite schema v1, 184 entities, 0 validation findings
+[✓] Cache: .qdev/cache/cache.sqlite schema v3, 184 entities, 0 validation findings
 [✓] Modules: 7 declared, all path globs match at least one file
 [✓] Gates: 14 configured, all executables found, 1 skipped locally
 [✓] Hooks: 3 shims installed and current

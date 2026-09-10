@@ -1,9 +1,11 @@
+use std::collections::BTreeMap;
 use std::fs;
 use tempfile::TempDir;
 
+use qdev_core::store::{ensure_cache, SqliteStore, ALL_TABLE_NAMES};
 use qdev_core::{
-    check_cache_status, gitignore_entries, init, standard_directories, CacheStatus, ExitCode,
-    InitLayout, InitOptions, StorageConfig, CACHE_SCHEMA_VERSION, STANDARD_DIRECTORIES,
+    gitignore_entries, init, standard_directories, verify_cache_compatible, ExitCode, InitLayout,
+    InitOptions, StorageConfig, CACHE_SCHEMA_VERSION, STANDARD_DIRECTORIES,
 };
 
 #[test]
@@ -16,7 +18,6 @@ fn test_init_fresh_workspace_scaffolding() {
         name: "Qubric".to_string(),
         developer: "simon".to_string(),
         teams: vec!["core-platform".to_string()],
-        allow_migration: false,
         layout: InitLayout::default(),
     };
 
@@ -128,7 +129,6 @@ fn test_gitignore_deduplication() {
         name: "Demo".to_string(),
         developer: "alice".to_string(),
         teams: vec!["core".to_string()],
-        allow_migration: false,
         layout: InitLayout::default(),
     };
 
@@ -171,7 +171,6 @@ fn test_never_overwrite_existing_configs() {
         name: "NewName".to_string(),
         developer: "new_dev".to_string(),
         teams: vec!["new_team".to_string()],
-        allow_migration: false,
         layout: InitLayout::default(),
     };
 
@@ -191,8 +190,11 @@ fn test_never_overwrite_existing_configs() {
     assert_eq!(local_content, existing_local);
 }
 
+/// An older cache is migrated with nobody's permission. There is no confirmation to give and no
+/// flag to pass: the cache is a rebuildable index, every other command's boot already migrates it
+/// silently, and a refusal the next command ignores is worse than no refusal.
 #[test]
-fn test_cache_migration_refused_without_confirmation() {
+fn test_older_cache_migrates_without_any_confirmation() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().to_path_buf();
 
@@ -205,37 +207,27 @@ fn test_cache_migration_refused_without_confirmation() {
         conn.execute_batch("PRAGMA user_version = 0;").unwrap();
     }
 
-    // check_cache_status should report NeedsMigration
-    let status = check_cache_status(&root, &StorageConfig::default()).unwrap();
-    assert_eq!(
-        status,
-        CacheStatus::NeedsMigration {
-            current_version: 0,
-            target_version: CACHE_SCHEMA_VERSION
-        }
-    );
+    // The pre-flight is a refusal, not a report: an older cache passes it, and `init` rebuilds.
+    verify_cache_compatible(&root, &StorageConfig::default())
+        .expect("an older cache is compatible — it is rebuilt, not refused");
 
-    // Attempt init without allow_migration -> fails with PolicyRefusal (ExitCode 3)
     let options = InitOptions {
         root: root.clone(),
         name: "MigrateTest".to_string(),
         developer: "alice".to_string(),
         teams: vec!["core".to_string()],
-        allow_migration: false,
         layout: InitLayout::default(),
     };
 
-    let err = init(&options).unwrap_err();
-    assert_eq!(err.exit_code(), ExitCode::PolicyRefusal);
-    assert_eq!(err.code(), "needs_confirmation");
-    assert!(err.message().contains("migration"));
-    assert_eq!(err.details().unwrap()["flag"], "--yes");
-    // Verify filesystem was not modified before refusal
-    assert!(!root.join("qdev.toml").exists());
+    let result = init(&options).expect("an older cache migrates with no confirmation");
+    assert!(result.cache_migrated);
+    assert_eq!(result.cache_schema_version, CACHE_SCHEMA_VERSION);
+    assert!(root.join("qdev.toml").exists());
+    verify_cache_compatible(&root, &StorageConfig::default()).unwrap();
 }
 
 #[test]
-fn test_cache_migration_succeeds_with_confirmation_and_drops_old_tables() {
+fn test_cache_migration_succeeds_and_drops_old_tables() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().to_path_buf();
 
@@ -256,11 +248,10 @@ fn test_cache_migration_succeeds_with_confirmation_and_drops_old_tables() {
         name: "MigrateTest".to_string(),
         developer: "alice".to_string(),
         teams: vec!["core".to_string()],
-        allow_migration: true,
         layout: InitLayout::default(),
     };
 
-    let result = init(&options).expect("Migration should succeed with allow_migration=true");
+    let result = init(&options).expect("Migration should succeed");
     assert_eq!(result.cache_schema_version, CACHE_SCHEMA_VERSION);
     assert!(result.cache_migrated);
 
@@ -280,18 +271,16 @@ fn test_cache_migration_succeeds_with_confirmation_and_drops_old_tables() {
         .unwrap();
     assert_eq!(count, 0, "Outdated tables must be dropped on migration");
 
-    // After migration, status is UpToDate
-    let status = check_cache_status(&root, &StorageConfig::default()).unwrap();
+    // After migration the cache is the one boot calls healthy, structure included.
+    verify_cache_compatible(&root, &StorageConfig::default()).unwrap();
     assert_eq!(
-        status,
-        CacheStatus::UpToDate {
-            version: CACHE_SCHEMA_VERSION
-        }
+        qdev_core::inspect_cache_schema(&cache_file).unwrap(),
+        qdev_core::CacheSchemaStatus::Valid
     );
 }
 
 #[test]
-fn test_check_cache_status_future_version_conflict() {
+fn test_verify_cache_compatible_future_version_conflict() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().to_path_buf();
 
@@ -307,7 +296,7 @@ fn test_check_cache_status_future_version_conflict() {
         .unwrap();
     }
 
-    let err = check_cache_status(&root, &StorageConfig::default()).unwrap_err();
+    let err = verify_cache_compatible(&root, &StorageConfig::default()).unwrap_err();
     assert_eq!(err.exit_code(), ExitCode::Conflict);
     assert_eq!(err.code(), "schema_version_mismatch");
 
@@ -316,7 +305,6 @@ fn test_check_cache_status_future_version_conflict() {
         name: "FutureTest".to_string(),
         developer: "alice".to_string(),
         teams: vec!["core".to_string()],
-        allow_migration: true,
         layout: InitLayout::default(),
     };
     let init_err = init(&options).unwrap_err();
@@ -334,7 +322,6 @@ fn test_init_validation_non_empty_fields() {
         name: "   ".to_string(),
         developer: "alice".to_string(),
         teams: vec!["core".to_string()],
-        allow_migration: false,
         layout: InitLayout::default(),
     };
     let err = init(&opt_no_name).unwrap_err();
@@ -346,7 +333,6 @@ fn test_init_validation_non_empty_fields() {
         name: "Demo".to_string(),
         developer: "   ".to_string(),
         teams: vec!["core".to_string()],
-        allow_migration: false,
         layout: InitLayout::default(),
     };
     let err = init(&opt_no_dev).unwrap_err();
@@ -358,7 +344,6 @@ fn test_init_validation_non_empty_fields() {
         name: "Demo".to_string(),
         developer: "alice".to_string(),
         teams: vec!["  ".to_string()],
-        allow_migration: false,
         layout: InitLayout::default(),
     };
     let err = init(&opt_no_teams).unwrap_err();
@@ -375,7 +360,6 @@ fn test_idempotent_rerun_schema_v2() {
         name: "IdempotentTest".to_string(),
         developer: "alice".to_string(),
         teams: vec!["core".to_string()],
-        allow_migration: false,
         layout: InitLayout::default(),
     };
 
@@ -409,7 +393,6 @@ fn test_multiple_teams() {
             "backend".to_string(),
             "frontend".to_string(),
         ], // duplicated team
-        allow_migration: false,
         layout: InitLayout::default(),
     };
 
@@ -441,7 +424,6 @@ fn test_teams_comma_separated_splitting() {
         name: "CommaTeam".to_string(),
         developer: "bob".to_string(),
         teams: vec!["frontend,backend".to_string(), "ops, backend".to_string()],
-        allow_migration: false,
         layout: InitLayout::default(),
     };
 
@@ -487,7 +469,6 @@ fn test_cache_migration_drops_views_triggers_and_escaped_tables() {
         name: "CleanMigrate".to_string(),
         developer: "alice".to_string(),
         teams: vec!["core".to_string()],
-        allow_migration: true,
         layout: InitLayout::default(),
     };
 
@@ -592,7 +573,6 @@ fn test_init_reports_the_cache_it_actually_created() {
         name: "Configured".to_string(),
         developer: "alice".to_string(),
         teams: vec!["core".to_string()],
-        allow_migration: false,
         layout: layout.clone(),
     };
 
@@ -619,7 +599,7 @@ fn test_init_reports_the_cache_it_actually_created() {
 /// The cache `init` inspects is the cache every other command opens, so a newer stamp on the
 /// *effective* cache is refused rather than reported as an up-to-date workspace.
 #[test]
-fn test_check_cache_status_inspects_the_configured_cache() {
+fn test_verify_cache_compatible_inspects_the_configured_cache() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().to_path_buf();
 
@@ -640,15 +620,13 @@ fn test_check_cache_status_inspects_the_configured_cache() {
 
     // The default-layout cache does not exist at all, so the private reader used to report
     // `NotInitialized` here while every other command refused the workspace.
-    let err = check_cache_status(&root, &storage).unwrap_err();
+    let err = verify_cache_compatible(&root, &storage).unwrap_err();
     assert_eq!(err.exit_code(), ExitCode::Conflict);
     assert_eq!(err.code(), "schema_version_mismatch");
     assert!(err.message().contains("local/cache/cache.sqlite") || err.message().contains("newer"));
 
-    assert_eq!(
-        check_cache_status(&root, &StorageConfig::default()).unwrap(),
-        CacheStatus::NotInitialized
-    );
+    verify_cache_compatible(&root, &StorageConfig::default())
+        .expect("the default-layout cache does not exist, so there is nothing to refuse");
 }
 
 /// `STANDARD_DIRECTORIES` is a hand-maintained copy of what `standard_directories` builds for the
@@ -668,5 +646,350 @@ fn test_standard_directories_matches_the_default_layout() {
         derived_sorted, listed,
         "STANDARD_DIRECTORIES must list exactly what standard_directories builds for the \
          default layout"
+    );
+}
+
+/// Dumps every table in `ALL_TABLE_NAMES` as ordered stringified rows, for table-by-table
+/// comparison of two caches.
+fn dump_all_tables(db_path: &std::path::Path) -> BTreeMap<String, Vec<Vec<String>>> {
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    let mut dump = BTreeMap::new();
+
+    for &table in ALL_TABLE_NAMES {
+        let mut stmt = conn
+            .prepare(&format!("SELECT * FROM \"{}\";", table))
+            .unwrap_or_else(|e| panic!("table {} must exist after migration: {}", table, e));
+        let col_count = stmt.column_count();
+        let mut rows: Vec<Vec<String>> = stmt
+            .query_map([], |row| {
+                let mut vals = Vec::new();
+                for i in 0..col_count {
+                    let val: rusqlite::types::Value = row.get(i)?;
+                    vals.push(match val {
+                        rusqlite::types::Value::Null => "NULL".to_string(),
+                        rusqlite::types::Value::Integer(i) => i.to_string(),
+                        rusqlite::types::Value::Real(f) => format!("{:.4}", f),
+                        rusqlite::types::Value::Text(t) => t,
+                        rusqlite::types::Value::Blob(b) => format!("{:?}", b),
+                    });
+                }
+                Ok(vals)
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        // Sorted here rather than in SQL: `relations` has no single ordering column, and a
+        // rebuild is only required to produce the same *set* of rows.
+        rows.sort();
+        dump.insert(table.to_string(), rows);
+    }
+
+    dump
+}
+
+/// `init` migrates a cache that has rows in it.
+///
+/// The bug this pins: `init` wraps the drop-and-rebuild in `BEGIN IMMEDIATE`, and
+/// `drop_all_user_tables` used to guard itself with `PRAGMA foreign_keys = OFF`, which SQLite
+/// documents as a no-op inside a transaction. So `DROP TABLE entities` failed against any child
+/// row (`stories.id REFERENCES entities(id)`) and every real workspace was unmigratable — while
+/// the boot path, which calls the same helper with no transaction open, worked. Every migration
+/// fixture in this file until now built an *empty* cache, which is exactly why a green suite
+/// never caught it: an empty cache has no child row to violate anything.
+///
+/// It also pins the invariant the two paths must share: after either migration the cache holds
+/// what a full rebuild of the same tree produces.
+#[test]
+fn test_populated_older_cache_migrates_and_equals_a_rebuild() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().to_path_buf();
+    let storage = StorageConfig::default();
+
+    let options = InitOptions {
+        root: root.clone(),
+        name: "PopulatedMigrate".to_string(),
+        developer: "alice".to_string(),
+        teams: vec!["core".to_string()],
+        layout: InitLayout::default(),
+    };
+    init(&options).expect("first init should succeed");
+
+    // Two stories, one depending on the other, so the cache holds `entities` rows *and* child
+    // rows in `stories`, `constraints` and `relations` — and no dangling edge, so neither path
+    // records a finding.
+    let story_dir = root.join("docs/specs/stories");
+    fs::write(
+        story_dir.join("E1S1.md"),
+        r#"---
+id: E1S1
+title: "Depends On Another"
+status: ready
+version: 1
+appetite: small
+safety_class: ClassB
+target_modules: ["foundation"]
+constraints:
+  - id: NG-1
+    kind: no_go
+    text: "No swift"
+relations:
+  depends_on: ["E1S2"]
+created_by:
+  type: human
+  id: alice
+updated_by:
+  type: human
+  id: alice
+---
+"#,
+    )
+    .unwrap();
+    fs::write(
+        story_dir.join("E1S2.md"),
+        r#"---
+id: E1S2
+title: "Depended Upon"
+status: done
+version: 1
+appetite: tiny
+safety_class: ClassA
+target_modules: ["foundation"]
+created_by:
+  type: human
+  id: alice
+updated_by:
+  type: human
+  id: alice
+---
+"#,
+    )
+    .unwrap();
+
+    // Populate the cache the way a real workspace does — a boot-time sweep.
+    let cache_db_path = root.join(".qdev/cache/cache.sqlite");
+    drop(ensure_cache(&root, &storage).expect("sweep should hydrate the two stories"));
+
+    let populated = dump_all_tables(&cache_db_path);
+    assert_eq!(
+        populated["entities"].len(),
+        2,
+        "fixture must hold entity rows, or it pins nothing"
+    );
+    assert_eq!(
+        populated["stories"].len(),
+        2,
+        "fixture must hold child rows in `stories`, or the foreign key is never exercised"
+    );
+    assert!(!populated["constraints"].is_empty());
+    assert!(!populated["relations"].is_empty());
+
+    // Stamp it back to an older version, leaving every row in place.
+    {
+        let conn = rusqlite::Connection::open(&cache_db_path).unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {};",
+            CACHE_SCHEMA_VERSION - 1
+        ))
+        .unwrap();
+    }
+
+    let result = init(&options).expect("a populated older cache must migrate, not fail on an FK");
+    assert!(result.cache_migrated);
+    assert_eq!(result.cache_schema_version, CACHE_SCHEMA_VERSION);
+    let migrated = dump_all_tables(&cache_db_path);
+
+    // The reference answer: a full rebuild of the same tree, the boot path's own repair.
+    let store = SqliteStore::open(&cache_db_path).unwrap();
+    store
+        .reset_and_rebuild(&root, &storage)
+        .expect("rebuild should succeed");
+    drop(store);
+    let rebuilt = dump_all_tables(&cache_db_path);
+
+    assert!(
+        migrated["findings"].is_empty() && rebuilt["findings"].is_empty(),
+        "fixture is meant to be finding-free, so the comparison below is not comparing timestamps"
+    );
+    for (table, rebuilt_rows) in &rebuilt {
+        // `sync_meta` holds `last_synced_at`, a wall-clock stamp of when the pass ran rather
+        // than anything derived from the files, so it cannot be equal across two passes.
+        if table == "sync_meta" {
+            continue;
+        }
+        assert_eq!(
+            &migrated[table], rebuilt_rows,
+            "table '{}' differs between `init`'s migration and a full rebuild of the same tree",
+            table
+        );
+    }
+    assert!(
+        !migrated["entities"].is_empty(),
+        "the migrated cache must be repopulated from the Markdown files, not left empty"
+    );
+}
+
+/// A cache stamped current but *structurally* incomplete is repaired, not reported healthy.
+///
+/// `init` used to compare `PRAGMA user_version` and nothing else, so a cache missing a table was
+/// "up to date" to `init` — which reported `already_initialized` and repaired nothing — while the
+/// very next command's boot classified the same file `Mismatch` and dropped and rebuilt it. Both
+/// now ask `inspect_cache_schema`.
+#[test]
+fn test_structurally_incomplete_cache_is_repaired_rather_than_called_up_to_date() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().to_path_buf();
+    let storage = StorageConfig::default();
+
+    let options = InitOptions {
+        root: root.clone(),
+        name: "Structural".to_string(),
+        developer: "alice".to_string(),
+        teams: vec!["core".to_string()],
+        layout: InitLayout::default(),
+    };
+    init(&options).expect("first init should succeed");
+
+    fs::write(
+        root.join("docs/specs/stories/E1S1.md"),
+        r#"---
+id: E1S1
+title: "Structurally Incomplete Cache"
+status: ready
+version: 1
+appetite: small
+safety_class: ClassA
+target_modules: ["foundation"]
+created_by:
+  type: human
+  id: alice
+updated_by:
+  type: human
+  id: alice
+---
+"#,
+    )
+    .unwrap();
+
+    let cache_db_path = root.join(".qdev/cache/cache.sqlite");
+    drop(ensure_cache(&root, &storage).expect("sweep should hydrate the story"));
+
+    // Drop one table, leaving the stamp at the current version: version-only detection cannot
+    // see this, `inspect_cache_schema` can.
+    {
+        let conn = rusqlite::Connection::open(&cache_db_path).unwrap();
+        conn.execute_batch("DROP TABLE findings;").unwrap();
+        let user_version: u32 = conn
+            .query_row("PRAGMA user_version;", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            user_version, CACHE_SCHEMA_VERSION,
+            "the stamp must stay current, or this fixture is just the older-cache case again"
+        );
+    }
+    assert_eq!(
+        qdev_core::inspect_cache_schema(&cache_db_path).unwrap(),
+        qdev_core::CacheSchemaStatus::Mismatch
+    );
+
+    let result = init(&options).expect("a structurally incomplete cache must be repaired");
+    assert!(
+        result.cache_migrated,
+        "init must report the rebuild it performed"
+    );
+    assert!(
+        !result.already_initialized,
+        "a cache no command can use is not an initialized workspace"
+    );
+    assert_eq!(
+        qdev_core::inspect_cache_schema(&cache_db_path).unwrap(),
+        qdev_core::CacheSchemaStatus::Valid
+    );
+
+    let repaired = dump_all_tables(&cache_db_path);
+    assert_eq!(
+        repaired["entities"].len(),
+        1,
+        "the repaired cache must be repopulated from the Markdown files"
+    );
+    assert_eq!(
+        result.cache_files_rehydrated,
+        Some(2),
+        "the story and `qdev.toml` are both re-parsed by a rebuild"
+    );
+}
+
+/// The migration repopulates through the *effective* layout, so a workspace with a configured
+/// `[storage]` comes back with its rows — not with an empty cache and exit 0.
+#[test]
+fn test_migration_under_a_configured_layout_repopulates_from_the_configured_tree() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().to_path_buf();
+
+    let storage = StorageConfig {
+        specs_dir: "planning/specs".to_string(),
+        state_dir: "planning/state".to_string(),
+        cache_dir: "local/cache".to_string(),
+    };
+    let layout = InitLayout::new(storage.clone(), storage.clone());
+
+    let options = InitOptions {
+        root: root.clone(),
+        name: "ConfiguredMigrate".to_string(),
+        developer: "alice".to_string(),
+        teams: vec!["core".to_string()],
+        layout: layout.clone(),
+    };
+    init(&options).expect("first init should succeed");
+
+    fs::write(
+        root.join("planning/specs/stories/E1S1.md"),
+        r#"---
+id: E1S1
+title: "Configured Layout Story"
+status: ready
+version: 1
+appetite: small
+safety_class: ClassA
+target_modules: ["foundation"]
+created_by:
+  type: human
+  id: alice
+updated_by:
+  type: human
+  id: alice
+---
+"#,
+    )
+    .unwrap();
+
+    let cache_db_path = root.join("local/cache/cache.sqlite");
+    drop(ensure_cache(&root, &storage).expect("sweep should hydrate the configured tree"));
+    assert_eq!(dump_all_tables(&cache_db_path)["entities"].len(), 1);
+
+    {
+        let conn = rusqlite::Connection::open(&cache_db_path).unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {};",
+            CACHE_SCHEMA_VERSION - 1
+        ))
+        .unwrap();
+    }
+
+    let result = init(&options).expect("a configured-layout cache must migrate");
+    assert!(result.cache_migrated);
+    assert_eq!(
+        result.cache_files_rehydrated,
+        Some(2),
+        "the migration must repopulate from the configured specs_dir, not the default one \
+         (the story, plus `qdev.toml`)"
+    );
+    assert_eq!(
+        dump_all_tables(&cache_db_path)["entities"].len(),
+        1,
+        "the configured cache must hold its rows again after the migration"
+    );
+    assert!(
+        !root.join(".qdev/cache/cache.sqlite").exists(),
+        "the migration must not create a default-layout cache alongside the configured one"
     );
 }

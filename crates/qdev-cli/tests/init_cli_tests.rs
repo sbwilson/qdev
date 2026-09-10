@@ -326,8 +326,13 @@ fn test_non_interactive_json_output() {
         .contains(&Value::String("qdev.toml".to_string())));
 }
 
+/// An older cache and no `--yes`: `init` migrates it and exits 0.
+///
+/// The `needs_confirmation` refusal this replaced protected nothing — every other command
+/// performed the same drop-and-rebuild silently at boot, so a user told a migration needed
+/// confirming could run `qdev list` instead and have it happen anyway.
 #[test]
-fn test_existing_workspace_older_cache_migration_refused_without_yes() {
+fn test_existing_workspace_older_cache_migrates_without_yes() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
 
@@ -353,12 +358,26 @@ fn test_existing_workspace_older_cache_migration_refused_without_yes() {
             "core",
         ])
         .assert()
-        .failure()
-        .code(3)
-        .stderr(predicate::str::contains("migration"))
-        .stderr(predicate::str::contains("--yes"));
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains(format!(
+            "migrated to v{}",
+            CACHE_SCHEMA_VERSION
+        )))
+        .stderr(predicate::str::contains("needs_confirmation").not());
 
-    // JSON mode
+    let conn = rusqlite::Connection::open(cache_dir.join("cache.sqlite")).unwrap();
+    let user_version: u32 = conn
+        .query_row("PRAGMA user_version;", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(user_version, CACHE_SCHEMA_VERSION);
+    drop(conn);
+
+    // JSON mode, from an older stamp again: a success envelope, not an error one.
+    {
+        let conn = rusqlite::Connection::open(cache_dir.join("cache.sqlite")).unwrap();
+        conn.execute_batch("PRAGMA user_version = 0;").unwrap();
+    }
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     let assert = cmd
         .current_dir(root)
@@ -374,19 +393,26 @@ fn test_existing_workspace_older_cache_migration_refused_without_yes() {
             "--json",
         ])
         .assert()
-        .failure()
-        .code(3);
+        .success()
+        .code(0);
 
     let output = assert.get_output();
     let stdout_str = std::str::from_utf8(&output.stdout).unwrap();
     let val: Value = serde_json::from_str(stdout_str).expect("Valid JSON on stdout");
     assert_eq!(val["schema_version"], "1");
-    assert_eq!(val["error"]["code"], "needs_confirmation");
-    assert_eq!(val["error"]["details"]["flag"], "--yes");
+    assert!(
+        val.get("error").is_none(),
+        "no error envelope: {}",
+        stdout_str
+    );
+    assert_eq!(val["cache_migrated"], true);
+    assert_eq!(val["cache_schema_version"], CACHE_SCHEMA_VERSION);
 }
 
+/// `--yes` is still accepted and changes nothing: it existed only for the migration gate, and
+/// turning `qdev init --yes` into a usage error would break every script and CI job passing it.
 #[test]
-fn test_existing_workspace_older_cache_migration_with_yes() {
+fn test_yes_is_still_accepted_and_changes_nothing() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
 
@@ -419,7 +445,7 @@ fn test_existing_workspace_older_cache_migration_with_yes() {
             CACHE_SCHEMA_VERSION
         )));
 
-    // Verify cache.sqlite user_version is now 2
+    // The same outcome as without the flag.
     let conn = rusqlite::Connection::open(cache_dir.join("cache.sqlite")).unwrap();
     let user_version: u32 = conn
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
@@ -507,50 +533,10 @@ fn test_interactive_wizard_prompt() {
     assert!(qdev_content.contains("\"ui-team\" = [\"bob\"]"));
 }
 
+/// Interactive `init` on an older cache asks nothing about the cache and migrates it. The stdin
+/// here is a `n` — the answer that used to abort the migration — and it is simply never read.
 #[test]
-fn test_interactive_migration_confirmation() {
-    let temp = TempDir::new().unwrap();
-    let root = temp.path();
-
-    // Pre-create cache.sqlite at user_version 0
-    let cache_dir = root.join(".qdev/cache");
-    fs::create_dir_all(&cache_dir).unwrap();
-    {
-        let conn = rusqlite::Connection::open(cache_dir.join("cache.sqlite")).unwrap();
-        conn.execute_batch("PRAGMA user_version = 0;").unwrap();
-    }
-
-    let mut cmd = Command::cargo_bin("qdev").unwrap();
-    cmd.current_dir(root)
-        .env("_QDEV_MOCK_TTY", "1")
-        .write_stdin("y\n")
-        .args([
-            "init",
-            "--name",
-            "Demo",
-            "--developer",
-            "alice",
-            "--team",
-            "core",
-        ])
-        .assert()
-        .success()
-        .code(0)
-        .stderr(predicate::str::contains("Migrate cache schema"))
-        .stdout(predicate::str::contains(format!(
-            "migrated to v{}",
-            CACHE_SCHEMA_VERSION
-        )));
-
-    let conn = rusqlite::Connection::open(cache_dir.join("cache.sqlite")).unwrap();
-    let user_version: u32 = conn
-        .query_row("PRAGMA user_version;", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(user_version, CACHE_SCHEMA_VERSION);
-}
-
-#[test]
-fn test_interactive_migration_refusal_with_n() {
+fn test_interactive_init_does_not_prompt_about_the_cache() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
 
@@ -576,10 +562,19 @@ fn test_interactive_migration_refusal_with_n() {
             "core",
         ])
         .assert()
-        .failure()
-        .code(3)
-        .stderr(predicate::str::contains("Migrate cache schema"))
-        .stderr(predicate::str::contains("needs_confirmation"));
+        .success()
+        .code(0)
+        .stderr(predicate::str::contains("Migrate cache schema").not())
+        .stdout(predicate::str::contains(format!(
+            "migrated to v{}",
+            CACHE_SCHEMA_VERSION
+        )));
+
+    let conn = rusqlite::Connection::open(cache_dir.join("cache.sqlite")).unwrap();
+    let user_version: u32 = conn
+        .query_row("PRAGMA user_version;", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(user_version, CACHE_SCHEMA_VERSION);
 }
 
 #[test]
@@ -618,8 +613,10 @@ fn test_interactive_wizard_git_email_fallback() {
     assert!(local_content.contains("developer_id = \"gituser@example.com\""));
 }
 
+/// A newer-than-supported cache is still exit 5 — with `--yes` and without it. Removing the
+/// migration gate removed the refusal for an *older* cache only.
 #[test]
-fn test_future_schema_version_conflict_fails_with_yes() {
+fn test_future_schema_version_conflict_fails_with_and_without_yes() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
 
@@ -655,6 +652,25 @@ fn test_future_schema_version_conflict_fails_with_yes() {
         .stderr(predicate::str::contains("newer than supported version"));
 
     // Verify filesystem was not modified before conflict failure
+    assert!(!root.join("qdev.toml").exists());
+
+    // And without `--yes`, which is now inert either way.
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args([
+            "init",
+            "--non-interactive",
+            "--name",
+            "Demo",
+            "--developer",
+            "alice",
+            "--team",
+            "core",
+        ])
+        .assert()
+        .failure()
+        .code(5)
+        .stderr(predicate::str::contains("newer than supported version"));
     assert!(!root.join("qdev.toml").exists());
 }
 
@@ -1015,5 +1031,159 @@ fn test_relocating_the_cache_after_init_is_repaired_by_re_running_init() {
     assert!(
         !created.contains(&"qdev.toml") && !created.contains(&".qdev.local.toml"),
         "a re-run creates neither config file: {created:?}"
+    );
+}
+
+/// The defect end to end, through the binary: a cache with entity *and* child rows in it,
+/// stamped to an older version, migrated by `qdev init` with no `--yes` and no FK failure — and
+/// the boot path of another command doing the same thing to the same fixture afterwards.
+///
+/// Every migration test above this one uses an empty cache, which is why `init` shipped unable
+/// to migrate any real workspace: `sqlite_error: Failed to drop table entities during migration:
+/// FOREIGN KEY constraint failed`, exit 4, cache left at the old version.
+#[test]
+fn test_populated_older_cache_migrates_through_the_binary() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    let init_args = [
+        "init",
+        "--non-interactive",
+        "--name",
+        "Demo",
+        "--developer",
+        "alice",
+        "--team",
+        "core",
+    ];
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root).args(init_args).assert().success();
+
+    // A story with a constraint: an `entities` row, a child row in `stories` — whose
+    // `stories.id REFERENCES entities(id)` is the foreign key the migration's drop order has to
+    // survive — plus a `constraints` row, which has no foreign key of its own and is here only
+    // so the fixture is a realistic story.
+    fs::write(
+        root.join("docs/specs/stories/E1S1.md"),
+        r#"---
+id: E1S1
+title: "Only Story"
+status: ready
+version: 1
+appetite: small
+safety_class: ClassB
+target_modules: ["foundation"]
+constraints:
+  - id: NG-1
+    kind: no_go
+    text: "No swift"
+created_by:
+  type: human
+  id: alice
+updated_by:
+  type: human
+  id: alice
+---
+"#,
+    )
+    .unwrap();
+
+    // Any command's boot hydrates it.
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root).args(["status"]).assert().success();
+
+    let cache_path = root.join(".qdev/cache/cache.sqlite");
+    let row_counts = |path: &std::path::Path| -> (u32, u32, u32) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        let count = |table: &str| -> u32 {
+            conn.query_row(&format!("SELECT count(*) FROM {};", table), [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        (count("entities"), count("stories"), count("constraints"))
+    };
+    assert_eq!(
+        row_counts(&cache_path),
+        (1, 1, 1),
+        "fixture must have the entity, its `stories` child row and its constraint, or it pins \
+         less than it claims"
+    );
+
+    let stamp_older = |path: &std::path::Path| {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {};",
+            CACHE_SCHEMA_VERSION - 1
+        ))
+        .unwrap();
+    };
+    let stamped_version = |path: &std::path::Path| -> u32 {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.query_row("PRAGMA user_version;", [], |r| r.get(0))
+            .unwrap()
+    };
+
+    // `qdev init`, no `--yes`: migrates, exit 0, and the rows come back from the files.
+    stamp_older(&cache_path);
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(init_args)
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains(format!(
+            "migrated to v{}",
+            CACHE_SCHEMA_VERSION
+        )));
+    assert_eq!(stamped_version(&cache_path), CACHE_SCHEMA_VERSION);
+    assert_eq!(
+        row_counts(&cache_path),
+        (1, 1, 1),
+        "a migrated cache must be repopulated from the Markdown files"
+    );
+
+    // And the other path: another command's boot, on the same fixture, same outcome.
+    stamp_older(&cache_path);
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root).args(["status"]).assert().success();
+    assert_eq!(stamped_version(&cache_path), CACHE_SCHEMA_VERSION);
+    assert_eq!(row_counts(&cache_path), (1, 1, 1));
+}
+
+/// `--yes` is accepted and inert. It must stay inert *only* for the retired migration
+/// confirmation: the required-flag checks still exit 3, and no `--yes` may be read as blanket
+/// consent to defaults. An inert-flag refactor is exactly what invites the opposite.
+#[test]
+fn test_yes_does_not_satisfy_the_required_flags() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    for missing in ["--name", "--developer", "--team"] {
+        let mut args = vec!["init", "--non-interactive", "--yes"];
+        if missing != "--name" {
+            args.extend(["--name", "Demo"]);
+        }
+        if missing != "--developer" {
+            args.extend(["--developer", "alice"]);
+        }
+        if missing != "--team" {
+            args.extend(["--team", "core"]);
+        }
+
+        let mut cmd = Command::cargo_bin("qdev").unwrap();
+        cmd.current_dir(root)
+            .args(&args)
+            .assert()
+            .failure()
+            .code(3)
+            .stderr(predicate::str::contains(missing))
+            .stderr(predicate::str::contains("needs_confirmation"));
+    }
+
+    assert!(
+        !root.join("qdev.toml").exists(),
+        "a refused init must scaffold nothing"
     );
 }

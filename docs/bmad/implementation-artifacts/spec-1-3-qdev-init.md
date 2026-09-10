@@ -20,14 +20,20 @@ deferred: []
 
 **Problem:** Developers and autonomous AI agents need an automated, reliable mechanism to bootstrap a new repository or re-initialize an existing one into a valid qdev workspace with standard configuration, directory hierarchies, `.gitignore` entries, and SQLite cache schema.
 
-**Approach:** Implement `qdev init` in `qdev-cli` and `qdev-core` supporting interactive TTY prompt wizardry and fully non-interactive flag-driven execution (`--name`, `--developer`, `--team`, `--yes`), root discovery from any subdirectory, creation of standard config and directory layouts, `.gitignore` updates, and cache schema v1 initialization and migration confirmation.
+**Approach:** Implement `qdev init` in `qdev-cli` and `qdev-core` supporting interactive TTY prompt wizardry and fully non-interactive flag-driven execution (`--name`, `--developer`, `--team`, `--yes`), root discovery from any subdirectory, creation of standard config and directory layouts, `.gitignore` updates, and ~~cache schema v1 initialization and migration confirmation~~ **cache schema initialization and unconditional migration to the current version** (amended 2026-09-11 — see below; `v1` was the version of the day and `--yes` no longer confirms anything).
+
+> **Amended 2026-09-11** (human renegotiation — see Spec Change Log). This story required
+> `qdev init` to migrate an older cache **only with interactive confirmation or `--yes`**, and to
+> exit 3 (`needs_confirmation`) otherwise. That requirement is removed: an older cache is now
+> migrated unconditionally, as every other command's boot already did. `--yes` stays accepted and
+> inert. Story `spec-init-cache-migration.md` made the code change.
 
 ## Boundaries & Constraints
 
 **Always:**
 - Keep `qdev-core` completely free of `clap`, terminal crates (`colored`, `crossterm`, `console`), stdout printing, and stdin reading per AD-1. All interactive prompting must reside in `qdev-cli`.
 - In non-interactive mode (`--non-interactive`, non-TTY stdin, or `QDEV_NONINTERACTIVE=1`), missing required flags (`--name`, `--developer`, `--team`) must exit with code 3 (`needs_confirmation`), naming the missing flag in error code/message.
-- Re-running `qdev init` in an initialized workspace with an older cache schema must report the migration and apply it only with interactive user confirmation or `--yes`; in non-interactive mode without `--yes`, it must exit with code 3 (`needs_confirmation`).
+- ~~Re-running `qdev init` in an initialized workspace with an older cache schema must report the migration and apply it only with interactive user confirmation or `--yes`; in non-interactive mode without `--yes`, it must exit with code 3 (`needs_confirmation`).~~ **Superseded 2026-09-11** (human renegotiation, see the amendment above): `init` reports the migration and applies it unconditionally, confirming nothing. `--yes` is accepted and has no effect.
 - All created paths must be relative to the repository/workspace root, even when executed from a nested subdirectory.
 - The `.gitignore` file must be created or updated at the repository root to include `.qdev/cache/`, `.qdev/leases/`, and `.qdev.local.toml` without introducing duplicates.
 - All JSON output under `--json` must adhere to the AD-13 `JsonEnvelope` structure with `"schema_version": "1"`.
@@ -48,8 +54,8 @@ deferred: []
 | Non-interactive missing team | `qdev init --non-interactive --name Demo --developer alice` | Exit 3; error message and details naming `--team` with code `needs_confirmation` | Exit code 3 policy refusal |
 | Subdirectory execution | Inside `subdir/nested/`: `qdev init --non-interactive --name Demo --developer alice --team core` | Exit 0; creates all directories and files at the repository root, not in `subdir/nested/` | No error expected |
 | Non-interactive JSON output | `qdev init --json --non-interactive --name Demo --developer alice --team core` | Exit 0; JSON envelope with `"schema_version": "1"` containing initialization payload to stdout | No error expected |
-| Existing workspace older cache migration with `--yes` | Workspace exists with `cache.sqlite` at user_version 0; `qdev init --non-interactive --name Demo --developer alice --team core --yes` | Exit 0; reports migration and updates cache schema to v1 | No error expected |
-| Existing workspace older cache migration without `--yes` (non-interactive) | Workspace exists with `cache.sqlite` at user_version 0; `qdev init --non-interactive --name Demo --developer alice --team core` | Exit 3; error message indicates cache migration requires confirmation or `--yes` | Exit code 3 policy refusal |
+| ~~Existing workspace older cache migration with `--yes`~~ **superseded 2026-09-11** | Workspace exists with `cache.sqlite` at user_version 0; `qdev init --non-interactive --name Demo --developer alice --team core --yes` | Exit 0; reports migration and updates cache schema to the current version. Still true, but `--yes` is no longer what permits it — the flag is inert. See `spec-init-cache-migration.md`. | No error expected |
+| ~~Existing workspace older cache migration without `--yes` (non-interactive)~~ **superseded 2026-09-11** | Workspace exists with `cache.sqlite` at user_version 0; `qdev init --non-interactive --name Demo --developer alice --team core` | ~~Exit 3; error message indicates cache migration requires confirmation or `--yes`~~ → **Exit 0; migrates and re-stamps**, the same as with `--yes`. See `spec-init-cache-migration.md`. | ~~Exit code 3 policy refusal~~ none |
 | Idempotent re-run current schema | Workspace already initialized at schema v1; `qdev init --non-interactive --name Demo --developer alice --team core` | Exit 0; existing configuration preserved, reports schema v1 up to date | No error expected |
 
 </intent-contract>
@@ -79,12 +85,44 @@ deferred: []
 - Given a Git repository without qdev, when running `qdev init` interactively on a TTY, then the user is prompted for project name, developer id, and teams, and the files and directories in the CLI reference §7 are created (`qdev.toml`, `.qdev.local.toml`, `.qdev/cache/`, `.qdev/gates/`, `.qdev/leases/`, `docs/specs/{prd,requirements,epics,stories,adrs,hazards}`, `docs/state/{sprints,releases,dw,decisions,scratch,evidence,baselines,soup}`), with `.qdev/cache/`, `.qdev/leases/`, and `.qdev.local.toml` appended to `.gitignore`.
 - Given a Git repository without qdev, when running `qdev init --non-interactive --name X --developer y --team z`, then the identical files and directories are created with no interactive prompt.
 - Given non-interactive mode, when running `qdev init` missing `--name`, `--developer`, or `--team`, then the command exits with code 3 (`needs_confirmation`) naming the missing flag in the error output.
-- Given an initialized workspace with an older cache schema, when running `qdev init`, then it reports the migration and applies it only with confirmation or `--yes` (exiting with code 3 in non-interactive mode without `--yes`).
+- ~~Given an initialized workspace with an older cache schema, when running `qdev init`, then it reports the migration and applies it only with confirmation or `--yes` (exiting with code 3 in non-interactive mode without `--yes`).~~ **Superseded 2026-09-11:** it reports the migration and applies it, with no confirmation and no flag.
 - Given a Git repository, when running `qdev init` from any nested subdirectory, then all created files and directories are resolved and created relative to the repository root.
 - Given any invocation with `--json`, when running `qdev init`, then output is formatted inside an AD-13 `JsonEnvelope` with `schema_version: "1"`.
 - Given the entire test suite, when running `cargo test`, then all unit, integration, architecture, and network tests pass.
 
 ## Spec Change Log
+
+### 2026-09-11 — Cache migration confirmation removed (human renegotiation, Simon)
+
+**What changed.** The intent contract required `qdev init` to migrate an older cache only with
+interactive confirmation or `--yes`, and to exit 3 (`needs_confirmation`) otherwise. That
+requirement is struck: an older cache is migrated unconditionally. The Approach paragraph carries
+an amendment note, the Boundaries "Always" bullet, the two migration matrix rows and the
+corresponding acceptance criterion are marked superseded. `-y`/`--yes` remains an accepted flag
+on `init` and has no effect on the cache; its help text says so.
+
+**Why.** The gate contradicted an approved boundary of story 1.6, which requires every command to
+drop and rebuild a version-mismatched cache silently at boot. Both cannot hold: a user who
+upgraded the binary, ran `qdev init` and was refused could run `qdev list` instead and have the
+migration performed anyway. Since the cache is a machine-local rebuildable index (AD-3/FR-101) and
+no data lives only there, asking permission to rebuild it protects nothing — and a refusal the next
+command ignores is worse than no refusal. Simon chose to keep the boot behaviour and drop the gate.
+
+**Evidence it was worse than decorative** (`spec-init-cache-migration.md`, from the epic 1
+cross-story review pass 2, findings NEW-1/NEW-2): the refusal fired only in the one path that
+*could not perform* the migration it was refusing. `init` wraps the drop-and-rebuild in
+`BEGIN IMMEDIATE`, and `drop_all_user_tables` guarded itself with `PRAGMA foreign_keys = OFF`,
+which SQLite documents as a no-op inside a transaction — so `--yes` on any cache holding a child
+row produced `sqlite_error: Failed to drop table entities during migration: FOREIGN KEY
+constraint failed`, exit 4, cache unchanged. Reproduced twice. Every migration fixture this story
+shipped used an *empty* cache, which is why the suite stayed green for eight stories.
+
+**Scope.** This amendment changes the contract; the code change is
+`spec-init-cache-migration.md`. The Implementation Notes and Review Triage Log below are left as
+written — they are the record of what this story did, including several findings about the
+confirmation gate (`test_interactive_migration_refusal_with_n`, the duplicated non-interactive
+pre-check in `main.rs`, the stdin-error classification while prompting) whose subjects that story
+removed.
 
 ## Review Triage Log
 

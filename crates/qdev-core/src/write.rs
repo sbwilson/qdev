@@ -2075,9 +2075,10 @@ pub fn create_story(options: &StoryCreateOptions) -> Result<StoryCreateResult, Q
     // Only upsert into a cache that already exists. In a real workspace it always does — boot
     // runs `ensure_cache` before any command — so the "queryable without a sweep" guarantee is
     // unaffected. Outside a workspace, `upsert_cache_and_mark_dirty` would *create* a 16-table,
-    // unstamped `cache.sqlite`, which a later `qdev init` then reads as a v0 cache needing a
-    // confirmed migration: `create story` followed by `init` in the same directory would exit 3
-    // asking for `--yes`. The file on disk is the source of truth; the next boot hydrates it.
+    // unstamped `cache.sqlite` in a directory that is not a workspace, which a later `qdev init`
+    // reads as a v0 cache and migrates: it would drop and rebuild the rows this write had just
+    // put there, for a file nothing had asked for. The file on disk is the source of truth; the
+    // next boot hydrates it.
     let cache_db_path = options
         .workspace_root
         .join(cache_dir_rel)

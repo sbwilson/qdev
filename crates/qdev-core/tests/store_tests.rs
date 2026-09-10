@@ -1445,3 +1445,66 @@ fn test_entity_presence_for_derivation_maps_all_three_states() {
         "reads still return the stale row with its flag"
     );
 }
+
+/// `drop_all_user_tables` is `pub` and re-exported, and its contract is that it works whether or
+/// not the caller has a transaction open. This is the direct pin for the transactional half.
+///
+/// `PRAGMA foreign_keys = OFF` is a documented no-op inside a transaction, so with only that
+/// pragma set the first `DROP TABLE entities` fails against any child row — which is how
+/// `qdev init`'s migration failed on every populated cache while boot's rebuild of the same file
+/// succeeded. Both of the schema's foreign keys are exercised: `stories.id -> entities(id)` and
+/// `sprint_assignments.sprint_id -> sprints(id)`.
+#[test]
+fn test_drop_all_user_tables_inside_an_open_transaction_with_child_rows() {
+    let temp = TempDir::new().unwrap();
+    let db_path = temp.path().join("fk.sqlite");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    qdev_core::store::create_schema(&conn).expect("schema creation");
+    let fk_enforced: i64 = conn
+        .query_row("PRAGMA foreign_keys;", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        fk_enforced, 1,
+        "the bundled SQLite enforces foreign keys by default; without that this pins nothing"
+    );
+
+    conn.execute_batch(
+        "INSERT INTO entities (id, kind, title, status, version, source_path, content_hash, \
+         created_by_type, created_by_id, updated_by_type, updated_by_id, updated_at, stale) \
+         VALUES ('E1S1', 'story', 'FK Parent', 'ready', 1, 'docs/specs/stories/E1S1.md', \
+         'deadbeef', 'human', 'alice', 'human', 'alice', '2026-01-01T00:00:00Z', 0);
+         INSERT INTO stories (id, epic_id, seq, appetite, safety_class, target_modules) \
+         VALUES ('E1S1', 'E1', 1, 'small', 'ClassA', '[\"foundation\"]');
+         INSERT INTO sprints (id, title, status) VALUES (1, 'Sprint One', 'active');
+         INSERT INTO sprint_assignments (sprint_id, story_id, assigned_at) \
+         VALUES (1, 'E1S1', '2026-01-01T00:00:00Z');",
+    )
+    .expect("both parent/child pairs must insert, or the fixture exercises no foreign key");
+
+    // Both child rows really are protected: deleting either parent outside the helper fails.
+    for parent in [
+        "DELETE FROM entities WHERE id = 'E1S1';",
+        "DELETE FROM sprints WHERE id = 1;",
+    ] {
+        let err = conn.execute_batch(parent).unwrap_err();
+        assert!(
+            err.to_string().contains("FOREIGN KEY"),
+            "expected an FK violation for `{parent}`, got: {err}"
+        );
+    }
+
+    conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
+    qdev_core::store::drop_all_user_tables(&conn)
+        .expect("dropping inside an open transaction must not fail on a foreign key");
+    conn.execute_batch("COMMIT;")
+        .expect("the commit is where deferred enforcement fires, so it must be clean too");
+
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0, "every user table must be gone");
+}
