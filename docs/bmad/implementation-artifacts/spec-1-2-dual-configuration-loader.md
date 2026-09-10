@@ -184,6 +184,25 @@ database lands at `var/qdev-cache/cache.sqlite`, two creates allocate `E12S1` th
 `create_cli_tests.rs::test_create_story_honours_configured_specs_dir` and
 `::test_init_scaffolds_and_gitignores_the_configured_layout`.
 
+### 2026-09-10 — Amendment: `[storage]` is per-key local, not wholly local
+
+**Human decision (Simon): option C.** This story's boundary says local keys override project keys
+*individually*. The epic 1 cross-story review (finding H1) showed that reading applied to
+`[storage]` produces a workspace no one can use: `specs_dir` and `state_dir` select where
+*committed* content lives, so a local override hides every entity from everyone else, and a local
+`cache_dir` was honoured by every reader but not by `init`, yielding two databases.
+
+Two of `[storage]`'s three keys are therefore now project-only: `storage.specs_dir` and
+`storage.state_dir` are a schema violation in `.qdev.local.toml` (exit 2, naming key and file),
+while `storage.cache_dir` remains locally overridable because the cache is a machine-local,
+rebuildable artifact. This narrows the "local keys override project keys individually" boundary
+for exactly those two keys; every other section is unchanged, and the merge semantics
+(scalar key-by-key, `[[modules]]`/`[[gates]]` wholesale) are untouched.
+
+Consequence recorded here because it is visible in a committed file: `qdev init` writes
+`.gitignore` entries covering the project cache directory *and* any locally configured one.
+Delivered by `spec-init-uses-the-merged-config.md`.
+
 ## Design Notes
 
 Dual configuration merges committed project policies in `qdev.toml` with local gitignored developer preferences in `.qdev.local.toml`.

@@ -130,16 +130,16 @@ fn run(raw_args: &[String]) -> ExitCode {
         }
     };
 
-    // Dispatch init command before loading config so bootstrapping works in uninitialized directories
-    if let Some(Commands::Init(ref init_args)) = cli.command {
-        return handle_init(init_args, interactivity, &cli, &output, &current_dir);
-    }
-
     // Dispatch schema command before loading config so it works without an initialized workspace
     if let Some(Commands::Schema(ref schema_args)) = cli.command {
         return handle_schema(schema_args, &cli, &output);
     }
 
+    // `init` is dispatched *after* this, not before: it resolves its layout through the same
+    // loader as every other command, so an unparseable or invalid configuration file is the same
+    // exit-2 refusal from the tool's own remedy as from everything else, and what `init`
+    // scaffolds is what the next command will read. Bootstrapping still works from nothing —
+    // both files absent is not an error, it is the default configuration.
     let annotated_config = match qdev_core::load_config(&current_dir) {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -149,6 +149,17 @@ fn run(raw_args: &[String]) -> ExitCode {
     };
 
     let root = qdev_core::find_workspace_root(&current_dir);
+
+    if let Some(Commands::Init(ref init_args)) = cli.command {
+        return handle_init(
+            init_args,
+            interactivity,
+            &cli,
+            &output,
+            &root,
+            &annotated_config,
+        );
+    }
 
     // Every command that touches the cache is refused outside an initialized workspace, checked
     // once here rather than per handler. Opening the store directly creates an empty,
@@ -448,9 +459,23 @@ fn handle_init(
     interactivity: Interactivity,
     cli: &Cli,
     output: &OutputEmitter,
-    current_dir: &std::path::Path,
+    root: &std::path::Path,
+    annotated_config: &qdev_core::AnnotatedConfig,
 ) -> ExitCode {
-    let root = qdev_core::find_workspace_root(current_dir);
+    let root = root.to_path_buf();
+
+    // One resolver. The effective layout is the loader's merged answer — the same value
+    // `ensure_cache` is handed on every other command — and the project layout is what
+    // `qdev.toml` alone says, needed because `.gitignore` is committed.
+    let project_storage = match qdev_core::load_project_storage(&root) {
+        Ok(storage) => storage,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+    let layout =
+        qdev_core::InitLayout::new(annotated_config.config.storage.clone(), project_storage);
 
     let (name, developer, teams, allow_migration) = if interactivity.is_non_interactive() {
         // Non-interactive mode: strict flag requirements
@@ -516,7 +541,7 @@ fn handle_init(
         }
 
         let allow_migration = init_args.yes;
-        match qdev_core::check_cache_status(&root) {
+        match qdev_core::check_cache_status(&root, &layout.effective) {
             Ok(qdev_core::CacheStatus::NeedsMigration {
                 current_version,
                 target_version,
@@ -654,7 +679,7 @@ fn handle_init(
 
         let mut allow_migration = init_args.yes;
         if !allow_migration {
-            match qdev_core::check_cache_status(&root) {
+            match qdev_core::check_cache_status(&root, &layout.effective) {
                 Ok(qdev_core::CacheStatus::NeedsMigration {
                     current_version,
                     target_version,
@@ -710,6 +735,7 @@ fn handle_init(
         developer,
         teams,
         allow_migration,
+        layout,
     };
 
     let result = match qdev_core::init(&options) {
@@ -731,11 +757,38 @@ fn handle_init(
             return ExitCode::InfrastructureFailure;
         }
     } else {
-        println!("✔ qdev.toml");
-        println!("✔ .qdev.local.toml (gitignored)");
-        println!("✔ .qdev/cache/ (gitignored), .qdev/gates/");
-        println!("✔ docs/specs/{{prd,requirements,epics,stories,adrs,hazards}}");
-        println!("✔ docs/state/{{sprints,releases,dw,decisions,scratch,evidence,baselines,soup}}");
+        // Rendered from the result, so every path named here is a path this run resolved and
+        // built. Hardcoded default paths sent a reader — human or wrapper — to a directory that
+        // does not exist whenever the workspace was configured for another layout.
+        // The two config files are reported only when this run actually wrote them: `init` never
+        // overwrites an existing one, so an idempotent re-run claiming to have created them
+        // breaks the same rule the hardcoded paths broke.
+        for name in [
+            qdev_core::PROJECT_CONFIG_FILENAME,
+            qdev_core::LOCAL_CONFIG_FILENAME,
+        ] {
+            if result.created_files.iter().any(|f| f == name) {
+                if name == qdev_core::LOCAL_CONFIG_FILENAME {
+                    println!("✔ {} (gitignored)", name);
+                } else {
+                    println!("✔ {}", name);
+                }
+            }
+        }
+        println!(
+            "✔ {}/ (gitignored), {}/gates/",
+            result.storage.cache_dir, result.qdev_dir
+        );
+        println!(
+            "✔ {}/{{{}}}",
+            result.storage.specs_dir,
+            qdev_core::SPEC_SUBDIRECTORIES.join(",")
+        );
+        println!(
+            "✔ {}/{{{}}}",
+            result.storage.state_dir,
+            qdev_core::STATE_SUBDIRECTORIES.join(",")
+        );
         if result.cache_migrated {
             println!("✔ cache schema migrated to v{}", CACHE_SCHEMA_VERSION);
         } else if result.already_initialized {

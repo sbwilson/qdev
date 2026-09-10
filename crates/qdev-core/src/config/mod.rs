@@ -31,6 +31,16 @@ const ALLOWED_TOP_LEVEL_SECTIONS: &[&str] = &[
     "preferences",
 ];
 
+/// The committed project configuration file.
+pub const PROJECT_CONFIG_FILENAME: &str = "qdev.toml";
+/// The gitignored, machine-local configuration file.
+pub const LOCAL_CONFIG_FILENAME: &str = ".qdev.local.toml";
+
+/// Every `[storage]` key. Only `cache_dir` may also appear in `.qdev.local.toml` — see
+/// `validate_storage_section`.
+const ALL_STORAGE_KEYS: &[&str] = &["specs_dir", "state_dir", "cache_dir"];
+const LOCAL_STORAGE_KEYS: &[&str] = &["cache_dir"];
+
 /// Validates a parsed TOML table against the strict configuration schema.
 /// Returns exit code 2 (usage error) naming key and file if invalid per spec.
 pub fn validate_config_table(table: &toml::Table, filename: &str) -> Result<(), QdevError> {
@@ -209,20 +219,97 @@ fn validate_git_section(val: &toml::Value, filename: &str) -> Result<(), QdevErr
     Ok(())
 }
 
+/// `[storage]` is legal in both files, but not every key is.
+///
+/// `specs_dir` and `state_dir` select where *committed* content lives, so the layout is a project
+/// decision and belongs in `qdev.toml`; a local override there would hide every entity from
+/// everyone else. `cache_dir` names a machine-local, rebuildable artifact, so relocating it is a
+/// developer's business and is accepted in `.qdev.local.toml`. A project-only key in the local
+/// file is a schema error like any other — exit 2, naming the key and the file.
 fn validate_storage_section(val: &toml::Value, filename: &str) -> Result<(), QdevError> {
     let table = expect_table(val, "storage", filename)?;
-    let allowed = &["specs_dir", "state_dir", "cache_dir"];
+    // Matched on the file *name*, so a caller passing a path or a `./`-prefixed form cannot
+    // fall through to the permissive branch.
+    let is_local = std::path::Path::new(filename)
+        .file_name()
+        .map(|n| n == std::ffi::OsStr::new(LOCAL_CONFIG_FILENAME))
+        .unwrap_or(false);
+    let allowed: &[&str] = if is_local {
+        LOCAL_STORAGE_KEYS
+    } else {
+        ALL_STORAGE_KEYS
+    };
+
+    if is_local {
+        for key in table.keys() {
+            if ALL_STORAGE_KEYS.contains(&key.as_str()) && !allowed.contains(&key.as_str()) {
+                return Err(QdevError::usage_error(format!(
+                    "Schema violation in {}: key '{}' in [storage] may only be set in {}, because it selects committed content",
+                    filename, key, PROJECT_CONFIG_FILENAME
+                ))
+                .with_details(serde_json::json!({
+                    "file": filename,
+                    "key": format!("storage.{}", key),
+                })));
+            }
+        }
+    }
+
     check_unknown_keys(table, allowed, "storage", filename)?;
 
-    for key in allowed {
+    for key in ALL_STORAGE_KEYS {
         if let Some(v) = table.get(*key) {
-            if !v.is_str() {
+            let Some(raw) = v.as_str() else {
                 return Err(type_mismatch_error(key, "storage", "string", filename));
+            };
+
+            // A layout value names a directory inside the workspace. Rejecting these three
+            // shapes here — once, for both files — is what keeps every consumer from having to
+            // defend against them: an empty value made `root.join()` yield an absolute path and
+            // sent `init` scaffolding at the filesystem root, and an absolute or `..` value put
+            // the cache outside the workspace while writing an entry git cannot honour into a
+            // committed `.gitignore`.
+            let trimmed = raw.trim().trim_end_matches('/');
+            if trimmed.is_empty() {
+                return Err(storage_path_error(
+                    key,
+                    filename,
+                    "must name a directory, but is empty",
+                ));
+            }
+            let path = std::path::Path::new(trimmed);
+            if path.is_absolute() {
+                return Err(storage_path_error(
+                    key,
+                    filename,
+                    "must be relative to the workspace root, but is absolute",
+                ));
+            }
+            if path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(storage_path_error(
+                    key,
+                    filename,
+                    "must stay inside the workspace, but contains '..'",
+                ));
             }
         }
     }
 
     Ok(())
+}
+
+fn storage_path_error(key: &str, filename: &str, why: &str) -> QdevError {
+    QdevError::usage_error(format!(
+        "Schema violation in {}: key '{}' in [storage] {}",
+        filename, key, why
+    ))
+    .with_details(serde_json::json!({
+        "file": filename,
+        "key": format!("storage.{}", key),
+    }))
 }
 
 fn validate_modules_section(val: &toml::Value, filename: &str) -> Result<(), QdevError> {
@@ -892,21 +979,31 @@ pub fn merge_configs(
 
     // 4. [storage]
     sources.insert("storage".to_string(), section_source("storage"));
+    // Normalized here and nowhere else. `init` used to trim these values while every other
+    // command joined them verbatim, so a padded `cache_dir` produced two databases — the
+    // two-caches defect this story exists to remove, in a different disguise. One normalization
+    // means one answer for every consumer.
+    fn normalized_dir(val: Option<&toml::Value>) -> Option<String> {
+        val.and_then(|v| v.as_str())
+            .map(|s| s.trim().trim_end_matches('/').to_string())
+            .filter(|s| !s.is_empty())
+    }
+
     let (specs_val, src) = get_val("storage", "specs_dir");
     sources.insert("storage.specs_dir".to_string(), src);
-    if let Some(v) = specs_val.and_then(|v| v.as_str().map(|s| s.to_string())) {
+    if let Some(v) = normalized_dir(specs_val.as_ref()) {
         config.storage.specs_dir = v;
     }
 
     let (state_val, src) = get_val("storage", "state_dir");
     sources.insert("storage.state_dir".to_string(), src);
-    if let Some(v) = state_val.and_then(|v| v.as_str().map(|s| s.to_string())) {
+    if let Some(v) = normalized_dir(state_val.as_ref()) {
         config.storage.state_dir = v;
     }
 
     let (cache_val, src) = get_val("storage", "cache_dir");
     sources.insert("storage.cache_dir".to_string(), src);
-    if let Some(v) = cache_val.and_then(|v| v.as_str().map(|s| s.to_string())) {
+    if let Some(v) = normalized_dir(cache_val.as_ref()) {
         config.storage.cache_dir = v;
     }
 
@@ -1203,6 +1300,39 @@ pub fn find_workspace_root(start: &Path) -> PathBuf {
     start.to_path_buf()
 }
 
+/// Reads and validates one configuration file, returning `None` when it is absent — which is not
+/// an error — and a usage error (exit 2, naming the file) when it cannot be read or parsed.
+fn read_config_file(path: &Path, filename: &str) -> Result<Option<toml::Table>, QdevError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        QdevError::usage_error(format!("Failed to read {}: {}", filename, e))
+            .with_details(serde_json::json!({ "file": filename }))
+    })?;
+    let table: toml::Table = toml::from_str(&content).map_err(|e| {
+        QdevError::usage_error(format!(
+            "Schema violation in {}: invalid TOML syntax: {}",
+            filename, e
+        ))
+        .with_details(serde_json::json!({ "file": filename }))
+    })?;
+    validate_config_table(&table, filename)?;
+    Ok(Some(table))
+}
+
+/// Reads and validates both configuration files. The single parse-and-validate path: everything
+/// that resolves configuration differs only in what it then merges, so an unparseable or invalid
+/// file is the same refusal for every caller.
+fn read_config_tables(
+    root: &Path,
+) -> Result<(Option<toml::Table>, Option<toml::Table>), QdevError> {
+    let project_table =
+        read_config_file(&root.join(PROJECT_CONFIG_FILENAME), PROJECT_CONFIG_FILENAME)?;
+    let local_table = read_config_file(&root.join(LOCAL_CONFIG_FILENAME), LOCAL_CONFIG_FILENAME)?;
+    Ok((project_table, local_table))
+}
+
 /// Loads committed `qdev.toml` and optional `.qdev.local.toml` from the specified directory or its ancestors,
 /// performs strict schema validation, merges key-by-key for tables and wholesale for arrays,
 /// and falls back to git config user.email for identity attribution.
@@ -1210,44 +1340,7 @@ pub fn load_config(root: &Path) -> Result<AnnotatedConfig, QdevError> {
     let ws_root = find_workspace_root(root);
     let root = ws_root.as_path();
 
-    let project_file = root.join("qdev.toml");
-    let local_file = root.join(".qdev.local.toml");
-
-    let project_table = if project_file.exists() {
-        let content = std::fs::read_to_string(&project_file).map_err(|e| {
-            QdevError::usage_error(format!("Failed to read qdev.toml: {}", e))
-                .with_details(serde_json::json!({ "file": "qdev.toml" }))
-        })?;
-        let table: toml::Table = toml::from_str(&content).map_err(|e| {
-            QdevError::usage_error(format!(
-                "Schema violation in qdev.toml: invalid TOML syntax: {}",
-                e
-            ))
-            .with_details(serde_json::json!({ "file": "qdev.toml" }))
-        })?;
-        validate_config_table(&table, "qdev.toml")?;
-        Some(table)
-    } else {
-        None
-    };
-
-    let local_table = if local_file.exists() {
-        let content = std::fs::read_to_string(&local_file).map_err(|e| {
-            QdevError::usage_error(format!("Failed to read .qdev.local.toml: {}", e))
-                .with_details(serde_json::json!({ "file": ".qdev.local.toml" }))
-        })?;
-        let table: toml::Table = toml::from_str(&content).map_err(|e| {
-            QdevError::usage_error(format!(
-                "Schema violation in .qdev.local.toml: invalid TOML syntax: {}",
-                e
-            ))
-            .with_details(serde_json::json!({ "file": ".qdev.local.toml" }))
-        })?;
-        validate_config_table(&table, ".qdev.local.toml")?;
-        Some(table)
-    } else {
-        None
-    };
+    let (project_table, local_table) = read_config_tables(root)?;
 
     let git_email = resolve_git_email(Some(root));
     merge_configs(
@@ -1255,4 +1348,19 @@ pub fn load_config(root: &Path) -> Result<AnnotatedConfig, QdevError> {
         local_table.as_ref(),
         git_email.as_deref(),
     )
+}
+
+/// The `[storage]` layout `qdev.toml` alone specifies, with any local `cache_dir` withheld.
+///
+/// `.gitignore` is committed and the gate scripts under `<qdev_dir>/gates/` are committed, so
+/// `init` needs the project layout as well as the effective one: a developer who relocates their
+/// cache locally must not rewrite the shared ignore file into something only their machine
+/// understands. Same parse, same validation and same merge as [`load_config`] — only the local
+/// table is withheld — so this is not a second resolver.
+pub fn load_project_storage(root: &Path) -> Result<StorageConfig, QdevError> {
+    let ws_root = find_workspace_root(root);
+    let (project_table, _) = read_config_tables(ws_root.as_path())?;
+    Ok(merge_configs(project_table.as_ref(), None, None)?
+        .config
+        .storage)
 }

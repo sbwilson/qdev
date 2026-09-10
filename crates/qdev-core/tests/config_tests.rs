@@ -885,3 +885,132 @@ skip = false
     assert_eq!(annotated.config.gates.len(), 1);
     assert_eq!(annotated.config.gates[0].skip, Some(false));
 }
+
+/// Option C: the cache is a machine-local, rebuildable artifact, so `.qdev.local.toml` may
+/// relocate it. It overrides the project value key by key like every other scalar, and `config
+/// show` attributes it to the local file.
+#[test]
+fn test_local_storage_may_override_cache_dir_only() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    fs::write(
+        root.join("qdev.toml"),
+        "[storage]\nspecs_dir = \"planning/specs\"\nstate_dir = \"planning/state\"\ncache_dir = \".qdev/cache\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join(".qdev.local.toml"),
+        "[storage]\ncache_dir = \"local/cache\"\n",
+    )
+    .unwrap();
+
+    let annotated = load_config(root).expect("a local cache_dir is legal");
+    assert_eq!(annotated.config.storage.cache_dir, "local/cache");
+    assert_eq!(annotated.config.storage.specs_dir, "planning/specs");
+    assert_eq!(annotated.config.storage.state_dir, "planning/state");
+    assert_eq!(
+        annotated.sources.get("storage.cache_dir"),
+        Some(&ConfigSource::Local)
+    );
+
+    // The project layout is the same answer with the local table withheld — what the committed
+    // `.gitignore` must keep covering.
+    let project = qdev_core::load_project_storage(root).unwrap();
+    assert_eq!(project.cache_dir, ".qdev/cache");
+    assert_eq!(project.specs_dir, "planning/specs");
+}
+
+/// `specs_dir` and `state_dir` hold committed content, so they are a project decision: either key
+/// in the local file is a schema error naming the key and the file, from every command.
+#[test]
+fn test_local_storage_rejects_specs_dir_and_state_dir() {
+    for key in ["specs_dir", "state_dir"] {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::write(root.join("qdev.toml"), "[project]\nname = \"Demo\"\n").unwrap();
+        fs::write(
+            root.join(".qdev.local.toml"),
+            format!("[storage]\n{} = \"elsewhere\"\n", key),
+        )
+        .unwrap();
+
+        let err = load_config(root).expect_err("a project-only storage key must be refused");
+        assert_eq!(err.exit_code(), ExitCode::UsageError);
+        assert!(
+            err.message().contains(key) && err.message().contains(".qdev.local.toml"),
+            "the error must name the key and the file, got: {}",
+            err.message()
+        );
+        assert_eq!(err.details().unwrap()["key"], format!("storage.{}", key));
+        assert_eq!(err.details().unwrap()["file"], ".qdev.local.toml");
+
+        // The same keys remain legal in the committed file.
+        fs::write(
+            root.join(".qdev.local.toml"),
+            "[storage]\ncache_dir = \"local/cache\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("qdev.toml"),
+            format!("[storage]\n{} = \"elsewhere\"\n", key),
+        )
+        .unwrap();
+        load_config(root).expect("the layout is configurable in qdev.toml");
+    }
+}
+
+/// A `[storage]` value names a directory *inside* the workspace. The private reader `init` used
+/// to have skipped an empty value and fell back to the default; deleting it removed that guard
+/// with nothing in its place, and the reviewers demonstrated the consequences against the built
+/// binary: `cache_dir = ""` made `root.join()` yield the absolute `/cache.sqlite` and wrote a
+/// bare `/` into the committed `.gitignore`, and `specs_dir = ""` tried to create `/prd`.
+#[test]
+fn test_storage_paths_must_be_relative_non_empty_and_inside_the_workspace() {
+    for key in ["specs_dir", "state_dir", "cache_dir"] {
+        for (value, expected) in [
+            ("", "is empty"),
+            ("   ", "is empty"),
+            ("/absolute/path", "is absolute"),
+            ("../escape", "contains '..'"),
+            ("nested/../..", "contains '..'"),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let root = temp.path();
+            fs::write(
+                root.join("qdev.toml"),
+                format!("[project]\nname = \"Demo\"\n\n[storage]\n{key} = \"{value}\"\n"),
+            )
+            .unwrap();
+
+            let err = load_config(root)
+                .expect_err("a storage value outside the workspace must be refused");
+            assert_eq!(err.exit_code(), ExitCode::UsageError);
+            assert!(
+                err.message().contains(key) && err.message().contains(expected),
+                "the error must name the key and why, got: {}",
+                err.message()
+            );
+            assert_eq!(err.details().unwrap()["key"], format!("storage.{key}"));
+        }
+    }
+}
+
+/// The loader normalizes a layout value once, so `init` and every other command join the same
+/// string. While `init` trimmed privately and the loader did not, a padded `cache_dir` produced
+/// two databases — the two-caches defect in a different disguise.
+#[test]
+fn test_storage_paths_are_normalized_by_the_loader() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    fs::write(
+        root.join("qdev.toml"),
+        "[project]\nname = \"Demo\"\n\n[storage]\nspecs_dir = \"  planning/specs/  \"\ncache_dir = \" var/cache \"\n",
+    )
+    .unwrap();
+
+    let cfg = load_config(root).expect("a padded value is legal, just normalized");
+    assert_eq!(cfg.config.storage.specs_dir, "planning/specs");
+    assert_eq!(cfg.config.storage.cache_dir, "var/cache");
+}

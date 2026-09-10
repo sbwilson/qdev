@@ -29,11 +29,12 @@ pub use doctor::{
 };
 
 pub use config::{
-    find_workspace_root, load_config, merge_configs, resolve_git_email, validate_config_table,
-    AnnotatedConfig, AnnotatedValue, CommitMessagesConfig, Config, ConfigSource, EnvironmentConfig,
-    GateConfig, GitConfig, HygieneConfig, IdentityConfig, ModelsConfig, ModuleConfig,
-    PreferencesConfig, ProjectConfig, RegulatoryConfig, SoupConfig, StorageConfig, TeamsConfig,
-    DEFAULT_CITATION_PATTERN,
+    find_workspace_root, load_config, load_project_storage, merge_configs, resolve_git_email,
+    validate_config_table, AnnotatedConfig, AnnotatedValue, CommitMessagesConfig, Config,
+    ConfigSource, EnvironmentConfig, GateConfig, GitConfig, HygieneConfig, IdentityConfig,
+    ModelsConfig, ModuleConfig, PreferencesConfig, ProjectConfig, RegulatoryConfig, SoupConfig,
+    StorageConfig, TeamsConfig, DEFAULT_CITATION_PATTERN, LOCAL_CONFIG_FILENAME,
+    PROJECT_CONFIG_FILENAME,
 };
 pub use envelope::{ErrorPayload, JsonEnvelope, JsonErrorEnvelope, SCHEMA_VERSION};
 pub use errors::{ExitCode, QdevError};
@@ -44,8 +45,9 @@ pub use id::{
     ConstraintKind, ConstraintOwner, IdParseError, Identifier, IdentifierKind,
 };
 pub use init::{
-    check_cache_status, init, CacheStatus, InitOptions, InitResult, CACHE_SCHEMA_VERSION,
-    GITIGNORE_ENTRIES, STANDARD_DIRECTORIES,
+    check_cache_status, gitignore_entries, init, standard_directories, CacheStatus, InitLayout,
+    InitOptions, InitResult, CACHE_SCHEMA_VERSION, SPEC_SUBDIRECTORIES, STANDARD_DIRECTORIES,
+    STATE_SUBDIRECTORIES,
 };
 pub use interactivity::Interactivity;
 pub use query::{

@@ -182,3 +182,12 @@ stories named at the end of that document. The medium and low findings are recor
 - source_spec: `docs/bmad/implementation-artifacts/spec-sweep-rebuild-convergence.md`
   summary: `qdev sync` counts an unreadable file as `unchanged` in its summary, and its `findings=` count remains cache-native only.
   evidence: Pre-existing wording, untouched by this story; the `read_error` finding carries the real signal, but the summary line actively says "unchanged" about a file that could not be read. Pairs with the earlier ledger entry about `sync`'s partial finding count. Review by: epic 2 planning, with the other `sync` summary item.
+
+## Deferred from: code review of spec-init-uses-the-merged-config (2026-09-10)
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-init-uses-the-merged-config.md`
+  summary: `load_project_storage` re-reads and re-validates both config files immediately after `load_config` already did, so the effective and project layouts can come from different content if a file is edited between the two reads — and `.gitignore` is then written from the mismatch.
+  evidence: Confirmed by inspection. The fix is for the loader to return both layouts from one read, which means `AnnotatedConfig` carrying the project-only `StorageConfig` — a public struct change, which is why it was not done inline. The window is one process start and both files are small, so the practical risk is doubled I/O rather than a wrong answer. Review by: whenever `AnnotatedConfig` is next opened, or epic 2 story 2.13 (module registry), which adds another consumer of the merged config.
+- source_spec: `docs/bmad/implementation-artifacts/spec-init-uses-the-merged-config.md`
+  summary: Every write path resolves its advisory-lock directory as `storage.as_ref().map(..).unwrap_or(".qdev/cache")`, so a caller that omits `storage` locks a different file than one that supplies it — and two locks means no mutual exclusion.
+  evidence: Four call sites in `crates/qdev-core/src/write.rs`. The CLI always supplies `storage`, so no caller diverges today; this is the last place a hardcoded default layout survives after `8220a63` and this story. Making `WriteOptions::storage` non-optional is a public API change across the write path. Review by: epic 2 story 2.3 (story leases), the first feature with a second lock to coordinate.

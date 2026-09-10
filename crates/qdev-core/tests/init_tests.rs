@@ -2,8 +2,8 @@ use std::fs;
 use tempfile::TempDir;
 
 use qdev_core::{
-    check_cache_status, init, CacheStatus, ExitCode, InitOptions, CACHE_SCHEMA_VERSION,
-    STANDARD_DIRECTORIES,
+    check_cache_status, gitignore_entries, init, standard_directories, CacheStatus, ExitCode,
+    InitLayout, InitOptions, StorageConfig, CACHE_SCHEMA_VERSION, STANDARD_DIRECTORIES,
 };
 
 #[test]
@@ -17,6 +17,7 @@ fn test_init_fresh_workspace_scaffolding() {
         developer: "simon".to_string(),
         teams: vec!["core-platform".to_string()],
         allow_migration: false,
+        layout: InitLayout::default(),
     };
 
     let result = init(&options).expect("init should succeed on fresh directory");
@@ -128,6 +129,7 @@ fn test_gitignore_deduplication() {
         developer: "alice".to_string(),
         teams: vec!["core".to_string()],
         allow_migration: false,
+        layout: InitLayout::default(),
     };
 
     let result = init(&options).unwrap();
@@ -170,6 +172,7 @@ fn test_never_overwrite_existing_configs() {
         developer: "new_dev".to_string(),
         teams: vec!["new_team".to_string()],
         allow_migration: false,
+        layout: InitLayout::default(),
     };
 
     let result = init(&options).unwrap();
@@ -203,7 +206,7 @@ fn test_cache_migration_refused_without_confirmation() {
     }
 
     // check_cache_status should report NeedsMigration
-    let status = check_cache_status(&root).unwrap();
+    let status = check_cache_status(&root, &StorageConfig::default()).unwrap();
     assert_eq!(
         status,
         CacheStatus::NeedsMigration {
@@ -219,6 +222,7 @@ fn test_cache_migration_refused_without_confirmation() {
         developer: "alice".to_string(),
         teams: vec!["core".to_string()],
         allow_migration: false,
+        layout: InitLayout::default(),
     };
 
     let err = init(&options).unwrap_err();
@@ -253,6 +257,7 @@ fn test_cache_migration_succeeds_with_confirmation_and_drops_old_tables() {
         developer: "alice".to_string(),
         teams: vec!["core".to_string()],
         allow_migration: true,
+        layout: InitLayout::default(),
     };
 
     let result = init(&options).expect("Migration should succeed with allow_migration=true");
@@ -276,7 +281,7 @@ fn test_cache_migration_succeeds_with_confirmation_and_drops_old_tables() {
     assert_eq!(count, 0, "Outdated tables must be dropped on migration");
 
     // After migration, status is UpToDate
-    let status = check_cache_status(&root).unwrap();
+    let status = check_cache_status(&root, &StorageConfig::default()).unwrap();
     assert_eq!(
         status,
         CacheStatus::UpToDate {
@@ -302,7 +307,7 @@ fn test_check_cache_status_future_version_conflict() {
         .unwrap();
     }
 
-    let err = check_cache_status(&root).unwrap_err();
+    let err = check_cache_status(&root, &StorageConfig::default()).unwrap_err();
     assert_eq!(err.exit_code(), ExitCode::Conflict);
     assert_eq!(err.code(), "schema_version_mismatch");
 
@@ -312,6 +317,7 @@ fn test_check_cache_status_future_version_conflict() {
         developer: "alice".to_string(),
         teams: vec!["core".to_string()],
         allow_migration: true,
+        layout: InitLayout::default(),
     };
     let init_err = init(&options).unwrap_err();
     assert_eq!(init_err.exit_code(), ExitCode::Conflict);
@@ -329,6 +335,7 @@ fn test_init_validation_non_empty_fields() {
         developer: "alice".to_string(),
         teams: vec!["core".to_string()],
         allow_migration: false,
+        layout: InitLayout::default(),
     };
     let err = init(&opt_no_name).unwrap_err();
     assert_eq!(err.exit_code(), ExitCode::UsageError);
@@ -340,6 +347,7 @@ fn test_init_validation_non_empty_fields() {
         developer: "   ".to_string(),
         teams: vec!["core".to_string()],
         allow_migration: false,
+        layout: InitLayout::default(),
     };
     let err = init(&opt_no_dev).unwrap_err();
     assert_eq!(err.exit_code(), ExitCode::UsageError);
@@ -351,6 +359,7 @@ fn test_init_validation_non_empty_fields() {
         developer: "alice".to_string(),
         teams: vec!["  ".to_string()],
         allow_migration: false,
+        layout: InitLayout::default(),
     };
     let err = init(&opt_no_teams).unwrap_err();
     assert_eq!(err.exit_code(), ExitCode::UsageError);
@@ -367,6 +376,7 @@ fn test_idempotent_rerun_schema_v2() {
         developer: "alice".to_string(),
         teams: vec!["core".to_string()],
         allow_migration: false,
+        layout: InitLayout::default(),
     };
 
     // First run: initializes
@@ -400,6 +410,7 @@ fn test_multiple_teams() {
             "frontend".to_string(),
         ], // duplicated team
         allow_migration: false,
+        layout: InitLayout::default(),
     };
 
     let result = init(&options).unwrap();
@@ -431,6 +442,7 @@ fn test_teams_comma_separated_splitting() {
         developer: "bob".to_string(),
         teams: vec!["frontend,backend".to_string(), "ops, backend".to_string()],
         allow_migration: false,
+        layout: InitLayout::default(),
     };
 
     let result = init(&options).unwrap();
@@ -476,6 +488,7 @@ fn test_cache_migration_drops_views_triggers_and_escaped_tables() {
         developer: "alice".to_string(),
         teams: vec!["core".to_string()],
         allow_migration: true,
+        layout: InitLayout::default(),
     };
 
     let result =
@@ -516,4 +529,144 @@ fn test_cache_migration_drops_views_triggers_and_escaped_tables() {
         )
         .unwrap();
     assert_eq!(legacy_triggers, 0);
+}
+
+/// `[storage]` may relocate the cache locally, and `.gitignore` is committed — so the ignore file
+/// covers the project cache directory *and* the locally configured one. Without the second entry
+/// the cache every command actually opens is untracked only by luck; without the first, the
+/// committed file stops being meaningful to anyone whose machine is configured differently.
+#[test]
+fn test_gitignore_covers_both_the_project_and_the_local_cache_directory() {
+    let layout = InitLayout::new(
+        StorageConfig {
+            cache_dir: "local/cache".to_string(),
+            ..StorageConfig::default()
+        },
+        StorageConfig::default(),
+    );
+
+    let entries = gitignore_entries(&layout);
+    assert!(
+        entries.contains(&".qdev/cache/".to_string()),
+        "the project cache must stay covered for everyone else, got: {entries:?}"
+    );
+    assert!(
+        entries.contains(&"local/cache/".to_string()),
+        "the locally relocated cache must be covered too, got: {entries:?}"
+    );
+    assert!(entries.contains(&".qdev/leases/".to_string()));
+    assert!(entries.contains(&".qdev.local.toml".to_string()));
+
+    // The committed gate scripts follow the project layout, not a developer's cache override.
+    let dirs = standard_directories(&layout);
+    assert!(dirs.contains(&"local/cache".to_string()));
+    assert!(dirs.contains(&".qdev/gates".to_string()));
+    assert!(
+        !dirs.contains(&".qdev/cache".to_string()),
+        "only one cache directory is scaffolded, got: {dirs:?}"
+    );
+}
+
+/// Everything `init` reports it created is a path it actually created: the cache path in
+/// `created_files` is derived from the resolved layout rather than hardcoded.
+#[test]
+fn test_init_reports_the_cache_it_actually_created() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().to_path_buf();
+
+    let layout = InitLayout::new(
+        StorageConfig {
+            specs_dir: "planning/specs".to_string(),
+            state_dir: "planning/state".to_string(),
+            cache_dir: "local/cache".to_string(),
+        },
+        StorageConfig {
+            specs_dir: "planning/specs".to_string(),
+            state_dir: "planning/state".to_string(),
+            cache_dir: ".qdev/cache".to_string(),
+        },
+    );
+
+    let options = InitOptions {
+        root: root.clone(),
+        name: "Configured".to_string(),
+        developer: "alice".to_string(),
+        teams: vec!["core".to_string()],
+        allow_migration: false,
+        layout: layout.clone(),
+    };
+
+    let result = init(&options).unwrap();
+
+    assert!(result
+        .created_files
+        .contains(&"local/cache/cache.sqlite".to_string()));
+    for path in result
+        .created_files
+        .iter()
+        .chain(result.created_directories.iter())
+    {
+        assert!(
+            root.join(path).exists(),
+            "reported path {path} does not exist on disk"
+        );
+    }
+    assert!(!root.join(".qdev/cache").exists());
+    assert_eq!(result.storage, layout.effective);
+    assert_eq!(result.qdev_dir, ".qdev");
+}
+
+/// The cache `init` inspects is the cache every other command opens, so a newer stamp on the
+/// *effective* cache is refused rather than reported as an up-to-date workspace.
+#[test]
+fn test_check_cache_status_inspects_the_configured_cache() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().to_path_buf();
+
+    let storage = StorageConfig {
+        cache_dir: "local/cache".to_string(),
+        ..StorageConfig::default()
+    };
+
+    fs::create_dir_all(root.join("local/cache")).unwrap();
+    {
+        let conn = rusqlite::Connection::open(root.join("local/cache/cache.sqlite")).unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {};",
+            CACHE_SCHEMA_VERSION + 1
+        ))
+        .unwrap();
+    }
+
+    // The default-layout cache does not exist at all, so the private reader used to report
+    // `NotInitialized` here while every other command refused the workspace.
+    let err = check_cache_status(&root, &storage).unwrap_err();
+    assert_eq!(err.exit_code(), ExitCode::Conflict);
+    assert_eq!(err.code(), "schema_version_mismatch");
+    assert!(err.message().contains("local/cache/cache.sqlite") || err.message().contains("newer"));
+
+    assert_eq!(
+        check_cache_status(&root, &StorageConfig::default()).unwrap(),
+        CacheStatus::NotInitialized
+    );
+}
+
+/// `STANDARD_DIRECTORIES` is a hand-maintained copy of what `standard_directories` builds for the
+/// default layout, and a hand-maintained copy of a derived list is how `init`'s reporting drifted
+/// from what it creates. This keeps the two in agreement.
+#[test]
+fn test_standard_directories_matches_the_default_layout() {
+    let derived = qdev_core::standard_directories(&qdev_core::InitLayout::default());
+    let mut derived_sorted = derived.clone();
+    derived_sorted.sort();
+    let mut listed: Vec<String> = qdev_core::STANDARD_DIRECTORIES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    listed.sort();
+    assert_eq!(
+        derived_sorted, listed,
+        "STANDARD_DIRECTORIES must list exactly what standard_directories builds for the \
+         default layout"
+    );
 }

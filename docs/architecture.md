@@ -236,6 +236,24 @@ updated_by: { type: agent, id: claude-code }
 ...
 ```
 
+### Where the layout is configured
+
+The three directories above are `[storage]` keys, and `qdev init` resolves them through the same
+configuration loader every other command uses — so what `init` scaffolds, stamps, gitignores and
+reports is the layout the next command will read, and an unparseable or invalid configuration file
+is the same exit-2 refusal from `init` as from everything else.
+
+`specs_dir` and `state_dir` may be set **only** in the committed `qdev.toml`: they select where
+committed content lives, so the layout is a project decision, and either key in
+`.qdev.local.toml` is a schema error (exit 2, naming the key and the file). `cache_dir` is the
+exception — the cache is a machine-local, rebuildable artifact, so a developer may relocate it in
+`.qdev.local.toml`. One consequence is deliberate and worth stating, because `.gitignore` is
+committed: `init` writes ignore entries for the project cache directory **and** for any locally
+configured one, so a relocated cache is never untracked merely by luck while the committed file
+stays meaningful to everyone else. The directory hosting `gates/` and `leases/` follows the
+*project* cache directory's parent, so committed gate scripts do not move with a developer's
+local override.
+
 ### Identity: a file is named for the entity it holds
 
 One rule answers "which file is entity `X`?" for every reader and every writer. `X` lives in its

@@ -657,3 +657,363 @@ fn test_future_schema_version_conflict_fails_with_yes() {
     // Verify filesystem was not modified before conflict failure
     assert!(!root.join("qdev.toml").exists());
 }
+
+/// The epic 1 cross-story review's reproduction (H1): `[storage] cache_dir` in
+/// `.qdev.local.toml` used to give *two* databases — `init` created and gitignored
+/// `.qdev/cache/cache.sqlite` while every later command created and used the configured one,
+/// untracked only by luck. `init` now resolves through the same loader, so there is one cache, at
+/// the path the commands use, and `.gitignore` covers it.
+#[test]
+fn test_local_cache_dir_yields_exactly_one_cache_covered_by_gitignore() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    fs::write(root.join("qdev.toml"), "[project]\nname = \"Repro\"\n").unwrap();
+    fs::write(
+        root.join(".qdev.local.toml"),
+        "[storage]\ncache_dir = \"local/cache\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args([
+            "init",
+            "--non-interactive",
+            "--name",
+            "Repro",
+            "--developer",
+            "alice",
+            "--team",
+            "core",
+        ])
+        .assert()
+        .success()
+        .code(0);
+
+    // Any other command, which resolves the cache through the loader.
+    let mut sync = Command::cargo_bin("qdev").unwrap();
+    sync.current_dir(root)
+        .args(["sync", "--json"])
+        .assert()
+        .success();
+
+    assert!(root.join("local/cache/cache.sqlite").is_file());
+    assert!(
+        !root.join(".qdev/cache/cache.sqlite").exists(),
+        "a second, abandoned database must not exist"
+    );
+
+    let gitignore = fs::read_to_string(root.join(".gitignore")).unwrap();
+    assert!(
+        gitignore.lines().any(|l| l.trim() == "local/cache/"),
+        "the cache every command uses must be gitignored, got: {gitignore}"
+    );
+    assert!(
+        gitignore.lines().any(|l| l.trim() == ".qdev/cache/"),
+        "the committed ignore file must stay meaningful to everyone else, got: {gitignore}"
+    );
+}
+
+/// `specs_dir` and `state_dir` select committed content, so they are a project decision. Either
+/// key in the local file is a schema error naming the key and the file — from `init` too, which
+/// is dispatched through the same loader as everything else.
+#[test]
+fn test_local_specs_dir_is_a_schema_error_for_init_and_for_other_commands() {
+    for key in ["specs_dir", "state_dir"] {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::write(root.join("qdev.toml"), "[project]\nname = \"Demo\"\n").unwrap();
+        fs::write(
+            root.join(".qdev.local.toml"),
+            format!("[storage]\n{key} = \"elsewhere\"\n"),
+        )
+        .unwrap();
+
+        let mut cmd = Command::cargo_bin("qdev").unwrap();
+        let assert = cmd
+            .current_dir(root)
+            .args([
+                "init",
+                "--non-interactive",
+                "--name",
+                "Demo",
+                "--developer",
+                "alice",
+                "--team",
+                "core",
+                "--json",
+            ])
+            .assert()
+            .failure()
+            .code(2);
+        let output = assert.get_output();
+        let val: Value =
+            serde_json::from_str(std::str::from_utf8(&output.stdout).unwrap()).unwrap();
+        assert_eq!(val["error"]["details"]["key"], format!("storage.{key}"));
+        assert_eq!(val["error"]["details"]["file"], ".qdev.local.toml");
+
+        let mut other = Command::cargo_bin("qdev").unwrap();
+        other
+            .current_dir(root)
+            .args(["config", "show"])
+            .assert()
+            .failure()
+            .code(2)
+            .stderr(predicate::str::contains(key))
+            .stderr(predicate::str::contains(".qdev.local.toml"));
+    }
+}
+
+/// An unparseable configuration file is the same refusal from `init` as from every other command
+/// (M7): the tool's own remedy no longer reports success on a workspace no command can use, and
+/// it does not scaffold the default layout over a configured one.
+#[test]
+fn test_unparseable_config_refuses_init_without_scaffolding() {
+    for file in ["qdev.toml", ".qdev.local.toml"] {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::write(root.join("qdev.toml"), "[project]\nname = \"Demo\"\n").unwrap();
+        fs::write(
+            root.join(file),
+            "[project]\nname = \"Demo\"\nthis is not toml = = =\n",
+        )
+        .unwrap();
+
+        let mut cmd = Command::cargo_bin("qdev").unwrap();
+        cmd.current_dir(root)
+            .args([
+                "init",
+                "--non-interactive",
+                "--name",
+                "Demo",
+                "--developer",
+                "alice",
+                "--team",
+                "core",
+            ])
+            .assert()
+            .failure()
+            .code(2)
+            .stderr(predicate::str::contains(file));
+
+        assert!(!root.join(".qdev").exists(), "nothing may be scaffolded");
+        assert!(!root.join("docs").exists(), "nothing may be scaffolded");
+        assert!(
+            !root.join(".gitignore").exists(),
+            "nothing may be scaffolded"
+        );
+    }
+}
+
+/// A cache stamped by a newer binary is refused by `init` too, and the cache it inspected is the
+/// one the commands use — not an abandoned default-layout file that happens to look healthy.
+#[test]
+fn test_newer_cache_in_configured_layout_refuses_init() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    fs::write(root.join("qdev.toml"), "[project]\nname = \"Demo\"\n").unwrap();
+    fs::write(
+        root.join(".qdev.local.toml"),
+        "[storage]\ncache_dir = \"local/cache\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("local/cache")).unwrap();
+    {
+        let conn = rusqlite::Connection::open(root.join("local/cache/cache.sqlite")).unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {};",
+            CACHE_SCHEMA_VERSION + 1
+        ))
+        .unwrap();
+    }
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args([
+            "init",
+            "--non-interactive",
+            "--name",
+            "Demo",
+            "--developer",
+            "alice",
+            "--team",
+            "core",
+            "--yes",
+        ])
+        .assert()
+        .failure()
+        .code(5)
+        .stderr(predicate::str::contains("schema_version_mismatch"));
+}
+
+/// Everything `init` reports it created is a path it actually created (L2): both the JSON payload
+/// and the human output are rendered from the resolved layout.
+#[test]
+fn test_init_reports_only_the_configured_layout() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    fs::write(
+        root.join("qdev.toml"),
+        "[project]\nname = \"Configured\"\n\n[storage]\nspecs_dir = \"planning/specs\"\nstate_dir = \"planning/state\"\ncache_dir = \"var/cache\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "init",
+            "--non-interactive",
+            "--name",
+            "Configured",
+            "--developer",
+            "alice",
+            "--team",
+            "core",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .code(0);
+
+    let output = assert.get_output();
+    let val: Value = serde_json::from_str(std::str::from_utf8(&output.stdout).unwrap()).unwrap();
+    for field in ["created_files", "created_directories"] {
+        for path in val[field].as_array().unwrap() {
+            let path = path.as_str().unwrap();
+            assert!(
+                root.join(path).exists(),
+                "{field} names {path}, which does not exist on disk"
+            );
+        }
+    }
+    assert!(val["created_files"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("var/cache/cache.sqlite".to_string())));
+    assert_eq!(val["storage"]["cache_dir"], "var/cache");
+
+    // Text output names the configured layout and nothing outside it.
+    let mut text_cmd = Command::cargo_bin("qdev").unwrap();
+    let text_assert = text_cmd
+        .current_dir(root)
+        .args([
+            "init",
+            "--non-interactive",
+            "--name",
+            "Configured",
+            "--developer",
+            "alice",
+            "--team",
+            "core",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(text_assert.get_output().stdout.clone()).unwrap();
+    // The gate directory follows the *project* cache directory's parent, which this workspace
+    // configures as `var/` — the rule story 1.2's `[storage]` amendment shipped.
+    assert!(
+        stdout.contains("✔ var/cache/ (gitignored), var/gates/"),
+        "got: {stdout}"
+    );
+    assert!(stdout.contains("✔ planning/specs/{prd,requirements,epics,stories,adrs,hazards}"));
+    assert!(stdout.contains(
+        "✔ planning/state/{sprints,releases,dw,decisions,scratch,evidence,baselines,soup}"
+    ));
+    assert!(
+        !stdout.contains("docs/specs") && !stdout.contains(".qdev/cache"),
+        "the default layout must not be reported, got: {stdout}"
+    );
+}
+
+/// Relocating the cache *after* `init` — the ordering the story's own verification note
+/// prescribes — leaves the live cache outside `.gitignore` until `init` is re-run. `.gitignore` is
+/// a committed file, so no ordinary command may edit it; re-running `init` is the remedy, and
+/// this pins that it works and is idempotent.
+#[test]
+fn test_relocating_the_cache_after_init_is_repaired_by_re_running_init() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args([
+            "init",
+            "--non-interactive",
+            "--name",
+            "Demo",
+            "--developer",
+            "alice",
+            "--team",
+            "core",
+        ])
+        .assert()
+        .success();
+
+    let local = root.join(".qdev.local.toml");
+    let existing = fs::read_to_string(&local).unwrap();
+    fs::write(
+        &local,
+        format!("{existing}\n[storage]\ncache_dir = \"local/cache\"\n"),
+    )
+    .unwrap();
+
+    // A plain command creates the relocated cache and does not touch `.gitignore`.
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root).args(["status"]).assert().success();
+    assert!(root.join("local/cache/cache.sqlite").is_file());
+    let ignore = fs::read_to_string(root.join(".gitignore")).unwrap();
+    assert!(
+        !ignore.contains("local/cache/"),
+        "no ordinary command may edit the committed .gitignore: {ignore}"
+    );
+
+    // Re-running `init` is the remedy: it adds the entry, reports the workspace as already
+    // initialised, and does not duplicate what is already there.
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "init",
+            "--non-interactive",
+            "--name",
+            "Demo",
+            "--developer",
+            "alice",
+            "--team",
+            "core",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["already_initialized"], true);
+
+    let ignore = fs::read_to_string(root.join(".gitignore")).unwrap();
+    assert!(
+        ignore.contains("local/cache/"),
+        "re-running init must cover the relocated cache: {ignore}"
+    );
+    assert_eq!(
+        ignore.matches(".qdev.local.toml").count(),
+        1,
+        "entries must not be duplicated by a re-run: {ignore}"
+    );
+
+    // And the config files are not re-reported as created on a re-run.
+    let created: Vec<&str> = val["created_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        !created.contains(&"qdev.toml") && !created.contains(&".qdev.local.toml"),
+        "a re-run creates neither config file: {created:?}"
+    );
+}

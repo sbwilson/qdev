@@ -277,9 +277,9 @@ require_clean_tree_in_scope = true
 max_integration_staleness_commits = 20   # story branch merge-base freshness
 
 [storage]
-specs_dir = "docs/specs"
-state_dir = "docs/state"
-cache_dir = ".qdev/cache"
+specs_dir = "docs/specs"                 # project-only: committed content
+state_dir = "docs/state"                 # project-only: committed content
+cache_dir = ".qdev/cache"                # may be relocated in .qdev.local.toml
 
 [[modules]]
 id = "foundation"
@@ -368,9 +368,34 @@ editor = "cursor"
 
 [gates]
 skip = ["warning-count"]                  # local skips are recorded in evidence as skipped
+
+[storage]
+cache_dir = "local/cache"                 # cache_dir only; see below
 ```
 
 Local values override project values key by key. Absence of the local file is not an error; identity falls back to `git config user.email`.
+
+`[storage]` is the one section whose keys are not all locally overridable. `specs_dir` and
+`state_dir` select where committed content lives, so they are a project decision and may be set
+only in `qdev.toml`; either key in `.qdev.local.toml` is a schema violation (exit 2, naming the
+key and the file). `cache_dir` names a machine-local, rebuildable artifact, so it may be
+relocated locally. Because `.gitignore` is committed, `qdev init` then writes ignore entries for
+the project cache directory **and** for the locally configured one — the relocated cache is never
+untracked merely by luck, and the committed file stays meaningful to everyone else.
+
+Two consequences of `.gitignore` being committed, both deliberate:
+
+- **Relocate your cache, then re-run `qdev init`.** No ordinary command edits `.gitignore`, so a
+  `cache_dir` set *after* initialisation is live before it is ignored. `qdev init` is idempotent
+  and adds the entry.
+- **Entries accumulate and are never pruned.** A directory that stops being anyone's cache keeps
+  its line, and developers who choose different local caches each add one. Stale entries are
+  harmless — they ignore nothing — but nothing removes them.
+
+Every `[storage]` value names a directory inside the workspace: an empty value, an absolute path,
+or one containing `..` is a schema violation (exit 2) from every command. Values are normalized
+once by the loader — surrounding whitespace and a trailing `/` are stripped — so `init` and every
+other command resolve the same directory.
 
 ---
 
@@ -397,6 +422,14 @@ $ qdev init --non-interactive --name Qubric --developer simon --team core-platfo
 ```
 
 Re-running `init` in an initialised workspace checks the cache schema version and migrates with confirmation (or `--yes`).
+
+`init` resolves `[storage]` through the same configuration loader as every other command, so the
+paths above are the *configured* layout rather than fixed defaults: the directories it creates,
+the cache it creates and stamps, the `.gitignore` entries it writes, and every path in
+`created_files` / `created_directories` come from that one answer, and the payload also reports it
+as `storage` and `qdev_dir`. An unparseable or invalid `qdev.toml` or `.qdev.local.toml` is
+therefore the same exit-2 usage error from `init` as from everything else, and nothing is
+scaffolded.
 
 ### `qdev install`
 
