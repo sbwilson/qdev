@@ -301,6 +301,11 @@ fn test_story_allocation_sequential() {
     assert_eq!(id, Identifier::Story { epic: 12, story: 3 });
 }
 
+/// The allocator is monotonic per epic, not lowest-free: it takes one past the highest number in
+/// the shared in-use id set. It reads that set rather than its own private scan, which is what
+/// makes `create story` and `--fix-ids` unable to disagree about which ids are *taken* — they
+/// still allocate differently, and that difference is pinned in
+/// `test_story_allocator_never_returns_an_id_the_shared_set_contains`.
 #[test]
 fn test_story_allocation_with_gaps() {
     let tmp = tempdir().unwrap();
@@ -310,6 +315,8 @@ fn test_story_allocation_with_gaps() {
     fs::write(stories_dir.join("E12S1.md"), "").unwrap();
     fs::write(stories_dir.join("E12S4.md"), "").unwrap();
 
+    // One past the highest, not the lowest free: a gap is left rather than a deleted story's id
+    // being handed out again, because an id is a citation target (AD-7).
     let id = allocate_next_story_id(tmp.path(), 12).expect("Allocation should succeed");
     assert_eq!(id, Identifier::Story { epic: 12, story: 5 });
 }
@@ -567,6 +574,10 @@ fn test_hex_allocation_collision_with_underscore_slugged_files() {
     );
 }
 
+/// A story numbered at `u32::MAX` no longer overflows the allocator: it is one member of the
+/// in-use set like any other, so one past it does not exist. The
+/// One past the highest is unrepresentable when the highest is `u32::MAX`, so allocation refuses
+/// rather than wrapping.
 #[test]
 fn test_story_allocation_overflow() {
     let tmp = tempdir().unwrap();
@@ -575,10 +586,10 @@ fn test_story_allocation_overflow() {
 
     fs::write(stories_dir.join("E12S4294967295.md"), "").unwrap();
 
+    // The highest member of the space is in use, so one past it does not exist.
     let res = allocate_next_story_id(tmp.path(), 12);
-    assert!(res.is_err());
-    let err = res.unwrap_err();
-    assert!(err.to_string().contains("overflow"));
+    let err = res.expect_err("allocation past the id space must fail");
+    assert_eq!(err.code(), "id_space_exhausted");
 }
 
 #[test]
@@ -593,4 +604,173 @@ fn test_story_allocation_ignores_directory_entries() {
 
     let id = allocate_next_story_id(tmp.path(), 12).expect("Allocation should succeed");
     assert_eq!(id, Identifier::Story { epic: 12, story: 2 });
+}
+
+// ---------------------------------------------------------------------------
+// One rule for which ids are in use
+// ---------------------------------------------------------------------------
+
+/// Writes a minimal entity file declaring `id`, creating parent directories.
+fn write_entity(path: &std::path::Path, id: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        path,
+        format!(
+            "---\nid: {id}\ntitle: \"Entity {id}\"\nstatus: draft\nversion: 1\n\
+             created_by:\n  type: human\n  id: simon\n\
+             updated_by:\n  type: human\n  id: simon\n---\n\n## Acceptance Criteria\n- AC.\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// A workspace shaped like every row of the in-use matrix at once, so one assertion covers the
+/// whole rule rather than one instance of it.
+fn matrix_workspace(root: &std::path::Path) {
+    let stories = root.join("docs/specs/stories");
+    // Declared, in a subdirectory hydration reads recursively.
+    write_entity(&stories.join("sub/E1S1.md"), "E1S1");
+    // Declared, in a file whose name differs from its id only in case.
+    write_entity(&stories.join("e1s2-buffer.md"), "E1S2");
+    // Declared, with an extension hydration matches case-insensitively.
+    write_entity(&stories.join("E1S3.MD"), "E1S3");
+    // Carried by the name only: the frontmatter will not parse, so nothing is declared.
+    fs::write(stories.join("E1S4.md"), "---\nid: E1S4\nbroken: [\n---\n").unwrap();
+    // A state-directory id, which is in use exactly like a spec-directory one.
+    write_entity(&root.join("docs/state/decisions/DEC-2b91.md"), "DEC-2b91");
+    // Not an id at all, and must not become one.
+    fs::write(stories.join("README.md"), "notes\n").unwrap();
+}
+
+/// The in-use set is the union the rule names: ids declared in frontmatter anywhere under either
+/// hydrated tree, plus ids carried by file names. Recursive, extension matched case-insensitively
+/// (`E1S3.MD` is read by hydration, so its id is taken), and a file whose frontmatter will not
+/// parse still occupies the id its name carries.
+#[test]
+fn test_ids_in_use_unions_declared_and_carried_ids_across_both_trees() {
+    let tmp = tempdir().unwrap();
+    matrix_workspace(tmp.path());
+
+    let storage = qdev_core::StorageConfig::default();
+    let used = qdev_core::ids_in_use(tmp.path(), &storage, None).expect("scan should succeed");
+
+    for id in ["E1S1", "E1S2", "E1S3", "E1S4", "DEC-2b91"] {
+        assert!(used.contains(id), "'{id}' must be in use: {used:?}");
+    }
+    assert!(
+        !used.contains("README"),
+        "a file name that carries no id must not mint one: {used:?}"
+    );
+}
+
+/// The invariant, not the instances: `qdev create story`'s allocator keeps no scan of its own, so
+/// whatever the shared in-use set contains, the allocator never returns a member of it. Asserted
+/// against the shared function directly rather than inferred from the two commands' outputs.
+///
+/// The fixture is deliberately **gapped**. A contiguous one (`E1S1..E1S4`) makes monotonic and
+/// lowest-free allocation give the same answer, so it cannot tell the invariant from a
+/// coincidence — which is exactly how the first version of this test passed while asserting
+/// something the allocator does not do.
+#[test]
+fn test_story_allocator_never_returns_an_id_the_shared_set_contains() {
+    let tmp = tempdir().unwrap();
+    matrix_workspace(tmp.path());
+    let stories = tmp.path().join("docs/specs/stories");
+    // A gap at E1S5/E1S6 with E1S7 taken, so the two sequences diverge.
+    write_entity(&stories.join("E1S7.md"), "E1S7");
+
+    let storage = qdev_core::StorageConfig::default();
+    let used = qdev_core::ids_in_use(tmp.path(), &storage, None).expect("scan should succeed");
+    let allocated = qdev_core::allocate_next_story_id_in(tmp.path(), &storage, 1, None)
+        .expect("Allocation should succeed");
+
+    // The invariant.
+    assert!(
+        !used.contains(&allocated.to_string()),
+        "the allocator returned {} which the shared set contains: {:?}",
+        allocated,
+        used
+    );
+
+    // And the sequence, pinned separately so the two are never conflated again: `create story`
+    // is monotonic per epic (one past the highest), while `next_available_id` — which `--fix-ids`
+    // uses, because a renumber must land somewhere free — is lowest-free. On this gapped
+    // fixture they differ, which is the point of asserting them apart.
+    assert_eq!(allocated, Identifier::Story { epic: 1, story: 8 });
+    let lowest_free =
+        qdev_core::next_available_id(&Identifier::Story { epic: 1, story: 1 }, &used).unwrap();
+    assert_eq!(lowest_free, Identifier::Story { epic: 1, story: 5 });
+    assert_ne!(
+        allocated, lowest_free,
+        "a gapped fixture must make the two sequences differ, or this test proves nothing"
+    );
+}
+
+/// The allocator refuses rather than colliding when it cannot allocate: `next_available_id`
+/// rejects a kind whose ids are not sequential, and every reachable story number being taken is
+/// `id_space_exhausted`, never a returned duplicate.
+#[test]
+fn test_shared_set_never_yields_an_id_it_contains() {
+    let tmp = tempdir().unwrap();
+    let stories = tmp.path().join("docs/specs/stories");
+    // Two spellings of one id, neither of which the old scan saw.
+    write_entity(&stories.join("nested/deeper/E9S1.md"), "E9S1");
+    write_entity(&stories.join("e9s2_slug.md"), "E9S2");
+
+    let storage = qdev_core::StorageConfig::default();
+    let used = qdev_core::ids_in_use(tmp.path(), &storage, None).unwrap();
+    let allocated = qdev_core::allocate_next_story_id_in(tmp.path(), &storage, 9, None).unwrap();
+    assert_eq!(allocated, Identifier::Story { epic: 9, story: 3 });
+    assert!(!used.contains(&allocated.to_string()));
+}
+
+/// Allocation works in a bare directory: no workspace, no cache, filesystem alone.
+#[test]
+fn test_allocation_works_without_a_workspace_or_cache() {
+    let tmp = tempdir().unwrap();
+    let id = qdev_core::allocate_next_story_id_in(
+        tmp.path(),
+        &qdev_core::StorageConfig::default(),
+        4,
+        None,
+    )
+    .expect("Allocation should succeed with no workspace at all");
+    assert_eq!(id, Identifier::Story { epic: 4, story: 1 });
+}
+
+/// The filename half of the rule, spelled out: an id may itself contain `-`, a slug may follow it
+/// after `-` or `_`, a zero-padded or lower-cased name still carries the id it denotes, and a name
+/// that carries no id yields none.
+#[test]
+fn test_id_carried_by_filename() {
+    use qdev_core::id_carried_by_filename as carried;
+    assert_eq!(carried("E1S1.md").as_deref(), Some("E1S1"));
+    assert_eq!(carried("E1S1-buffer-layout.md").as_deref(), Some("E1S1"));
+    assert_eq!(carried("E1S1_buffer.md").as_deref(), Some("E1S1"));
+    assert_eq!(carried("e1s1-buffer.md").as_deref(), Some("E1S1"));
+    assert_eq!(carried("E12S01.md").as_deref(), Some("E12S1"));
+    assert_eq!(carried("AD-7.md").as_deref(), Some("AD-7"));
+    assert_eq!(
+        carried("AD-7-context-and-decision.md").as_deref(),
+        Some("AD-7")
+    );
+    assert_eq!(carried("FR-101.md").as_deref(), Some("FR-101"));
+    assert_eq!(carried("DW-7f3a.md").as_deref(), Some("DW-7f3a"));
+    assert_eq!(carried("E1.md").as_deref(), Some("E1"));
+    assert_eq!(carried("README.md"), None);
+    assert_eq!(carried("sprint-5.md"), None);
+    assert_eq!(carried("login-flow.md"), None);
+    // The extension is matched case-insensitively, unlike the *resolution* rule: this function
+    // answers "does this name occupy an id?", and an `E1S1.MD` file occupies it whether or not
+    // the write path would resolve the name. Requiring lowercase left a `.MD` file with
+    // unparseable frontmatter in neither half of the union.
+    assert_eq!(carried("E1S1.MD").as_deref(), Some("E1S1"));
+    assert_eq!(carried("E1S1.Md").as_deref(), Some("E1S1"));
+    // Mixed-case grammar: planning ids are uppercase, the hex suffix of a `DW-`/`DEC-` id is
+    // lowercase and only that spelling parses.
+    assert_eq!(carried("dw-7f3a.md").as_deref(), Some("DW-7f3a"));
+    assert_eq!(carried("DW-7f3a.md").as_deref(), Some("DW-7f3a"));
+    assert_eq!(carried("dec-0a1b-note.md").as_deref(), Some("DEC-0a1b"));
+    // Still not an id, whatever the case.
+    assert_eq!(carried("notes.MD"), None);
 }

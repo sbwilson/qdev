@@ -131,7 +131,7 @@ Per **AD-7**, IDs never encode a sprint and are immutable once committed.
 | Deferred work / Decision | `DW-{hex4+}`, `DEC-{hex4+}` | Random; length grows on collision |
 | Citation | `[E12S4]`, `[AD-43]`, `[DW-7f3a]`, `[E12S4/NG-2]` | Language-appropriate comment prefix |
 
-Sequential planning IDs are allocated by `qdev create`, which scans existing files. `qdev validate` reports duplicates arising from concurrent planning on separate branches and offers a guided renumber that rewrites citations and renames the file to carry the new id, which is the only sanctioned rename. Sub-stories are expressed with the `extends` relation, not with suffixes.
+Sequential planning IDs are allocated by `qdev create`, which takes the lowest number the workspace's [in-use id set](#identity-in-use) leaves free. `qdev validate` reports duplicates arising from concurrent planning on separate branches and offers a guided renumber that rewrites citations and renames the file to carry the new id, which is the only sanctioned rename. Sub-stories are expressed with the `extends` relation, not with suffixes.
 
 ---
 
@@ -269,6 +269,39 @@ id or that lives outside every entity directory — readable, since hydration wa
 recursively, but not writable. Two files matching one id is a usage error naming both. The only
 sanctioned rename is `qdev validate --fix-ids`, which renames as it renumbers so the renumbered
 entity is immediately writable, and reports the move in its payload.
+
+<a id="identity-in-use"></a>
+
+### In use: one rule for which ids are taken
+
+The rule above answers "which file is entity `X`?". Its completion answers "is `X` already
+taken?", and **one function answers it for everything that allocates an id** — `qdev create
+story` and `qdev validate --fix-ids` alike. Neither keeps a scan of its own: four components used
+to answer this question and the allocator answered differently (one flat directory,
+case-sensitively, filenames only), so `create story` handed out ids other files already declared.
+
+An id is in use if it is any of three things, because each is a way a workspace already owns it:
+
+- **declared** — the frontmatter `id` of any file under `specs_dir` or `state_dir`, recursively,
+  matching the `.md` extension case-insensitively: exactly the set hydration reads, so an id qdev
+  can read is an id qdev treats as taken;
+- **carried** — the id a file *name* in those trees carries under the convention above. A file
+  whose frontmatter will not parse declares nothing yet still occupies its name, and allocating
+  that id would refuse the create with `file_exists` for an id the user never chose;
+- **cached** — any id the cache holds for a hydrated entity, so an id survives its file becoming
+  unreadable. The cache is a union *member*, not the source: `qdev create story` works in a bare
+  directory with no cache at all, from the filesystem alone.
+
+`qdev create story` allocates one past the highest number its epic has used — never a lower free one, because an id is a citation target and AD-7 calls them immutable once committed, so a gap is left deliberately. `qdev validate --fix-ids` takes the lowest free number instead (`next_available_id`), because a renumber must land somewhere free. Both read the same in-use set, and
+refuses rather than colliding when it cannot. Two files *carrying* one id in their names without
+either declaring it is an off-convention name, not a collision — `duplicate_planning_id` still
+reports declarations only.
+
+Because the whole in-use set is checked, `--fix-ids` can meet a duplicate whose file lives outside
+its kind's directory. It refuses that entry, records it as skipped and names the expected path:
+renumbering in place would write a correctly named file in a directory no writer resolves — a
+repair it did not achieve — and moving a user's file is not a decision the tool takes silently.
+The `entity_file_off_convention` warning on the same file already names the destination.
 
 An entity's *kind* is resolved by one rule too — frontmatter `kind:`, then the directory, then
 the identifier grammar, then `Story` — used by hydration and by every writer, so a write

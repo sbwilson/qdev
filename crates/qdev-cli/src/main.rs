@@ -866,13 +866,38 @@ fn handle_create_story(
     // layout here while the sweep reads `storage.specs_dir` meant a non-default `[storage]`
     // silently wrote every created story somewhere no read command would ever look.
     let storage = &annotated_config.config.storage;
-    let story_id = match qdev_core::allocate_next_story_id_in(&root, storage, epic_num) {
+
+    // The cache is a union member of the in-use id set, not its source: an id belonging to a
+    // hydrated entity is taken even if its file has since become unreadable. Opened only inside
+    // an initialised workspace — `qdev create story` works in a bare directory, and opening the
+    // store there would create a stray, schema-less `cache.sqlite`. `main` has already run
+    // `ensure_cache` for every command in an initialised workspace, so a cache that reaches
+    // here is a healthy one.
+    // The cache is a *union member* of the in-use set, never a requirement: `create story` has
+    // always worked in a bare directory, and a workspace whose cache cannot be opened is exactly
+    // the workspace where refusing to create anything is least helpful. An unopenable cache
+    // falls back to the filesystem half, which is the conservative answer — it can only miss
+    // ids whose files are gone.
+    let query_store = if ensure_query_workspace(&root).is_ok() {
+        open_query_store(&root, annotated_config).ok()
+    } else {
+        None
+    };
+    let story_id = match qdev_core::allocate_next_story_id_in(
+        &root,
+        storage,
+        epic_num,
+        query_store.as_ref().map(|s| s as &dyn Store),
+    ) {
         Ok(id) => id,
         Err(e) => {
             let _ = output.emit_error(&e);
             return e.exit_code();
         }
     };
+    // Released before `create_story` takes the advisory lock and writes: the allocator is a
+    // reader, and holding a connection open past it serves nothing.
+    drop(query_store);
 
     let create_opts = qdev_core::StoryCreateOptions {
         workspace_root: root,
@@ -2213,19 +2238,20 @@ fn handle_fix_ids(
         }
     };
 
-    // Seed the in-use id set from the cache as well as the on-disk scan. The scan covers the
-    // directories hydration reads, so allocating from it alone can still hand out an id that
-    // belongs to an entity living outside them — minting a fresh duplicate while fixing one.
-    let mut used_ids = scan.all_ids.clone();
-    match open_query_store(root, annotated_config)
-        .and_then(|store| store.list_entities(&qdev_core::EntityFilter::default()))
+    // The in-use id set comes from `ids_in_use_from_scan` — the one authority, the same
+    // function `qdev create story`'s allocator asks — rather than from a seeding recipe kept
+    // here. Allocating from the on-disk scan alone can still hand out an id that belongs to a
+    // hydrated entity whose file has become unreadable, minting a fresh duplicate while fixing
+    // one; the two allocators having their own recipes is what let them diverge.
+    let mut used_ids = match open_query_store(root, annotated_config)
+        .and_then(|store| qdev_core::ids_in_use_from_scan(&scan, Some(&store)))
     {
-        Ok(entities) => used_ids.extend(entities.into_iter().map(|e| e.id)),
+        Ok(ids) => ids,
         Err(e) => {
             let _ = output.emit_error(&e);
             return e.exit_code();
         }
-    }
+    };
 
     // --- Plan phase: allocate ids and collect confirmations, before taking the write lock. ---
     //
@@ -2241,6 +2267,38 @@ fn handle_fix_ids(
     let mut keepers_to_rehydrate: Vec<String> = Vec::new();
 
     for (old_id, paths) in &scan.groups {
+        // The keeper is chosen by sort order, which says nothing about whether it satisfies the
+        // identity rule. An off-convention *keeper* would otherwise escape the refusal
+        // altogether: the group's other files get renumbered, the run reports a successful
+        // repair, and the id is left owned by a file no writer can resolve — the exact outcome
+        // Option A exists to forbid. So the keeper is checked first, and a group whose keeper is
+        // off-convention is refused whole.
+        if let Some(keeper) = paths.first() {
+            match off_convention_directory_target(root, storage, keeper, old_id) {
+                Ok(Some(target)) => {
+                    eprintln!(
+                        "Skipping the '{}' group: its keeper '{}' is not in its kind directory, \
+                         so renumbering the others would leave '{}' owned by a file no writer \
+                         can resolve. Move it to '{}' first.",
+                        old_id, keeper, old_id, target.expected_dir_path
+                    );
+                    for path in paths.iter().skip(1) {
+                        skipped.push(path.clone());
+                    }
+                    skipped.push(keeper.clone());
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    if !cli.json {
+                        eprintln!("Skipping {}: {}", keeper, e);
+                    }
+                    skipped.push(keeper.clone());
+                    continue;
+                }
+            }
+        }
+
         // The first (lexicographically sorted) path keeps the id; every other file declaring it
         // is offered a renumber.
         for path in paths.iter().skip(1) {
@@ -2278,6 +2336,36 @@ fn handle_fix_ids(
                 }
             };
             let new_id = new_identifier.to_string();
+
+            // Option A (Decision 2026-09-10, Simon): a duplicate whose file is not in its kind's
+            // directory is refused, not repaired. Renumbering it in place would report a repair
+            // it did not achieve — the entity would still be unresolvable by every writer — and
+            // moving a user's file across directories is not a decision the tool takes silently.
+            // The expected path is named here, as the `entity_file_off_convention` warning on the
+            // same file already names its destination.
+            match off_convention_directory_target(root, storage, path, &new_id) {
+                Ok(Some(expected)) => {
+                    // On stderr in both modes, unlike the sibling skips above: the expected path
+                    // is the actionable half of this refusal, and stderr is not the JSON
+                    // document, so naming it cannot make stdout unparseable.
+                    eprintln!(
+                        "Skipping {}: repairing it would write '{}', which is outside the \
+                         directory every writer resolves entities in; move the file to '{}' \
+                         and re-run",
+                        path, expected.in_place, expected.expected_dir_path
+                    );
+                    skipped.push(path.clone());
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    if !cli.json {
+                        eprintln!("Skipping {}: {}", path, e);
+                    }
+                    skipped.push(path.clone());
+                    continue;
+                }
+            }
 
             if interactivity.is_interactive() && !yes {
                 let prompt = format!(
@@ -2570,6 +2658,71 @@ struct FixIdsPayload {
     /// written before it stopped.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<FixIdsError>,
+}
+
+/// Where a refused renumber's file would have landed, and where it belongs instead.
+struct OffConventionTarget {
+    /// The path renumbering in place would have written — off-convention, so unwritable.
+    in_place: String,
+    /// The path in the kind's own directory the file must be moved to for a repair to work.
+    expected_dir_path: String,
+}
+
+/// `Some(target)` when `rel_path` holds a duplicate that lives outside its kind's directory, so
+/// `--fix-ids` must refuse it (Decision 2026-09-10, Simon: option A).
+///
+/// Renumbering such a file in place writes a correctly named file in the wrong directory: still
+/// readable, because hydration walks both trees recursively, and still unresolvable by every
+/// writer, which resolves an entity in its kind's directory only. Reporting that as a repair
+/// would be a claim the run did not achieve — the class of defect `--fix-ids`' rename was added
+/// to end. Moving the file is not a decision the tool takes silently, so the entry is skipped
+/// with both paths named.
+///
+/// Kind comes from `kind_for_write`, hydration's own rule (frontmatter `kind:` first), so this
+/// judges the file by the directory the following sweep will expect it in.
+fn off_convention_directory_target(
+    root: &std::path::Path,
+    storage: &qdev_core::StorageConfig,
+    rel_path: &str,
+    new_id: &str,
+) -> Result<Option<OffConventionTarget>, QdevError> {
+    let rel_slashed = rel_path.replace('\\', "/");
+    let abs_path = root.join(&rel_slashed);
+    let content = std::fs::read_to_string(&abs_path).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "io_error",
+            format!("Failed to read '{}': {}", abs_path.display(), e),
+        )
+    })?;
+    let kind = qdev_core::kind_for_write(&abs_path, &content, qdev_core::EntityKind::Story);
+    let kind_dir = qdev_core::directory_for_kind(Some(storage), kind)
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
+
+    let (dir, old_name) = match rel_slashed.rsplit_once('/') {
+        Some((dir, name)) => (dir.to_string(), name.to_string()),
+        None => (String::new(), rel_slashed.clone()),
+    };
+    if dir == kind_dir {
+        return Ok(None);
+    }
+
+    let existing_id = qdev_core::extract_frontmatter(&content)
+        .ok()
+        .and_then(|fm| fm.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .unwrap_or_default();
+    let new_name = qdev_core::renamed_file_name(&old_name, &existing_id, new_id);
+    let in_place = if dir.is_empty() {
+        new_name.clone()
+    } else {
+        format!("{}/{}", dir, new_name)
+    };
+    Ok(Some(OffConventionTarget {
+        in_place,
+        expected_dir_path: format!("{}/{}", kind_dir, old_name),
+    }))
 }
 
 /// Rewrites one duplicate file's frontmatter `id`, bumping `version`/`updated_by` via the same

@@ -26,9 +26,15 @@ const WARNING_SEVERITY: &str = "warning";
 /// workspace).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DuplicateIdScan {
-    /// `(id, sorted paths declaring it)`, sorted by id, for every id declared 2+ times.
+    /// `(id, sorted paths declaring it)`, sorted by id, for every id **declared** 2+ times.
+    /// Only frontmatter declarations count as duplicates: two files can carry one id in their
+    /// names without either declaring it, and that is an off-convention name, not a collision.
     pub groups: Vec<(String, Vec<String>)>,
-    /// Every distinct planning id found in the scanned directories, duplicated or not.
+    /// The filesystem half of the in-use id set: every id any scanned file *declares* in its
+    /// frontmatter, unioned with every id a scanned file *name* carries. Both are ways a
+    /// workspace already owns an id — and a file whose frontmatter will not parse still
+    /// occupies its name. Use [`ids_in_use`] rather than this field directly unless the cache
+    /// is genuinely unavailable.
     pub all_ids: HashSet<String>,
 }
 
@@ -54,7 +60,17 @@ pub fn scan_duplicate_planning_ids(
     files.dedup();
 
     let mut by_id: HashMap<String, Vec<String>> = HashMap::new();
+    // Ids carried by file names, collected alongside the declared ones. A name is scanned even
+    // when the file cannot be read or its frontmatter cannot be parsed, which is exactly the
+    // case the declared half misses: the file still occupies its name, so allocating that id
+    // would produce a `file_exists` refusal for an id the user never chose.
+    let mut carried_ids: HashSet<String> = HashSet::new();
     for file in &files {
+        if let Some(name) = file.file_name().and_then(|n| n.to_str()) {
+            if let Some(id) = crate::write::id_carried_by_filename(name) {
+                carried_ids.insert(id);
+            }
+        }
         let content = match std::fs::read_to_string(file) {
             Ok(c) => c,
             Err(_) => continue,
@@ -73,7 +89,8 @@ pub fn scan_duplicate_planning_ids(
         }
     }
 
-    let all_ids: HashSet<String> = by_id.keys().cloned().collect();
+    let mut all_ids: HashSet<String> = by_id.keys().cloned().collect();
+    all_ids.extend(carried_ids);
     let mut groups: Vec<(String, Vec<String>)> = by_id
         .into_iter()
         .filter(|(_, paths)| paths.len() > 1)
@@ -118,6 +135,61 @@ pub fn find_duplicate_planning_ids(
         }
     }
     Ok(findings)
+}
+
+/// **The one authority on which ids a workspace already owns.** Every caller that allocates an
+/// id — `qdev create story` ([`crate::id::allocate_next_story_id_in`]) and
+/// `qdev validate --fix-ids` — asks this for the id space. They then allocate differently, and
+/// deliberately: `--fix-ids` takes the lowest free number via
+/// [`next_available_id`]. Neither keeps a scan of its own, so the two allocators cannot disagree
+/// about what is taken.
+///
+/// The answer is a union of three memberships, because each is a way a workspace can already own
+/// an id:
+///
+/// 1. **Declared** — the frontmatter `id` of any file under `specs_dir` or `state_dir`,
+///    recursively, matching the `.md` extension case-insensitively: exactly the set hydration
+///    reads (`collect_markdown_files`), so an id qdev can read is an id qdev considers taken.
+/// 2. **Carried** — the id any of those file *names* carries ([`crate::write::id_carried_by_filename`]).
+///    A file whose frontmatter will not parse declares nothing but still occupies its name, and
+///    `create_story`'s own occupancy check would refuse the create with `file_exists` for an id
+///    the user never chose.
+/// 3. **Cached** — every id the store holds for a hydrated entity, so an id survives its file
+///    becoming unreadable. The cache is a union *member*, not the source: `store` is `None`
+///    outside an initialised workspace, where `qdev create story` must still work from the
+///    filesystem alone.
+///
+/// Four components used to answer "does this id already exist?" and the allocator answered
+/// differently — one flat directory, case-sensitively, filenames only — so `create story` handed
+/// out ids other files already declared. This is that one answer.
+pub fn ids_in_use(
+    workspace_root: &Path,
+    storage: &crate::config::StorageConfig,
+    store: Option<&dyn Store>,
+) -> Result<HashSet<String>, QdevError> {
+    let scan = scan_duplicate_planning_ids(workspace_root, storage)?;
+    ids_in_use_from_scan(&scan, store)
+}
+
+/// [`ids_in_use`] for a caller that has already run [`scan_duplicate_planning_ids`] — the same
+/// answer, without walking both trees a second time. `--fix-ids` needs the scan's `groups` as
+/// well as its ids, so it uses this rather than paying for the walk twice.
+pub fn ids_in_use_from_scan(
+    scan: &DuplicateIdScan,
+    store: Option<&dyn Store>,
+) -> Result<HashSet<String>, QdevError> {
+    let mut used = scan.all_ids.clone();
+    if let Some(store) = store {
+        // Stale rows count: a stale row is a *hydrated* entity whose last parse failed, and its
+        // id is precisely the one the filesystem half can no longer see.
+        used.extend(
+            store
+                .list_entities(&EntityFilter::default())?
+                .into_iter()
+                .map(|entity| entity.id),
+        );
+    }
+    Ok(used)
 }
 
 /// The source path to report a deferred-work finding against. A `deferred_work` row whose
@@ -292,7 +364,17 @@ pub fn find_off_convention_entity_files(
         let rel = entity.source_path.replace('\\', "/");
         // The convention covers markdown entity files; evidence JSON and scratchpad JSONL are
         // named for their run and their story, not for an entity id.
-        if !rel.ends_with(".md") {
+        //
+        // The extension is matched case-insensitively, exactly as `collect_markdown_files` does:
+        // a `.MD` file is hydrated like any other, so judging only `.md` names silenced the one
+        // signal that would have warned about it — and a `.MD` name is *not* one the write path
+        // resolves (`filename_carries_id` requires `.md`), so it is the very case the warning
+        // exists for.
+        if !Path::new(&rel)
+            .extension()
+            .map(|ext| ext.eq_ignore_ascii_case("md"))
+            .unwrap_or(false)
+        {
             continue;
         }
         let (dir, file_name) = match rel.rsplit_once('/') {

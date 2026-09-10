@@ -1064,25 +1064,12 @@ fn test_fix_ids_refuses_an_occupied_rename_target_instead_of_clobbering() {
     )
     .unwrap();
 
-    // `E1S2.md` is occupied by a file declaring a different id, so `E1S2` is still the next
-    // available id while its canonical file name is already taken.
-    let occupant = r#"---
-id: E1S7
-title: "Story E1S7"
-status: draft
-version: 1
-created_by:
-  type: human
-  id: simon
-updated_by:
-  type: human
-  id: simon
----
-
-## Acceptance Criteria
-- AC.
-"#;
-    fs::write(stories_dir.join("E1S2.md"), occupant).unwrap();
+    // The rename target is occupied by something that is not a markdown file, so it puts no id
+    // in use: a *file* named `E1S2.md` could not reach this path any more, because the in-use
+    // id set now includes ids carried by file names, so `E1S2` would never be allocated in the
+    // first place. This is what is left of the occupied-target case, and refusing it still
+    // matters — `write_file_atomic` would otherwise be pointed at a directory.
+    fs::create_dir_all(stories_dir.join("E1S2.md")).unwrap();
 
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     let assert = cmd
@@ -1107,11 +1094,9 @@ updated_by:
     assert_eq!(val["error"]["code"], "rename_target_exists");
 
     // The occupant is untouched, and so is the file that would have been renamed onto it.
-    assert_eq!(
-        fs::read_to_string(stories_dir.join("E1S2.md")).unwrap(),
-        occupant
-    );
+    assert!(stories_dir.join("E1S2.md").is_dir());
     assert!(read_story(&stories_dir, "E1S1").contains("id: E1S1\n"));
+    assert!(stories_dir.join("E1S1-dup.md").is_file());
 }
 
 // ---------------------------------------------------------------------------
@@ -1590,6 +1575,243 @@ updated_by:
         fs::read_to_string(sprints.join("sprint-1-copy.md")).unwrap(),
         sprint
     );
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let codes: Vec<&str> = val["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert!(
+        codes.contains(&"duplicate_planning_id"),
+        "the unrepaired duplicate must still be reported: {codes:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// One rule for which ids are in use
+// ---------------------------------------------------------------------------
+
+/// Option A (Decision 2026-09-10, Simon): a duplicate whose file is not in its kind directory is
+/// refused. Renumbering it in place would write a correctly named file in a directory no writer
+/// resolves — a repair the run did not achieve — and moving a user's file is not a decision the
+/// tool takes silently. So the entry is skipped with the expected path named, nothing is renamed,
+/// and the duplicate is still reported afterwards.
+#[test]
+fn test_fix_ids_refuses_a_duplicate_outside_its_kind_directory() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    write_story(&stories_dir, "E1S1");
+    let off_convention = stories_dir.join("sub/E1S1.md");
+    write_story(&stories_dir.join("sub"), "E1S1");
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "validate",
+            "--fix-ids",
+            "--non-interactive",
+            "--yes",
+            "--json",
+        ])
+        .assert()
+        .failure();
+    let out = assert.get_output();
+    let val: Value = serde_json::from_slice(&out.stdout).unwrap();
+
+    assert!(val["renumbered"].as_array().unwrap().is_empty(), "{val}");
+    assert_eq!(
+        val["skipped"].as_array().unwrap(),
+        &vec![Value::from("docs/specs/stories/sub/E1S1.md")],
+        "the refused entry must be reported as skipped: {val}"
+    );
+    // The expected path is named, so the refusal is actionable.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("docs/specs/stories/E1S1.md"),
+        "the expected path must be named: {stderr}"
+    );
+
+    // Nothing was renamed, in either directory.
+    assert!(off_convention.is_file());
+    assert!(read_story(&stories_dir, "E1S1").contains("id: E1S1\n"));
+    assert!(!stories_dir.join("E1S2.md").exists());
+    assert!(!stories_dir.join("sub/E1S2.md").exists());
+
+    // And the duplicate is still reported, rather than claimed as repaired.
+    let mut after = Command::cargo_bin("qdev").unwrap();
+    let after_assert = after
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+    let after_val: Value = serde_json::from_slice(&after_assert.get_output().stdout).unwrap();
+    let dups: Vec<&Value> = after_val["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "duplicate_planning_id")
+        .collect();
+    assert_eq!(dups.len(), 2, "{after_val}");
+}
+
+/// A duplicate whose file *is* in its kind directory is still repaired — the refusal above is
+/// scoped to the directory half of the convention, not a blanket decline.
+#[test]
+fn test_fix_ids_still_repairs_a_duplicate_in_its_kind_directory() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    write_story(&stories_dir, "E1S1");
+    fs::write(
+        stories_dir.join("E1S1-dup.md"),
+        fs::read_to_string(stories_dir.join("E1S1.md")).unwrap(),
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "validate",
+            "--fix-ids",
+            "--non-interactive",
+            "--yes",
+            "--json",
+        ])
+        .assert();
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let renumbered = val["renumbered"].as_array().unwrap();
+    assert_eq!(renumbered.len(), 1, "{val}");
+    assert_eq!(renumbered[0]["old_id"], "E1S1");
+    assert_eq!(renumbered[0]["new_id"], "E1S2");
+
+    // The two allocators agree: `create story` asks the same `ids_in_use` function `--fix-ids`
+    // just allocated from, so it cannot hand back the id that renumber has taken.
+    let mut create = Command::cargo_bin("qdev").unwrap();
+    let create_assert = create
+        .current_dir(root)
+        .args(["create", "story", "E1", "--json"])
+        .assert()
+        .success();
+    let create_val: Value = serde_json::from_slice(&create_assert.get_output().stdout).unwrap();
+    assert_eq!(create_val["id"], "E1S3", "{create_val}");
+}
+
+/// A `.MD` file whose name does not carry its id draws the off-convention warning it would draw
+/// for a `.md` file. Hydration reads it either way; judging only `.md` names silenced the one
+/// signal that would have named this file.
+#[test]
+fn test_off_convention_warning_covers_uppercase_md_extension() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    fs::write(
+        stories_dir.join("E1S9.MD"),
+        r#"---
+id: E1S9
+title: "Story E1S9"
+status: draft
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .success()
+        .code(0);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let off: Vec<&Value> = val["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "entity_file_off_convention")
+        .collect();
+    assert_eq!(off.len(), 1, "{val}");
+    assert_eq!(off[0]["severity"], "warning");
+    assert_eq!(off[0]["path"], "docs/specs/stories/E1S9.MD");
+    assert!(off[0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("docs/specs/stories/E1S9.md"));
+}
+
+/// The keeper is chosen by sort order, which says nothing about the identity rule — so an
+/// off-convention *keeper* escaped the refusal entirely: the group's other files were renumbered,
+/// the run reported a successful repair, and the id was left owned by a file no writer can
+/// resolve. `Archive/` sorts before `E1S1.md`, which is the ordering the first version of this
+/// suite could not produce.
+#[test]
+fn test_fix_ids_refuses_a_group_whose_keeper_is_outside_its_kind_directory() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    let archive = stories_dir.join("Archive");
+    fs::create_dir_all(&archive).unwrap();
+    write_story(&archive, "E1S1");
+    write_story(&stories_dir, "E1S1");
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "validate",
+            "--fix-ids",
+            "--non-interactive",
+            "--yes",
+            "--json",
+        ])
+        .assert();
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+
+    assert!(
+        val["renumbered"].as_array().unwrap().is_empty(),
+        "a group whose keeper cannot be resolved must not be half-repaired: {val}"
+    );
+    assert_eq!(
+        val["skipped"].as_array().unwrap().len(),
+        2,
+        "both the keeper and the candidate belong in skipped: {val}"
+    );
+
+    // Nothing was renamed, and the duplicate is still reported.
+    assert!(archive.join("E1S1.md").is_file());
+    assert!(stories_dir.join("E1S1.md").is_file());
+    assert!(!stories_dir.join("E1S2.md").exists());
 
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     let assert = cmd

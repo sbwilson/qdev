@@ -104,6 +104,27 @@ Consequences worth knowing:
   identifier grammar — the same rule hydration uses, so a write validates against the schema the
   next boot sweep will validate against.
 
+#### Which ids are already taken
+
+`architecture.md` §6 is authoritative for this rule; the summary here is for command reference.
+
+One function answers that, and everything that allocates an id uses it — `qdev create story` and
+`qdev validate --fix-ids` alike, so the two cannot disagree. An id is in use if it is **declared**
+by the frontmatter of any file under the spec or state tree (recursively, `.md` matched
+case-insensitively — exactly the set hydration reads), **carried** by any of those file names
+under the convention above (a file whose frontmatter will not parse still occupies its name), or
+held in the **cache** for a hydrated entity (so an id survives its file becoming unreadable).
+
+- `qdev create story` takes one past the highest story number its epic has used, so a gap left by a
+  renumber or a deleted draft rather than always continuing past the highest id.
+- `create story` never returns an id another file declares or carries. In a bare directory it
+  answers from the filesystem alone; there is no cache to consult.
+- Two files *carrying* one id without either declaring it is an off-convention name, not a
+  duplicate: `duplicate_planning_id` reports declarations only.
+- `--fix-ids` refuses a duplicate whose file is not in its kind's directory, records it as skipped
+  and names the expected path. Renumbering it in place would leave the entity unwritable, and
+  moving your file across directories is not a decision the tool takes silently.
+
 Attribution is resolved from one path for every command that records an author: `--author-type`
 / `--author-id` first, then `QDEV_AUTHOR_TYPE` / `QDEV_AUTHOR_ID`, then `[identity]
 developer_id`, then `git config user.email`. An author type other than `human` or `agent` is a

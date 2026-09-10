@@ -81,6 +81,10 @@ fn test_create_story_sequential() {
     assert!(created_file.is_file());
 }
 
+/// Allocation leaves a gap. `create story` takes one past the highest number in the shared
+/// in-use id set, rather than the lowest free one: an id is a citation target, so reusing a
+/// deleted story's number would silently redirect every reference to it. The set is shared with
+/// `--fix-ids`, so the two cannot disagree about which ids are taken.
 #[test]
 fn test_create_story_with_gaps() {
     let temp = TempDir::new().unwrap();
@@ -99,10 +103,24 @@ fn test_create_story_with_gaps() {
         .assert()
         .success()
         .code(0)
+        // One past the highest, not the lowest free: an id is a citation target, so a gap is
+        // left rather than a deleted story's id being handed to a new one.
         .stdout(predicate::str::contains("E12S5"));
 
-    let created_file = stories_dir.join("E12S5.md");
-    assert!(created_file.is_file());
+    assert!(stories_dir.join("E12S5.md").is_file());
+    assert!(
+        !stories_dir.join("E12S2.md").exists(),
+        "the gap must be left alone"
+    );
+    // Neither occupied id is handed out again.
+    assert_eq!(
+        fs::read_to_string(stories_dir.join("E12S1.md")).unwrap(),
+        "existing 1"
+    );
+    assert_eq!(
+        fs::read_to_string(stories_dir.join("E12S4.md")).unwrap(),
+        "existing 4"
+    );
 }
 
 #[test]
@@ -988,4 +1006,128 @@ fn test_create_story_empty_author_id_falls_back_to_config_identity() {
         content.contains("id: alice"),
         "an empty env id must fall through to the config identity, got: {content}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// One rule for which ids are in use: `create story` never mints a taken id
+// ---------------------------------------------------------------------------
+
+/// Writes a story file at an arbitrary path (not necessarily the conventional one).
+fn write_story_at(path: &std::path::Path, id: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        path,
+        format!(
+            "---\nid: {id}\ntitle: \"Story {id}\"\nstatus: draft\nversion: 1\n\
+             created_by:\n  type: human\n  id: alice\n\
+             updated_by:\n  type: human\n  id: alice\n---\n\n## Acceptance Criteria\n- AC.\n"
+        ),
+    )
+    .unwrap();
+}
+
+fn created_story_id(root: &std::path::Path, epic: &str) -> String {
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .env_remove("QDEV_AUTHOR_TYPE")
+        .env_remove("QDEV_AUTHOR_ID")
+        .args(["create", "story", epic, "--json"])
+        .assert()
+        .success();
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    val["id"].as_str().unwrap().to_string()
+}
+
+fn validate_findings(root: &std::path::Path) -> Vec<Value> {
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let output = cmd
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .get_output()
+        .stdout
+        .clone();
+    let val: Value = serde_json::from_slice(&output).unwrap();
+    val["findings"].as_array().cloned().unwrap_or_default()
+}
+
+/// The reproduction that named this defect: a hydrated story in a *subdirectory* of the stories
+/// directory. The allocator read one flat directory, so it minted that story's id a second time
+/// and the following `qdev validate` reported the duplicate the create had just made.
+#[test]
+fn test_create_story_skips_an_id_declared_in_a_subdirectory() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    init_workspace(root);
+
+    write_story_at(&root.join("docs/specs/stories/sub/E1S1.md"), "E1S1");
+
+    assert_eq!(created_story_id(root, "E1"), "E1S2");
+    assert!(
+        !validate_findings(root)
+            .iter()
+            .any(|f| f["code"] == "duplicate_planning_id"),
+        "the create must not manufacture a duplicate"
+    );
+}
+
+/// A file whose name differs from its id only in case. The write path resolves such a name for
+/// that id, so allocating it again left the entity unresolvable ("Multiple entity files match").
+#[test]
+fn test_create_story_skips_an_id_whose_filename_differs_only_in_case() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    init_workspace(root);
+
+    write_story_at(&root.join("docs/specs/stories/e1s1-buffer.md"), "E1S1");
+
+    assert_eq!(created_story_id(root, "E1"), "E1S2");
+    assert!(!validate_findings(root)
+        .iter()
+        .any(|f| f["code"] == "duplicate_planning_id"));
+}
+
+/// A file named for an id whose frontmatter will not parse declares nothing, but still occupies
+/// its name: `create_story`'s own occupancy check would refuse the create with `file_exists` for
+/// an id the user never chose.
+#[test]
+fn test_create_story_skips_an_id_carried_by_an_unparseable_file() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    init_workspace(root);
+
+    fs::write(
+        root.join("docs/specs/stories/E1S1.md"),
+        "---\nid: E1S1\nbroken: [\n---\n",
+    )
+    .unwrap();
+
+    assert_eq!(created_story_id(root, "E1"), "E1S2");
+}
+
+/// The `.MD` row: hydration reads the file, so its declared id is in use.
+#[test]
+fn test_create_story_skips_an_id_declared_in_an_uppercase_extension_file() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    init_workspace(root);
+
+    write_story_at(&root.join("docs/specs/stories/E1S1.MD"), "E1S1");
+
+    assert_eq!(created_story_id(root, "E1"), "E1S2");
+}
+
+/// A `state_dir` id is in use exactly like a `specs_dir` one — the in-use set covers every
+/// directory hydration reads.
+#[test]
+fn test_create_story_skips_an_id_declared_under_the_state_directory() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    init_workspace(root);
+
+    // A story-shaped id declared by a file in the state tree, which hydration also walks.
+    write_story_at(&root.join("docs/state/decisions/E1S1.md"), "E1S1");
+
+    assert_eq!(created_story_id(root, "E1"), "E1S2");
 }

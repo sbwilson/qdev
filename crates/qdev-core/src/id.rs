@@ -433,25 +433,53 @@ impl FromStr for Identifier {
     }
 }
 
-/// Allocates the next sequential story identifier for a given epic by scanning the configured
-/// stories directory directly on disk. Never reads the SQLite cache per AD-7.
-/// Takes `max(existing) + 1` (or 1 if none exist).
+/// Allocates the next story identifier for `epic_number` from the workspace's in-use id set
+/// ([`crate::validate::ids_in_use`]) — the one authority on which ids are already taken.
 ///
-/// Uses the default `[storage]` layout; call `allocate_next_story_id_in` to honour a configured
-/// `specs_dir`. Allocating against a directory the sweep does not scan restarts numbering at 1
-/// on every invocation, silently minting duplicate ids.
+/// Uses the default `[storage]` layout and consults no cache; call
+/// [`allocate_next_story_id_in`] to honour a configured `specs_dir` and to pass the store whose
+/// hydrated ids belong in the union.
+///
+/// **Against a workspace with a configured `[storage]`, this scans the wrong tree** — it would
+/// see none of the ids in use and restart numbering at 1, minting duplicates on every call. No
+/// CLI path uses it for that reason; it exists for callers that know they are on the default
+/// layout, and for tests.
 pub fn allocate_next_story_id(
     workspace_root: &Path,
     epic_number: u32,
 ) -> Result<Identifier, QdevError> {
-    allocate_next_story_id_in(workspace_root, &StorageConfig::default(), epic_number)
+    allocate_next_story_id_in(workspace_root, &StorageConfig::default(), epic_number, None)
 }
 
-/// `allocate_next_story_id`, scanning `storage.specs_dir` rather than the default layout.
+/// Allocates the next story identifier for `epic_number` from the workspace's in-use id set.
+///
+/// # One rule for which ids are in use
+///
+/// This allocator keeps no scan of its own. It asks [`crate::validate::ids_in_use`] which ids
+/// the workspace already owns — every id declared in the frontmatter of any file under
+/// `specs_dir` or `state_dir` (recursively, with hydration's case-insensitive `.md` rule), every
+/// id a filename in those trees carries, and every id the cache holds for a hydrated entity —
+/// and then takes one past the highest story number that epic has used — monotonic, not
+/// lowest-free; see the body for why a gap is left rather than reused.
+///
+/// `qdev validate --fix-ids` reads the same set and allocates the *lowest* free number from it,
+/// because a renumber must land somewhere free. The set is shared, the sequence is not: the two
+/// cannot disagree about which ids are taken, which is the invariant that matters here.
+///
+/// Its own private, single-directory, case-sensitive, filenames-only scan is what handed out ids
+/// another file already declared: a hydrated `<specs_dir>/stories/sub/E1S1.md` was invisible to
+/// it, so it minted `E1S1` a second time and the following `qdev validate` reported the
+/// duplicate it had just created.
+///
+/// `store` is a *union member*, not the source: it is `None` outside an initialised workspace,
+/// where `qdev create story` must still work from the filesystem alone. Passing it covers the
+/// one case the filesystem cannot answer — an id belonging to a hydrated entity whose file has
+/// since become unreadable.
 pub fn allocate_next_story_id_in(
     workspace_root: &Path,
     storage: &StorageConfig,
     epic_number: u32,
+    store: Option<&dyn crate::store::Store>,
 ) -> Result<Identifier, QdevError> {
     if epic_number == 0 {
         return Err(QdevError::usage_error(
@@ -459,71 +487,51 @@ pub fn allocate_next_story_id_in(
         ));
     }
 
-    let stories_dir = workspace_root.join(&storage.specs_dir).join("stories");
-    if !stories_dir.exists() {
-        return Ok(Identifier::Story {
-            epic: epic_number,
-            story: 1,
-        });
-    }
+    let used_ids = crate::validate::ids_in_use(workspace_root, storage, store)?;
 
-    let entries = std::fs::read_dir(&stories_dir).map_err(|e| {
-        QdevError::infrastructure_failure(
-            "io_error",
-            format!(
-                "Failed to read stories directory '{}': {}",
-                stories_dir.display(),
-                e
-            ),
-        )
-    })?;
-
-    let mut max_story = 0u32;
-
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-            continue;
-        }
-
-        let file_name = entry.file_name();
-        let file_name_str = match file_name.to_str() {
-            Some(s) => s,
-            None => continue,
-        };
-
-        if let Some(stem) = file_name_str.strip_suffix(".md") {
-            if let Ok(Identifier::Story { epic, story }) = stem.parse::<Identifier>() {
-                if epic == epic_number && story > max_story {
-                    max_story = story;
-                }
-            } else {
-                let candidate = stem.split(['-', '_']).next().unwrap_or(stem);
-                if let Ok(Identifier::Story { epic, story }) = candidate.parse::<Identifier>() {
-                    if epic == epic_number && story > max_story {
-                        max_story = story;
-                    }
-                } else if let Some((epic, story)) = parse_story_filename_lenient(candidate) {
-                    if epic == epic_number && story > max_story {
-                        max_story = story;
-                    }
-                }
+    // One past the highest story number this epic has ever used, **not** the lowest free one.
+    //
+    // This story changed which ids count as in use; it must not change the sequence. Routing
+    // `create story` through `next_available_id` (whose lowest-free semantics `--fix-ids` needs,
+    // because a renumber must land somewhere free) would make a deleted story's id available
+    // again — and an id is a citation target: `AD-7` calls them immutable once committed, code
+    // comments and `traces_to` relations name them, and git history cannot be rewritten to
+    // follow a reused one. Handing `E1S3` to a new story because the old one was deleted is a
+    // silent wrong answer to every reader of that citation.
+    //
+    // Monotonic-per-epic leaves gaps, which is the intended trade: a gap is visible and
+    // harmless, a reused id is neither.
+    let mut highest = 0u32;
+    for id in &used_ids {
+        if let Ok(Identifier::Story { epic, story }) = id.parse::<Identifier>() {
+            if epic == epic_number && story > highest {
+                highest = story;
             }
         }
     }
 
-    let next_story = max_story
-        .checked_add(1)
-        .ok_or_else(|| QdevError::usage_error("Story ID sequence overflow"))?;
+    let next = highest.checked_add(1).ok_or_else(|| {
+        QdevError::logical_failure(
+            "id_space_exhausted",
+            format!("Epic {} has exhausted the story number space", epic_number),
+        )
+    })?;
 
     Ok(Identifier::Story {
         epic: epic_number,
-        story: next_story,
+        story: next,
     })
+}
+
+/// The story identifier a zero-padded or lower-cased file name stem denotes (`e12s01` ->
+/// `E12S1`), for names the strict grammar rejects but which still occupy the id. Deliberately
+/// wider than [`Identifier::from_str`]: a file named for an id owns that id however it is
+/// spelled, and treating `E12S01.md` as unrelated to `E12S1` is how an allocator hands out an
+/// id a file already carries.
+pub(crate) fn story_id_from_lenient_filename(s: &str) -> Option<Identifier> {
+    let upper = s.to_ascii_uppercase();
+    let (epic, story) = parse_story_filename_lenient(&upper)?;
+    Some(Identifier::Story { epic, story })
 }
 
 fn parse_story_filename_lenient(s: &str) -> Option<(u32, u32)> {

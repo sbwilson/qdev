@@ -1210,7 +1210,7 @@ ON CONFLICT(id) DO UPDATE SET dirty_at = excluded.dirty_at;
 /// This is the directory half of the one identity rule stated on [`resolve_entity_file`]:
 /// `qdev validate` reports an entity file that lives outside every directory this map names, so
 /// the convention the write path assumes is enforced rather than merely hoped for.
-pub(crate) fn directory_for_kind(storage: Option<&StorageConfig>, kind: EntityKind) -> PathBuf {
+pub fn directory_for_kind(storage: Option<&StorageConfig>, kind: EntityKind) -> PathBuf {
     let default_storage = StorageConfig::default();
     let st = storage.unwrap_or(&default_storage);
     match kind {
@@ -1243,6 +1243,74 @@ pub(crate) fn filename_carries_id(file_name: &str, id: &str) -> bool {
     name_lower == format!("{}.md", id_lower)
         || name_lower.starts_with(&format!("{}-", id_lower))
         || name_lower.starts_with(&format!("{}_", id_lower))
+}
+
+/// The inverse of [`filename_carries_id`]: the id `file_name` carries, in canonical spelling,
+/// or `None` if the name carries no id at all. This is the filename half of the in-use id set
+/// ([`crate::validate::ids_in_use`]) — a file *occupies* the id its name carries whether or not
+/// its frontmatter declares it, and a file whose frontmatter will not parse still does.
+///
+/// Cut points are tried at each `-`/`_` boundary shortest-first, then the whole stem, because an
+/// id may itself contain `-` (`AD-7`, `FR-101`, `DW-7f3a`): splitting on the first separator
+/// alone reads `AD-7-context.md` as carrying no id. A candidate is accepted only if it parses as
+/// an [`Identifier`] — otherwise every `README.md` would claim an id — and the canonical
+/// `to_string()` is returned so a differently cased or zero-padded name (`e1s1.md`,
+/// `E12S01.md`) reports the id it actually occupies.
+/// `dw-7f3a` -> `DW-7f3a`: the prefix uppercased, the hex suffix left lowercase, which is the
+/// only spelling `validate_hex_hash` accepts.
+fn recase_hex_id(candidate: &str) -> String {
+    match candidate.split_once('-') {
+        Some((prefix, rest)) => format!(
+            "{}-{}",
+            prefix.to_ascii_uppercase(),
+            rest.to_ascii_lowercase()
+        ),
+        None => candidate.to_ascii_uppercase(),
+    }
+}
+
+pub fn id_carried_by_filename(file_name: &str) -> Option<String> {
+    // The extension is matched case-insensitively, like hydration's own walk — *not* like the
+    // resolution rule, which requires a literal `.md`. That asymmetry is deliberate: this
+    // function answers "does this name occupy an id?", and an `E1S1.MD` file occupies the name
+    // whether or not the write path would resolve it. Requiring lowercase here left a hole in
+    // the intersection of two matrix rows — a `.MD` file whose frontmatter will not parse was
+    // in neither half of the union, so allocation handed out its id and `create_story` then
+    // refused with `file_exists` for an id the user never chose.
+    let (stem, ext) = file_name.rsplit_once('.')?;
+    if !ext.eq_ignore_ascii_case("md") {
+        return None;
+    }
+    let mut cuts: Vec<usize> = stem
+        .char_indices()
+        .filter(|(_, c)| *c == '-' || *c == '_')
+        .map(|(idx, _)| idx)
+        .collect();
+    cuts.push(stem.len());
+    for cut in cuts {
+        let candidate = &stem[..cut];
+        if candidate.is_empty() {
+            continue;
+        }
+        if let Ok(identifier) = candidate.parse::<Identifier>() {
+            return Some(identifier.to_string());
+        }
+        // Both canonical cases are tried, because the grammar is mixed: planning ids are
+        // uppercase (`E1S1`, `AD-7`) while the hex suffixes of `DW-`/`DEC-` ids are lowercase
+        // and `validate_hex_hash` rejects uppercase. Trying only the upper form left
+        // `dw-7f3a.md` carrying no id at all, while the write path resolves it for `DW-7f3a`.
+        for recased in [candidate.to_ascii_uppercase(), recase_hex_id(candidate)] {
+            if recased != candidate {
+                if let Ok(identifier) = recased.parse::<Identifier>() {
+                    return Some(identifier.to_string());
+                }
+            }
+        }
+        if let Some(identifier) = crate::id::story_id_from_lenient_filename(candidate) {
+            return Some(identifier.to_string());
+        }
+    }
+    None
 }
 
 /// The canonical file name for an entity: `<id>.md`. Reported as the expected name by

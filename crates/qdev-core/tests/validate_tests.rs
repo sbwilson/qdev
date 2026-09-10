@@ -956,3 +956,106 @@ fn test_computed_checks_skip_stale_rows() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// One rule for which ids are in use
+// ---------------------------------------------------------------------------
+
+/// The cache is a union member: an id belonging to a hydrated entity is in use even when the
+/// filesystem half can no longer see it — the file has been deleted or has become unreadable —
+/// so no allocator hands it out again.
+#[test]
+fn test_ids_in_use_includes_cache_only_ids() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let storage = qdev_core::StorageConfig::default();
+
+    let store = SqliteStore::open_in_memory().unwrap();
+    store
+        .upsert_entity(&entity(
+            "E1S1",
+            EntityKind::Story,
+            "docs/specs/stories/E1S1.md",
+        ))
+        .unwrap();
+
+    // Nothing on disk at all: the id exists only in the cache.
+    let without_cache = qdev_core::ids_in_use(root, &storage, None).unwrap();
+    assert!(!without_cache.contains("E1S1"));
+
+    let with_cache = qdev_core::ids_in_use(root, &storage, Some(&store)).unwrap();
+    assert!(with_cache.contains("E1S1"));
+
+    // And the allocator built on it skips that id rather than colliding with the entity.
+    let allocated = qdev_core::allocate_next_story_id_in(root, &storage, 1, Some(&store)).unwrap();
+    assert_eq!(allocated.to_string(), "E1S2");
+}
+
+/// The off-convention check judges every file hydration reads, so a `.MD` file is judged by the
+/// same rule as a `.md` one. Its name is not one the write path resolves (`filename_carries_id`
+/// requires `.md`), which is exactly what the warning exists to say — and excluding `.MD` here
+/// silenced the one signal that would have named it.
+#[test]
+fn test_off_convention_check_judges_uppercase_md_extension() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    store
+        .upsert_entity(&entity(
+            "E1S2",
+            EntityKind::Story,
+            "docs/specs/stories/E1S2.MD",
+        ))
+        .unwrap();
+
+    let findings =
+        qdev_core::find_off_convention_entity_files(&store, &qdev_core::StorageConfig::default())
+            .unwrap();
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].code, "entity_file_off_convention");
+    assert_eq!(findings[0].severity, "warning");
+    assert_eq!(findings[0].path, "docs/specs/stories/E1S2.MD");
+    let message = findings[0].message.as_deref().unwrap();
+    assert!(
+        message.contains("docs/specs/stories/E1S2.md"),
+        "the expected name must be reported: {message}"
+    );
+
+    // A `.md` file whose name does carry its id is still silent — the fix widens which files are
+    // judged, not the rule they are judged by.
+    let clean = SqliteStore::open_in_memory().unwrap();
+    clean
+        .upsert_entity(&entity(
+            "E1S2",
+            EntityKind::Story,
+            "docs/specs/stories/E1S2.md",
+        ))
+        .unwrap();
+    assert!(qdev_core::find_off_convention_entity_files(
+        &clean,
+        &qdev_core::StorageConfig::default()
+    )
+    .unwrap()
+    .is_empty());
+}
+
+/// Two files can carry one id in their names without either *declaring* it, and that is an
+/// off-convention name rather than a collision: widening the in-use set must not widen
+/// `duplicate_planning_id`.
+#[test]
+fn test_carried_ids_do_not_become_duplicate_findings() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let stories = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories).unwrap();
+    // Neither parses, so neither declares anything; both carry E1S1.
+    fs::write(stories.join("E1S1.md"), "---\nid: E1S1\nbroken: [\n---\n").unwrap();
+    fs::write(
+        stories.join("E1S1-copy.md"),
+        "---\nid: E1S1\nbroken: [\n---\n",
+    )
+    .unwrap();
+
+    let storage = qdev_core::StorageConfig::default();
+    let scan = qdev_core::scan_duplicate_planning_ids(root, &storage).unwrap();
+    assert!(scan.groups.is_empty(), "{:?}", scan.groups);
+    assert!(scan.all_ids.contains("E1S1"));
+}

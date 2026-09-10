@@ -222,3 +222,24 @@ two pass-1 findings that were dropped by mistake and the mediums.
 - source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-10-pass-2.md`
   summary: `payload-doctor.json`'s `finding_count` description still says four computed checks; there are five.
   evidence: The doctor doc comments were corrected when the fifth check landed and the schema description was not. Review by: next time a payload schema is touched.
+
+## Deferred from: code review of spec-one-id-in-use-rule (2026-09-10)
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-one-id-in-use-rule.md`
+  summary: The hex allocators (`DW-`, `DEC-`) still probe one flat directory case-sensitively via `id::hex_id_collides`, so the class this invariant closed for story ids is still open for them.
+  evidence: Honest remaining instance, raised by the implementer and a reviewer. `next_available_id` rejects those kinds by design and their strategy is random-with-length-growth rather than sequential, so they are a different allocator — but the same class: a private, narrower answer to "is this id taken". Pointing them at `ids_in_use` is the fix. Review by: **before epic 1 acceptance** — the invariant is not fully established while a second allocator disagrees.
+- source_spec: `docs/bmad/implementation-artifacts/spec-one-id-in-use-rule.md`
+  summary: `--fix-ids`' `skipped` array carries no reason, and there are now two refusal causes plus a read failure; the actionable content (the expected path) goes only to stderr, and the advice can name a destination that is still off-convention on the filename axis.
+  evidence: A JSON consumer sees a bare path and cannot tell an off-convention refusal from a prompt decline. The fix is a structured entry (`path`, `reason`, `expected_path`) plus naming the canonical `<id>.md` target — an additive payload-schema change this story did not scope. Review by: with the next `--fix-ids` change; it is the third reporting item filed against that command.
+- source_spec: `docs/bmad/implementation-artifacts/spec-one-id-in-use-rule.md`
+  summary: A *directory* named `<id>.md` contributes no carried id, so allocation hands out that id and `create_story` then refuses `file_exists` for an id the user never chose.
+  evidence: Same shape as the `.MD` hole fixed in this story, but `collect_markdown_files` yields files only, and including directory names changes the shared collector every hydration path uses. Review by: with the directory-comparison item below — both are the walk's edges.
+- source_spec: `docs/bmad/implementation-artifacts/spec-one-id-in-use-rule.md`
+  summary: `off_convention_directory_target` compares directories by case-sensitive string equality, so a mis-cased `docs/Specs/stories/` is refused as off-convention although every writer resolves it on a case-insensitive filesystem.
+  evidence: Narrow — it needs a directory the user typed with different case — but it is a case-sensitive comparison inside a story about matching hydration's case-insensitivity. Belongs with the wider path-normalization question (separators, `./` prefixes) rather than a one-off fix. Review by: with the `./`-prefix layout item already filed from pass 2.
+- source_spec: `docs/bmad/implementation-artifacts/spec-one-id-in-use-rule.md`
+  summary: `qdev create story` now walks both hydrated trees and parses every file's frontmatter on each invocation, with nothing measuring it; and `--fix-ids` re-reads each duplicate inside the refusal check.
+  evidence: Bounded by the same walk the boot sweep already performs on every command (6 ms median at N=1000 on an idle machine), so the create path cannot cost more than a boot — but that is an argument, not a measurement. A benchmark row for allocation at N=1000 would settle it. Review by: if create latency is ever questioned, or with the next allocation change.
+- source_spec: `docs/bmad/implementation-artifacts/spec-one-id-in-use-rule.md`
+  summary: `--fix-ids` refusal coverage gaps — no test for a non-story kind (the `kind_for_write` path the check leans on), none for a state-tree duplicate, no exit-code assertion on the refusal, and the occupied-rename-target case narrowed to a directory occupant only.
+  evidence: The narrowing is the interesting part and is now correct-by-construction: a *file* at the rename target puts that id in use, so it is never allocated, leaving only a directory able to occupy the name. Worth a test asserting that reasoning rather than assuming it. Review by: with the `--fix-ids` reporting work above.
