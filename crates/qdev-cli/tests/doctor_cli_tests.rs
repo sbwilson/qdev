@@ -680,7 +680,26 @@ fn test_doctor_findings_by_code_is_code_sorted_and_stable() {
         codes, positions
     );
 
-    assert_eq!(raw_of(root), raw, "two runs must produce identical output");
+    // Determinism is asserted on the breakdown, not on the whole payload: the `cache` section
+    // carries `last_synced_at`, which moves whenever the two runs straddle a second boundary —
+    // comparing the entire document made this test flaky rather than strict.
+    let second_raw = raw_of(root);
+    let second: Value = serde_json::from_str(&second_raw).unwrap();
+    let second_validation = section(second["sections"].as_array().unwrap(), "validation");
+    let second_codes: Vec<&str> = second_validation["findings_by_code"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    assert_eq!(
+        codes, second_codes,
+        "the breakdown's key order must not vary between runs"
+    );
+    assert_eq!(
+        validation["finding_count"], second_validation["finding_count"],
+        "the count must not vary between runs"
+    );
 }
 
 #[test]

@@ -457,7 +457,10 @@ The set covers both the findings hydration recorded in the cache (`schema_violat
 `merge_conflict`) and the five computed fresh at request time (`duplicate_planning_id`,
 `orphan_deferred_work`, `dw_missing_rationale`, `target_module_not_registered`,
 `entity_file_off_convention`). Computed findings are never written back to the cache: a
-persisted one would outlive the defect it describes.
+persisted one would outlive the defect it describes. `duplicate_planning_id` covers every
+directory hydration reads — `specs_dir` and `state_dir` — and the four checks that read cached
+rows skip rows flagged `stale`, so no finding is derived from content a file no longer has (see
+architecture §11, "The convergence invariant").
 
 Because those checks re-read the workspace's spec files, `doctor` now costs a directory walk
 that it did not before — noticeable only on large workspaces, where the cheap sections still

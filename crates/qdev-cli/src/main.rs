@@ -2134,7 +2134,7 @@ fn handle_fix_ids(
     }
 
     let storage = &annotated_config.config.storage;
-    let scan = match qdev_core::scan_duplicate_planning_ids(root, &storage.specs_dir) {
+    let scan = match qdev_core::scan_duplicate_planning_ids(root, storage) {
         Ok(s) => s,
         Err(e) => {
             let _ = output.emit_error(&e);
@@ -2160,9 +2160,9 @@ fn handle_fix_ids(
         }
     };
 
-    // Seed the in-use id set from the cache as well as the on-disk scan. `scan.all_ids` only
-    // covers `specs_dir`, so allocating from it alone can hand out an id that already belongs
-    // to an entity living elsewhere — minting a fresh duplicate while fixing one.
+    // Seed the in-use id set from the cache as well as the on-disk scan. The scan covers the
+    // directories hydration reads, so allocating from it alone can still hand out an id that
+    // belongs to an entity living outside them — minting a fresh duplicate while fixing one.
     let mut used_ids = scan.all_ids.clone();
     match open_query_store(root, annotated_config)
         .and_then(|store| store.list_entities(&qdev_core::EntityFilter::default()))
@@ -2194,6 +2194,18 @@ fn handle_fix_ids(
             let old_identifier: qdev_core::Identifier = match old_id.parse() {
                 Ok(id) => id,
                 Err(_) => {
+                    // Reachable since the duplicate scan widened to `state_dir`: sprint,
+                    // deferred-work, decision, release and SOUP ids are not sequentially
+                    // renumberable, so a collision among them is reported and skipped rather
+                    // than repaired. Says so, like the sibling branch below — an unexplained
+                    // entry in `skipped` reads as a decline.
+                    if !cli.json {
+                        eprintln!(
+                            "Skipping {}: '{}' is not a renumberable identifier; \
+                             resolve this duplicate by hand",
+                            path, old_id
+                        );
+                    }
                     skipped.push(path.clone());
                     continue;
                 }

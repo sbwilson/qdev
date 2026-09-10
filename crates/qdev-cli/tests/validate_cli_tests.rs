@@ -753,7 +753,15 @@ fn test_fix_ids_does_not_allocate_an_id_already_used_outside_specs_dir() {
     setup_workspace(root);
 
     // `next_available_id` restarts at 1 for the story's epic, so E1S1 is what it would pick —
-    // put an entity holding that id somewhere the specs_dir scan never walks.
+    // put an entity holding that id in `state_dir` rather than `specs_dir`.
+    //
+    // NOTE: this no longer tests what its name says. The duplicate scan was widened to walk
+    // `state_dir` too, so `scan.all_ids` now supplies E1S1 on its own and the cache-seeding of
+    // `used_ids` this test was written to pin can be deleted with the test still green. An
+    // entity that is in the cache but under *no* scanned directory turns out to be
+    // unconstructible — the next sweep sees its path as absent and purges the row, which is
+    // correct — so the seeding's remaining purpose is unclear. Filed in `deferred-work.md`
+    // rather than papered over with a fixture that cannot exist.
     let outside_dir = root.join("docs/state/scratch");
     write_story(&outside_dir, "E1S1");
 
@@ -1242,5 +1250,363 @@ updated_by:
         val["findings"].as_array().unwrap().len(),
         0,
         "the workspace must be clean afterwards: {val}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A sweep and a rebuild converge (spec-sweep-rebuild-convergence)
+// ---------------------------------------------------------------------------
+
+/// A story declaring `depends_on: [<target>]`, written directly so the relation is present at
+/// the file's first hydration.
+fn write_story_depending_on(dir: &Path, id: &str, target: &str) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(
+        dir.join(format!("{}.md", id)),
+        format!(
+            r#"---
+id: {id}
+title: "Story {id}"
+status: draft
+version: 1
+relations:
+  depends_on: ["{target}"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_validate_reports_dangling_relation_after_the_target_file_is_deleted() {
+    // The purge cascade used to delete the edge E1S2.md declares along with E1S1, leaving
+    // nothing for `validate` to report — while `sync --rebuild` on the same tree reported it.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories = root.join("docs/specs/stories");
+    write_story(&stories, "E1S1");
+    write_story_depending_on(&stories, "E1S2", "E1S1");
+
+    Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .success();
+
+    fs::remove_file(stories.join("E1S1.md")).unwrap();
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let findings = val["findings"].as_array().unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f["code"] == "dangling_relation" && f["path"] == "docs/specs/stories/E1S2.md"),
+        "no dangling_relation reported without a rebuild: {val}"
+    );
+}
+
+#[test]
+fn test_get_still_resolves_the_survivor_after_the_cached_duplicate_is_deleted() {
+    // The natural response to `duplicate_planning_id` is to delete the copy. When that is the
+    // file the cache points at, the entity used to vanish while its twin sat on disk.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories = root.join("docs/specs/stories");
+    write_story(&stories, "E1S1");
+    fs::copy(stories.join("E1S1.md"), stories.join("E1S1-copy.md")).unwrap();
+
+    // Boots once so the cache points at the sorted-last file, `E1S1.md`.
+    Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+
+    fs::remove_file(stories.join("E1S1.md")).unwrap();
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["get", "E1S1", "--json"])
+        .assert()
+        .success();
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(
+        val["id"], "E1S1",
+        "the entity must still resolve from the file still on disk: {val}"
+    );
+    assert_eq!(val["stale"], false);
+}
+
+#[test]
+fn test_validate_reports_read_error_on_the_command_that_rebuilds_the_cache() {
+    // `validate` used to exit 0 here: a rebuild truncated `findings` and swallowed the
+    // unreadable file, so the command that triggered it saw an empty findings table while the
+    // next command reported the file.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories = root.join("docs/specs/stories");
+    write_story(&stories, "E1S1");
+    let path = stories.join("E1S1.md");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    if fs::read_to_string(&path).is_ok() {
+        eprintln!("skipping: files are readable regardless of mode (running as root?)");
+        return;
+    }
+    // No cache at all, so this command rebuilds rather than sweeps.
+    fs::remove_dir_all(root.join(".qdev/cache")).unwrap();
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert!(
+        val["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "read_error" && f["path"] == "docs/specs/stories/E1S1.md"),
+        "the rebuild must report the unreadable file: {val}"
+    );
+}
+
+#[test]
+fn test_validate_derives_no_computed_finding_from_a_stale_row() {
+    // A computed finding must not outlive the content it describes: the file no longer declares
+    // `target_modules`, and a rebuild of the same tree reports only the parse failure.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories = root.join("docs/specs/stories");
+    write_story(&stories, "E1S1");
+    Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["update", "E1S1", "--field", "target_modules=[\"ghost\"]"])
+        .assert()
+        .success();
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert!(
+        val["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "target_module_not_registered"),
+        "precondition: the finding is reported while the file still says it: {val}"
+    );
+
+    // Edit the module away and make the file unparseable in the same edit.
+    let edited = read_story(&stories, "E1S1")
+        .replace("target_modules:\n- ghost\n", "")
+        .replace("target_modules: [\"ghost\"]\n", "")
+        + "<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> b\n";
+    fs::write(stories.join("E1S1.md"), edited).unwrap();
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let findings = val["findings"].as_array().unwrap();
+    assert!(
+        findings.iter().any(|f| f["code"] == "merge_conflict"),
+        "the actionable parse failure must be reported: {val}"
+    );
+    assert!(
+        !findings
+            .iter()
+            .any(|f| f["code"] == "target_module_not_registered"),
+        "no finding may be derived from the retained pre-edit row: {val}"
+    );
+
+    // Reads are untouched: the stale entity is still returned, flagged.
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["get", "E1S1", "--json"])
+        .assert()
+        .success();
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["stale"], true, "get must still return the stale row");
+}
+
+#[test]
+fn test_validate_reports_duplicate_planning_id_in_state_dir() {
+    // Duplicate-id detection must cover every directory hydration reads, not `specs_dir` alone.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let sprints = root.join("docs/state/sprints");
+    fs::create_dir_all(&sprints).unwrap();
+    let body = r#"---
+id: sprint-1
+title: "Sprint One"
+status: active
+version: 1
+started_at: "2026-09-01T00:00:00Z"
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+Body
+"#;
+    fs::write(sprints.join("sprint-1.md"), body).unwrap();
+    fs::write(sprints.join("sprint-1-copy.md"), body).unwrap();
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let dupes: Vec<&Value> = val["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "duplicate_planning_id")
+        .collect();
+    assert_eq!(
+        dupes.len(),
+        2,
+        "one finding per participating path in state_dir: {val}"
+    );
+}
+
+/// Widening the duplicate scan to `state_dir` made a `--fix-ids` branch reachable that nothing
+/// exercised: a sprint / deferred-work / decision id is not sequentially renumberable, so the
+/// group is reported and skipped rather than repaired. In JSON mode that must still be exactly
+/// one parseable document — the branch takes care not to `emit_error` for this reason.
+#[test]
+fn test_fix_ids_skips_a_duplicate_it_cannot_renumber() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let sprints = root.join("docs/state/sprints");
+    fs::create_dir_all(&sprints).unwrap();
+    let sprint = r#"---
+id: sprint-1
+title: First sprint
+status: planning
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Goal
+- Ship.
+"#;
+    fs::write(sprints.join("sprint-1.md"), sprint).unwrap();
+    fs::write(sprints.join("sprint-1-copy.md"), sprint).unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "validate",
+            "--fix-ids",
+            "--non-interactive",
+            "--yes",
+            "--json",
+        ])
+        .assert();
+    let stdout = assert.get_output().stdout.clone();
+
+    // Exactly one JSON document, whatever the outcome.
+    let val: Value = serde_json::from_slice(&stdout)
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document: {e}\n{stdout:?}"));
+    assert!(
+        val["renumbered"].as_array().unwrap().is_empty(),
+        "a non-renumberable id must not be renumbered: {val}"
+    );
+    assert_eq!(
+        val["skipped"].as_array().unwrap().len(),
+        1,
+        "the duplicate that could not be repaired must be reported as skipped: {val}"
+    );
+
+    // Both files are untouched, and the duplicate is still reported.
+    assert_eq!(
+        fs::read_to_string(sprints.join("sprint-1.md")).unwrap(),
+        sprint
+    );
+    assert_eq!(
+        fs::read_to_string(sprints.join("sprint-1-copy.md")).unwrap(),
+        sprint
+    );
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let codes: Vec<&str> = val["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert!(
+        codes.contains(&"duplicate_planning_id"),
+        "the unrepaired duplicate must still be reported: {codes:?}"
     );
 }

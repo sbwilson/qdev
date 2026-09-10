@@ -20,28 +20,38 @@ const ERROR_SEVERITY: &str = "error";
 /// `has_error_finding` gates the exit code on `error` alone.
 const WARNING_SEVERITY: &str = "warning";
 
-/// The result of scanning `specs_dir` for frontmatter `id` collisions: every planning id that is
-/// declared by two or more files (sorted paths), plus the full set of ids in use (needed by
-/// `--fix-ids` to allocate a renumbered id that collides with nothing else in the workspace).
+/// The result of scanning every directory hydration reads for frontmatter `id` collisions: every
+/// planning id that is declared by two or more files (sorted paths), plus the full set of ids in
+/// use (needed by `--fix-ids` to allocate a renumbered id that collides with nothing else in the
+/// workspace).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DuplicateIdScan {
     /// `(id, sorted paths declaring it)`, sorted by id, for every id declared 2+ times.
     pub groups: Vec<(String, Vec<String>)>,
-    /// Every distinct planning id found under `specs_dir`, duplicated or not.
+    /// Every distinct planning id found in the scanned directories, duplicated or not.
     pub all_ids: HashSet<String>,
 }
 
-/// Scans every markdown file under `<workspace_root>/<specs_dir>`, reading each file's
-/// frontmatter `id` directly from disk (never from the cache): the `entities.id` PRIMARY KEY
-/// means a second file declaring an already-hydrated id leaves no trace in the cache to detect
-/// against, so this check must re-read the files.
+/// Scans every markdown file in every directory hydration reads — `specs_dir` **and**
+/// `state_dir`, recursively, the same set `rebuild_from_workspace` and `sweep_workspace` walk —
+/// reading each file's frontmatter `id` directly from disk (never from the cache): the
+/// `entities.id` PRIMARY KEY means a second file declaring an already-hydrated id leaves no
+/// trace in the cache to detect against, so this check must re-read the files.
+///
+/// Scanning only `specs_dir` made every collision among sprints, deferred work, decisions,
+/// releases and SOUP invisible — and an invisible collision is what turns the natural response
+/// to a duplicate (delete the copy) into a purge of the surviving entity.
 pub fn scan_duplicate_planning_ids(
     workspace_root: &Path,
-    specs_dir: &str,
+    storage: &crate::config::StorageConfig,
 ) -> Result<DuplicateIdScan, QdevError> {
-    let dir = workspace_root.join(specs_dir);
     let mut files = Vec::new();
-    collect_markdown_files(&dir, &mut files);
+    collect_markdown_files(&workspace_root.join(&storage.specs_dir), &mut files);
+    collect_markdown_files(&workspace_root.join(&storage.state_dir), &mut files);
+    // One directory configured inside the other would otherwise report every file in the
+    // overlap as a duplicate of itself.
+    files.sort();
+    files.dedup();
 
     let mut by_id: HashMap<String, Vec<String>> = HashMap::new();
     for file in &files {
@@ -77,13 +87,14 @@ pub fn scan_duplicate_planning_ids(
     Ok(DuplicateIdScan { groups, all_ids })
 }
 
-/// `duplicate_planning_id`: 2+ files under `storage.specs_dir` declare the same frontmatter
-/// `id`. One finding per participating path, naming the other path(s) in its message.
+/// `duplicate_planning_id`: 2+ files under `storage.specs_dir` or `storage.state_dir` declare the
+/// same frontmatter `id`. One finding per participating path, naming the other path(s) in its
+/// message.
 pub fn find_duplicate_planning_ids(
     workspace_root: &Path,
-    specs_dir: &str,
+    storage: &crate::config::StorageConfig,
 ) -> Result<Vec<FindingRecord>, QdevError> {
-    let scan = scan_duplicate_planning_ids(workspace_root, specs_dir)?;
+    let scan = scan_duplicate_planning_ids(workspace_root, storage)?;
     let found_at = current_iso8601();
     let mut findings = Vec::new();
     for (id, paths) in &scan.groups {
@@ -120,11 +131,28 @@ fn deferred_work_path(store: &dyn Store, dw_id: &str) -> Result<String, QdevErro
     })
 }
 
+/// True when the entity row backing a `deferred_work` row is retained *stale* — its file failed
+/// its last parse, so every cached field describes content the file may no longer have. The two
+/// deferred-work checks below skip such rows: the file already carries the `merge_conflict`,
+/// `schema_violation` or `read_error` finding that names the actionable problem, and a second
+/// finding derived from pre-edit content sends the reader looking for something they have
+/// already deleted. A full rebuild has no stale rows at all, so this is also what makes the two
+/// hydration paths agree on what `qdev validate` reports.
+///
+/// A row the cache has no entity for at all is *not* skipped: that is a broken cache rather than
+/// a known-unparseable file, and dropping the finding would let `qdev validate` exit 0 on it.
+fn deferred_work_is_stale(store: &dyn Store, dw_id: &str) -> Result<bool, QdevError> {
+    Ok(store.get_entity(dw_id)?.is_some_and(|entity| entity.stale))
+}
+
 /// `orphan_deferred_work`: DW's `origin_story_id` is set but `get_entity` returns `None` for it.
 pub fn find_orphan_deferred_work(store: &dyn Store) -> Result<Vec<FindingRecord>, QdevError> {
     let found_at = current_iso8601();
     let mut findings = Vec::new();
     for dw in store.list_deferred_work()? {
+        if deferred_work_is_stale(store, &dw.id)? {
+            continue;
+        }
         let origin = match dw.origin_story_id.as_deref().map(str::trim) {
             Some(o) if !o.is_empty() => o,
             _ => continue,
@@ -154,6 +182,9 @@ pub fn find_dw_missing_rationale(store: &dyn Store) -> Result<Vec<FindingRecord>
     let found_at = current_iso8601();
     let mut findings = Vec::new();
     for dw in store.list_deferred_work()? {
+        if deferred_work_is_stale(store, &dw.id)? {
+            continue;
+        }
         let risk = dw.safety_risk.as_deref().unwrap_or("");
         if risk != "acceptable_with_mitigation" && risk != "unacceptable" {
             continue;
@@ -197,6 +228,11 @@ pub fn find_unregistered_target_modules(
         ..Default::default()
     };
     for story in store.list_entities(&filter)? {
+        // A stale row's `target_modules` is pre-edit content: the file's own parse failure is
+        // already reported, and a rebuild of the same tree has no such row to derive from.
+        if story.stale {
+            continue;
+        }
         let modules: Vec<String> = story
             .target_modules
             .as_deref()
@@ -248,6 +284,11 @@ pub fn find_off_convention_entity_files(
     let mut findings = Vec::new();
 
     for entity in store.list_entities(&EntityFilter::default())? {
+        // Stale rows are excluded for the same reason as the other computed checks: the id this
+        // convention is checked against comes from a parse that is known to be out of date.
+        if entity.stale {
+            continue;
+        }
         let rel = entity.source_path.replace('\\', "/");
         // The convention covers markdown entity files; evidence JSON and scratchpad JSONL are
         // named for their run and their story, not for an entity id.
@@ -311,6 +352,11 @@ fn normalize_rel(path: &Path) -> String {
 /// freshly computed checks above, merged into one flat list. Cache-native findings are never
 /// duplicated: this only ever reads from `list_findings`, never writes back to the `findings`
 /// table.
+///
+/// The four checks that read cached rows skip *stale* ones, so no finding is ever derived from
+/// content a file no longer has, and a sweep and a full rebuild of the same tree report the same
+/// list. Reads are deliberately untouched: `qdev get` and `qdev list` still return a stale
+/// entity with its `stale` flag set, which is what the retention exists for.
 pub fn run_validation(
     store: &dyn Store,
     workspace_root: &Path,
@@ -319,7 +365,7 @@ pub fn run_validation(
     let mut findings = store.list_findings()?;
     findings.extend(find_duplicate_planning_ids(
         workspace_root,
-        &config.storage.specs_dir,
+        &config.storage,
     )?);
     findings.extend(find_orphan_deferred_work(store)?);
     findings.extend(find_dw_missing_rationale(store)?);
@@ -523,7 +569,9 @@ pub fn has_error_finding(findings: &[FindingRecord]) -> bool {
 /// Computes the next available identifier of the same kind (and, for a `Story`, the same epic)
 /// as `old`, skipping every id already present in `used_ids`. Only the sequentially numbered
 /// planning kinds that live under `specs_dir` are supported (Epic, Story, ADR, FR, NFR, Hazard,
-/// PRD); other kinds cannot appear from `scan_duplicate_planning_ids` and are rejected.
+/// PRD); a collision among the state kinds the scan now also covers is reported by
+/// `duplicate_planning_id` and rejected here, so `--fix-ids` records it as skipped rather than
+/// renumbering a kind whose ids are not sequential.
 pub fn next_available_id(
     old: &Identifier,
     used_ids: &HashSet<String>,
@@ -930,16 +978,59 @@ mod tests {
         fs::write(dir.join("b.md"), "---\nid: E1S2\ntitle: B\n---\n").unwrap();
         fs::write(dir.join("c.md"), "---\nid: E1S3\ntitle: C\n---\n").unwrap();
 
-        let scan = scan_duplicate_planning_ids(root, "docs/specs").unwrap();
+        let storage = crate::config::StorageConfig::default();
+        let scan = scan_duplicate_planning_ids(root, &storage).unwrap();
         assert_eq!(scan.groups.len(), 1);
         assert_eq!(scan.groups[0].0, "E1S2");
         assert_eq!(scan.groups[0].1.len(), 2);
         assert!(scan.all_ids.contains("E1S3"));
 
-        let findings = find_duplicate_planning_ids(root, "docs/specs").unwrap();
+        let findings = find_duplicate_planning_ids(root, &storage).unwrap();
         assert_eq!(findings.len(), 2);
         assert!(findings.iter().all(|f| f.code == "duplicate_planning_id"));
         assert!(findings.iter().all(|f| f.severity == "error"));
+    }
+
+    /// Duplicate-id detection must cover every directory hydration reads, not `specs_dir` alone:
+    /// an unreported collision in `state_dir` is the precondition for a purge that erases the
+    /// surviving entity.
+    #[test]
+    fn test_scan_duplicate_planning_ids_covers_state_dir() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let sprints = root.join("docs/state/sprints");
+        fs::create_dir_all(&sprints).unwrap();
+        fs::write(
+            sprints.join("sprint-1.md"),
+            "---\nid: sprint-1\ntitle: A\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            sprints.join("sprint-1-copy.md"),
+            "---\nid: sprint-1\ntitle: B\n---\n",
+        )
+        .unwrap();
+
+        let storage = crate::config::StorageConfig::default();
+        let scan = scan_duplicate_planning_ids(root, &storage).unwrap();
+        assert_eq!(
+            scan.groups.len(),
+            1,
+            "a collision in state_dir must be reported: {:?}",
+            scan.groups
+        );
+        assert_eq!(scan.groups[0].0, "sprint-1");
+        assert_eq!(
+            scan.groups[0].1,
+            vec![
+                "docs/state/sprints/sprint-1-copy.md".to_string(),
+                "docs/state/sprints/sprint-1.md".to_string()
+            ]
+        );
+
+        let findings = find_duplicate_planning_ids(root, &storage).unwrap();
+        assert_eq!(findings.len(), 2);
+        assert!(findings.iter().all(|f| f.code == "duplicate_planning_id"));
     }
 
     #[test]

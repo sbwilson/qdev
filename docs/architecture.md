@@ -387,7 +387,7 @@ requires every one of them to be present). Requirements, hazards, ADRs, PRDs, an
 
 Per **AD-3**, **AD-4**, **AD-6**:
 
-1. **Boot sweep.** Stat every file under the configured spec and state directories. Compare `mtime` and size to `sync_state`. For changed files, hash the content; re-parse only if the hash differs.
+1. **Boot sweep.** Stat every file under the configured spec and state directories. Compare `mtime` and size to `sync_state`. For changed files, hash the content; re-parse only if the hash differs. A file whose metadata is unchanged is still re-parsed when the cache holds no row claiming it and no finding explaining why — see [the convergence invariant](#convergence-invariant), which is what that gate cannot assume on its own.
 2. **Parse and upsert** frontmatter and relations in one transaction. Schema violations are recorded as validation findings, not fatal errors, and the file keeps its previous cache row marked `stale`.
 2a. **Revalidate the relation graph** once every file has been parsed — dangling targets, disallowed kind pairs and `depends_on` cycles are re-derived from the whole `entities`/`relations` tables, not just the files touched this pass, so an out-of-band edit elsewhere is caught. The three codes are cleared first, so a relation problem that no longer exists stops being reported.
 3. **Conflict markers** (`<<<<<<<`) produce a `merge_conflict` finding for that file and hydration continues.
@@ -396,6 +396,25 @@ Per **AD-3**, **AD-4**, **AD-6**:
 6. **Worktrees.** The cache lives inside the worktree at `.qdev/cache/`; each worktree has its own. Leases record the worktree path so `qdev next` can avoid double assignment across worktrees.
 
 Target: ≤ 30 ms for 1,000 entities with one change.
+
+<a id="convergence-invariant"></a>
+
+### The convergence invariant
+
+The incremental sweep and the full rebuild (`qdev sync --rebuild`) are two implementations of one thing. **Hydrating the same tree by either path leaves the same rows in every table and the same findings.** The sweep is an optimisation, never a different answer, and it is asserted directly as table-by-table equality rather than by checking individual symptoms. Three rules keep it true:
+
+- **A purge deletes only what the removed file owned:** its `entities` row, its detail and constraint rows, and the relations it *declared* (`source_id`). Edges pointing **into** it are declared by other files, which are unchanged and will not be re-parsed, so deleting them would destroy state no later pass restores. They stay, and `dangling_relation` reports them — the same answer the rebuild gives by re-reading the declaring file. `relations` has no foreign key precisely so a row pointing at an absent entity is representable. A dangling edge is reported, never repaired: qdev neither invents nor deletes a relation a file declares, so `get --expand relations` and `graph --dot` show the edge, which is the truth about the workspace.
+- **Every known, readable entity file either has an `entities` row claiming it or a finding explaining why it does not** — `schema_violation`, `merge_conflict` or `read_error`, the three codes that explain a missing row. A relation-graph finding does not count: those are recorded against files that parsed successfully. The sweep enforces this on the files its change gate would otherwise skip, because a cascading purge or another file taking over an id can invalidate rows without the owning file changing. Both halves are answered from the maps the sweep already loads, so this costs no extra I/O and the 30 ms budget keeps its shape.
+- **An unreadable file produces a `read_error` finding from both paths.** Neither swallows it.
+
+Two deliberate exceptions, both narrow:
+
+- **Retention.** A file that parsed before and now fails to parse or read keeps its previous rows flagged `stale`; a rebuild has no previous rows to retain. The findings agree because a stale row is treated as *absent* by everything that derives a finding: relation validation reads only live entities and only the edges a live entity declares, so an edge into a stale entity dangles (as it does on a rebuild) and a stale entity's own retained edges are invisible (as they are on a rebuild). `qdev sync --rebuild` remains the guaranteed repair for anything else.
+- **Stale rows are excluded from computed checks.** `qdev validate`'s four cache-reading checks (`orphan_deferred_work`, `dw_missing_rationale`, `target_module_not_registered`, `entity_file_off_convention`) skip stale rows: qdev does not assert things about a file it could not read, the file already carries the `schema_violation`, `merge_conflict` or `read_error` finding naming the actionable problem, and a rebuild has no stale rows to derive from. Reads are untouched — `qdev get` and `qdev list` still return a stale entity with its `stale` flag set, which is what the retention exists for.
+
+**When two files declare one id, the last in sorted path order owns the cache row.** Both paths follow it — the rebuild by walking sorted, the sweep by re-parsing both files (each is unaccounted-for once the other takes the row) and finishing with the same winner. Note `qdev validate --fix-ids` renumbers the *other* way round, keeping the id on the first sorted path, so the file it renumbers is the one holding the row.
+
+Duplicate-id detection (`duplicate_planning_id`) covers every directory hydration reads — `specs_dir` **and** `state_dir` — so a collision among sprints, deferred work, decisions, releases or SOUP is reported like one among stories.
 
 ---
 

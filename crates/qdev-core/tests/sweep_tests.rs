@@ -709,11 +709,35 @@ fn test_rebuild_and_sweep_findings_equal() {
         "docs/state/sprints/sprint-1.md",
         &sprint_md("sprint-1", &["E1S1", "E1S2"]),
     );
+    // The three shapes the first version of this test deliberately avoided, and behind which
+    // four convergence defects lived: a removed file with an edge pointing *into* it, a
+    // duplicate-id pair whose row-owning file is the one removed, and an unreadable file.
+    write_at(
+        root,
+        "docs/specs/stories/E1S5.md",
+        &story_with_children("E1S5", &[], &["E1S6"]),
+    );
+    write_story(root, "E1S6", "Depended on");
+    write_story(root, "E1S7", "Duplicate keeper");
+    write_at(
+        root,
+        "docs/specs/stories/E1S7-copy.md",
+        &story_md("E1S7", "Duplicate copy"),
+    );
     let storage = storage();
     let store = ensure_cache(root, &storage).unwrap();
+    // Sorted last of the two files declaring E1S7, so it is the one that owns the cache row -
+    // and therefore the one whose removal used to erase the survivor.
+    assert_eq!(
+        store.get_entity("E1S7").unwrap().unwrap().source_path,
+        "docs/specs/stories/E1S7.md"
+    );
 
     // Mutate: drop a constraint, a relation and an assignment; add a file; remove a file; add a
-    // conflicted file and a schema-invalid file (both new, so neither path has a previous row).
+    // conflicted file and a schema-invalid file (both new, so neither path has a previous row);
+    // remove a file an unchanged file depends on; remove the duplicate that owned the row.
+    fs::remove_file(story_path(root, "E1S6")).unwrap();
+    fs::remove_file(story_path(root, "E1S7")).unwrap();
     write_at(
         root,
         "docs/specs/stories/E1S1.md",
@@ -737,9 +761,13 @@ fn test_rebuild_and_sweep_findings_equal() {
     )
     .unwrap();
 
+    // An unreadable file, new so neither path has a previous row to retain (retention on a
+    // *previously parsed* file is a deliberate divergence, asserted on its own below).
+    let unreadable = make_unreadable(root, "docs/specs/stories/E1S9-unreadable.md");
+
     let summary = store.sweep_workspace(root, &storage).unwrap();
     assert!(summary.parsed >= 3, "changed/added files must re-parse");
-    assert_eq!(summary.purged, 1, "the removed file must be purged");
+    assert_eq!(summary.purged, 3, "every removed file must be purged");
     let swept = dump_tables(&cache_db(root));
 
     // A full rebuild of the very same tree must produce the same rows in every table.
@@ -784,8 +812,9 @@ fn test_rebuild_and_sweep_findings_equal() {
     );
     assert_eq!(
         swept["relations"].len(),
-        1,
-        "the dropped relation must be gone, not merged"
+        2,
+        "the dropped relation must be gone, not merged - E1S1 -> E1S0 and the surviving \
+         E1S5 -> E1S6 edge into the removed file are all that is left"
     );
     assert_eq!(
         swept["sprint_assignments"].len(),
@@ -795,6 +824,294 @@ fn test_rebuild_and_sweep_findings_equal() {
     let codes: Vec<&str> = swept["findings"].iter().map(|r| r[1].as_str()).collect();
     assert!(codes.contains(&"merge_conflict"), "codes: {codes:?}");
     assert!(codes.contains(&"schema_violation"), "codes: {codes:?}");
+    assert!(
+        codes.contains(&"dangling_relation"),
+        "the edge into the removed file must survive to be reported: {codes:?}"
+    );
+    if unreadable {
+        assert!(codes.contains(&"read_error"), "codes: {codes:?}");
+    }
+    assert_eq!(
+        swept["entities"]
+            .iter()
+            .filter(|r| r[0] == "E1S7")
+            .map(|r| r[5].as_str())
+            .collect::<Vec<_>>(),
+        vec!["docs/specs/stories/E1S7-copy.md"],
+        "the surviving duplicate must be re-parsed, not left purged"
+    );
+}
+
+/// `chmod 000` the file at `rel`, returning whether it really is unreadable now. Running as
+/// root (or on a platform without POSIX modes) reads it anyway, in which case the caller skips
+/// the unreadable half of its assertions rather than failing for the wrong reason.
+fn make_unreadable(root: &Path, rel: &str) -> bool {
+    make_unreadable_with(root, rel, &story_md("E1S9U", "Unreadable"))
+}
+
+/// `make_unreadable` for a file that is not an entity markdown story — the scratch (`.jsonl`) and
+/// evidence (`.json`) read sites take their own branches in both hydration paths, and were
+/// reachable by no test while the helper only ever wrote a story.
+fn make_unreadable_with(root: &Path, rel: &str, content: &str) -> bool {
+    write_at(root, rel, content);
+    let path = root.join(rel);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    if fs::read_to_string(&path).is_ok() {
+        fs::remove_file(&path).unwrap();
+        return false;
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// A purge deletes only what the removed file owned
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_purge_keeps_inbound_edges_and_reports_them_dangling() {
+    // Deleting E1S1.md must not delete the `depends_on` edge E1S2.md declares: E1S2.md is
+    // unchanged, nothing re-parses it, and the edge is the fact the user needs reported.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "One");
+    write_at(
+        root,
+        "docs/specs/stories/E1S2.md",
+        &story_with_children("E1S2", &[], &["E1S1"]),
+    );
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    assert_eq!(count_rows(root, "SELECT COUNT(*) FROM relations;"), 1);
+
+    fs::remove_file(story_path(root, "E1S1")).unwrap();
+    store.sweep_workspace(root, &storage).unwrap();
+
+    assert!(
+        store.get_entity("E1S1").unwrap().is_none(),
+        "the removed file's own entity must be purged"
+    );
+    assert_eq!(
+        count_rows(
+            root,
+            "SELECT COUNT(*) FROM relations WHERE source_id = 'E1S2' AND target_id = 'E1S1';"
+        ),
+        1,
+        "the edge declared by the unchanged file must survive the purge"
+    );
+    let dangling: Vec<FindingRecord> = store
+        .list_findings()
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.code == "dangling_relation")
+        .collect();
+    assert_eq!(
+        dangling.len(),
+        1,
+        "the surviving edge must be reported dangling: {:?}",
+        store.list_findings().unwrap()
+    );
+    assert_eq!(dangling[0].path, "docs/specs/stories/E1S2.md");
+    assert_eq!(dangling[0].severity, "error");
+}
+
+// ---------------------------------------------------------------------------
+// Every known, readable file is accounted for
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_deleting_the_duplicate_that_owned_the_row_reparses_the_survivor() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "Keeper");
+    write_at(
+        root,
+        "docs/specs/stories/E1S1-copy.md",
+        &story_md("E1S1", "Copy"),
+    );
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    assert_eq!(
+        store.get_entity("E1S1").unwrap().unwrap().source_path,
+        "docs/specs/stories/E1S1.md",
+        "the last path in sorted order owns the row"
+    );
+
+    // The natural response to `duplicate_planning_id`: delete the copy. Here it is the file the
+    // cache points at that goes, which used to purge the entity wholesale.
+    fs::remove_file(story_path(root, "E1S1")).unwrap();
+    store.sweep_workspace(root, &storage).unwrap();
+
+    let survivor = store
+        .get_entity("E1S1")
+        .unwrap()
+        .expect("the entity must still resolve from the file still on disk");
+    assert_eq!(survivor.source_path, "docs/specs/stories/E1S1-copy.md");
+    assert!(!survivor.stale);
+}
+
+#[test]
+fn test_deleting_both_duplicates_leaves_no_entity_and_no_findings() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "Keeper");
+    write_at(
+        root,
+        "docs/specs/stories/E1S1-copy.md",
+        &story_md("E1S1", "Copy"),
+    );
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    fs::remove_file(story_path(root, "E1S1")).unwrap();
+    fs::remove_file(root.join("docs/specs/stories/E1S1-copy.md")).unwrap();
+    store.sweep_workspace(root, &storage).unwrap();
+
+    assert!(store.get_entity("E1S1").unwrap().is_none());
+    assert_eq!(
+        store.list_findings().unwrap(),
+        Vec::new(),
+        "nothing is left to report once both files are gone"
+    );
+
+    // And a rebuild of the same tree agrees.
+    let swept = dump_tables(&cache_db(root));
+    store.reset_and_rebuild(root, &storage).unwrap();
+    let rebuilt = dump_tables(&cache_db(root));
+    assert_eq!(swept.get("entities"), rebuilt.get("entities"));
+    assert_eq!(swept.get("findings"), rebuilt.get("findings"));
+}
+
+#[test]
+fn test_unchanged_file_whose_row_is_intact_is_still_skipped() {
+    // The accounted-for check must not turn every warm boot into a re-parse: a file with a row,
+    // and a file with a finding explaining why it has none, are both left alone.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "One");
+    fs::write(
+        story_path(root, "E1S8"),
+        story_md("E1S8", "Conflicted") + "<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> b\n",
+    )
+    .unwrap();
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        summary.parsed, 0,
+        "a warm sweep must not re-parse a file that is accounted for"
+    );
+    assert_eq!(summary.purged, 0);
+}
+
+// ---------------------------------------------------------------------------
+// One answer to an unreadable file
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_unreadable_file_records_read_error_on_both_paths() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "One");
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    if !make_unreadable(root, "docs/specs/stories/E1S9U.md") {
+        eprintln!("skipping: files are readable regardless of mode (running as root?)");
+        return;
+    }
+
+    // Sweep path: a new unreadable file is reported, never silently swept.
+    store.sweep_workspace(root, &storage).unwrap();
+    let swept_codes: Vec<String> = store
+        .list_findings()
+        .unwrap()
+        .into_iter()
+        .map(|f| f.code)
+        .collect();
+    assert!(
+        swept_codes.contains(&"read_error".to_string()),
+        "sweep codes: {swept_codes:?}"
+    );
+
+    // Rebuild path: the same answer, rather than the silent `continue` that left the findings
+    // table emptied and unrepopulated for the command that triggered the rebuild.
+    store.reset_and_rebuild(root, &storage).unwrap();
+    let rebuilt: Vec<FindingRecord> = store
+        .list_findings()
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.code == "read_error")
+        .collect();
+    assert_eq!(
+        rebuilt.len(),
+        1,
+        "a rebuild must report the unreadable file too"
+    );
+    assert_eq!(rebuilt[0].path, "docs/specs/stories/E1S9U.md");
+    assert_eq!(rebuilt[0].severity, "error");
+}
+
+#[test]
+fn test_unreadable_previously_parsed_file_retains_its_rows_stale() {
+    // The one deliberate divergence: a file that parsed before and cannot be read now keeps its
+    // previous rows, flagged stale, where a rebuild has no rows for it at all. The *findings*
+    // still converge, and `qdev sync --rebuild` remains the repair for the rest.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "One");
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    // Rewrite (so mtime/size move and the sweep treats it as a candidate) then make it
+    // unreadable.
+    write_story(root, "E1S1", "One edited");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(story_path(root, "E1S1"), fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    if fs::read_to_string(story_path(root, "E1S1")).is_ok() {
+        eprintln!("skipping: files are readable regardless of mode (running as root?)");
+        return;
+    }
+
+    store.sweep_workspace(root, &storage).unwrap();
+    assert!(
+        entity_stale(&store, "E1S1"),
+        "the retained row must be flagged stale"
+    );
+    let swept_findings = store.list_findings().unwrap();
+    assert_eq!(swept_findings.len(), 1);
+    assert_eq!(swept_findings[0].code, "read_error");
+
+    store.reset_and_rebuild(root, &storage).unwrap();
+    let rebuilt_findings = store.list_findings().unwrap();
+    assert_eq!(
+        rebuilt_findings
+            .iter()
+            .map(|f| (f.path.as_str(), f.code.as_str()))
+            .collect::<Vec<_>>(),
+        swept_findings
+            .iter()
+            .map(|f| (f.path.as_str(), f.code.as_str()))
+            .collect::<Vec<_>>(),
+        "both paths report the same read_error"
+    );
+    assert!(
+        store.get_entity("E1S1").unwrap().is_none(),
+        "a rebuild has no previous row to retain - the documented exception to convergence"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1791,4 +2108,63 @@ fn test_entity_written_then_deleted_is_still_purged() {
         "a written-then-deleted entity must not survive as a ghost"
     );
     assert!(store.get_entity("E1S2").unwrap().is_none());
+}
+
+/// The rebuild grew a `read_error` for four read sites, but only the entity-markdown one was
+/// reachable by any test: `make_unreadable` always wrote a story. Reverting the scratch or
+/// evidence arm to `Err(_) => continue` left the suite green, so an unreadable scratchpad or
+/// evidence file could still be swallowed by a rebuild — the divergence this story removes.
+#[test]
+fn test_unreadable_scratch_and_evidence_files_record_read_error_on_both_paths() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "One");
+    let storage = storage();
+
+    let scratch_rel = "docs/state/scratch/E1S1.jsonl";
+    let evidence_rel = "docs/state/evidence/run-1.json";
+    if !make_unreadable_with(root, scratch_rel, "{\"seq\":1,\"text\":\"note\"}\n")
+        || !make_unreadable_with(root, evidence_rel, "{\"id\":\"run-1\"}\n")
+    {
+        eprintln!("skipping: this environment can read a 0o000 file");
+        return;
+    }
+
+    // Rebuild path: the rebuild truncates `findings` first, so a swallowed read leaves nothing
+    // behind even though the cache this starts from was built by a sweep.
+    let store = ensure_cache(root, &storage).unwrap();
+    store.rebuild_from_workspace(root, &storage).unwrap();
+    let rebuild_paths: Vec<String> = store
+        .list_findings()
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.code == "read_error")
+        .map(|f| f.path)
+        .collect();
+    assert!(
+        rebuild_paths.iter().any(|p| p == scratch_rel),
+        "rebuild must record a read_error for the unreadable scratch file: {rebuild_paths:?}"
+    );
+    assert!(
+        rebuild_paths.iter().any(|p| p == evidence_rel),
+        "rebuild must record a read_error for the unreadable evidence file: {rebuild_paths:?}"
+    );
+
+    // Sweep path: the same two findings after a plain sweep over the same tree.
+    let swept = ensure_cache(root, &storage).unwrap();
+    swept.sweep_workspace(root, &storage).unwrap();
+    let sweep_paths: Vec<String> = swept
+        .list_findings()
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.code == "read_error")
+        .map(|f| f.path)
+        .collect();
+    for rel in [scratch_rel, evidence_rel] {
+        assert!(
+            sweep_paths.iter().any(|p| p == rel),
+            "sweep must record a read_error for {rel}: {sweep_paths:?}"
+        );
+    }
 }

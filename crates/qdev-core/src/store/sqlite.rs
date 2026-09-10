@@ -421,6 +421,10 @@ impl SqliteStore {
 
         // Sort by path for deterministic rebuild order
         entity_files.sort();
+        // Deduped because `specs_dir` and `state_dir` may overlap (nothing rejects a layout
+        // where one contains the other), and a file collected twice would be hydrated twice and
+        // double-counted. The duplicate-id scan dedups the same way, so all three walks agree.
+        entity_files.dedup();
 
         // Also collect scratchpad (.jsonl) and evidence (.json) files
         let scratch_dir = state_dir.join("scratch");
@@ -478,20 +482,31 @@ DELETE FROM sync_meta;
 
             // 1. Process gates from qdev.toml if present (and record its sync_state row)
             if config_path.exists() {
-                if let Ok(content) = fs::read_to_string(&config_path) {
-                    let (mtime, size) = file_mtime_size(&config_path);
-                    let content_hash = sha256_digest(content.as_bytes());
-                    upsert_sync_state_row(&tx, "qdev.toml", mtime, size, &content_hash)?;
-                    refresh_gates(&tx, &content)?;
-                    parsed += 1;
+                match fs::read_to_string(&config_path) {
+                    Ok(content) => {
+                        let (mtime, size) = file_mtime_size(&config_path);
+                        let content_hash = sha256_digest(content.as_bytes());
+                        upsert_sync_state_row(&tx, "qdev.toml", mtime, size, &content_hash)?;
+                        refresh_gates(&tx, &content)?;
+                        parsed += 1;
+                    }
+                    Err(e) => record_read_error(&tx, "qdev.toml", &e)?,
                 }
             }
 
-            // 2. Process all Markdown entity files
+            // 2. Process all Markdown entity files.
+            //
+            // An unreadable file records a `read_error` finding, exactly as the sweep does:
+            // swallowing it here made `qdev validate` exit 0 on the command that triggered the
+            // rebuild (rebuild truncates `findings` first and `ensure_cache` takes one branch or
+            // the other), while the very next command reported the same file.
             for file_path in &entity_files {
                 let content = match fs::read_to_string(file_path) {
                     Ok(c) => c,
-                    Err(_) => continue,
+                    Err(e) => {
+                        record_read_error(&tx, &relative_path(workspace_root, file_path), &e)?;
+                        continue;
+                    }
                 };
                 let outcome = hydrate_markdown_file(&tx, workspace_root, file_path, &content)?;
                 if matches!(outcome, HydrateOutcome::Parsed { .. }) {
@@ -507,7 +522,10 @@ DELETE FROM sync_meta;
             for file_path in &scratch_files {
                 let content = match fs::read_to_string(file_path) {
                     Ok(c) => c,
-                    Err(_) => continue,
+                    Err(e) => {
+                        record_read_error(&tx, &relative_path(workspace_root, file_path), &e)?;
+                        continue;
+                    }
                 };
                 hydrate_scratch_file(&tx, workspace_root, file_path, &content)?;
                 parsed += 1;
@@ -517,7 +535,10 @@ DELETE FROM sync_meta;
             for file_path in &evidence_files {
                 let content = match fs::read_to_string(file_path) {
                     Ok(c) => c,
-                    Err(_) => continue,
+                    Err(e) => {
+                        record_read_error(&tx, &relative_path(workspace_root, file_path), &e)?;
+                        continue;
+                    }
                 };
                 hydrate_evidence_file(&tx, workspace_root, file_path, &content)?;
                 parsed += 1;
@@ -906,7 +927,10 @@ ORDER BY e.id ASC;
                 )
             })?;
             tx.execute(
-                "DELETE FROM relations WHERE source_id = ?1 OR target_id = ?1;",
+                // Only the edges this entity declared — the same rule `purge_entity_with_children`
+                // follows. Edges *into* it belong to other files, and deleting them would destroy
+                // content those files still assert.
+                "DELETE FROM relations WHERE source_id = ?1;",
                 rusqlite::params![id],
             )
             .map_err(|e| {
@@ -2922,6 +2946,9 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
         collect_markdown_files(&specs_dir, &mut entity_files);
         collect_markdown_files(&state_dir, &mut entity_files);
         entity_files.sort();
+        // Deduped for the same reason as the rebuild's walk: an overlapping
+        // `specs_dir`/`state_dir` layout would otherwise sweep a file twice.
+        entity_files.dedup();
 
         let mut scratch_files = Vec::new();
         collect_files_with_ext(&scratch_dir, "jsonl", &mut scratch_files);
@@ -3035,8 +3062,14 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                     })?);
                 }
             }
+            // Load the whole `id -> source_path` mapping once. Three things are derived from
+            // it, each of which used to cost its own scan or a per-path query: which paths hold
+            // a dirty entity, which paths the cache knows about (the purge-driving set), and
+            // which paths own an `entities` row at all (the accounted-for check below).
             let mut dirty_paths: HashSet<String> = HashSet::new();
-            if !dirty_ids.is_empty() {
+            let mut path_of_id: HashMap<String, String> = HashMap::new();
+            let mut ids_by_path: HashMap<String, HashSet<String>> = HashMap::new();
+            {
                 let mut stmt = tx
                     .prepare("SELECT id, source_path FROM entities;")
                     .map_err(|e| {
@@ -3063,8 +3096,51 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                         )
                     })?;
                     if dirty_ids.contains(&id) {
-                        dirty_paths.insert(sp);
+                        dirty_paths.insert(sp.clone());
                     }
+                    path_of_id.insert(id.clone(), sp.clone());
+                    ids_by_path.entry(sp).or_default().insert(id);
+                }
+            }
+
+            // Every path that currently carries at least one finding. Together with
+            // `ids_by_path` this answers, without touching the database again, whether a file
+            // the change gate would skip is accounted for: a row claiming it, or a finding
+            // saying why there is none.
+            let mut finding_paths: HashSet<String> = HashSet::new();
+            {
+                let mut stmt = tx
+                    .prepare(
+                        // Only the codes that explain why a file has no row count as an
+                        // explanation. `dangling_relation`, `invalid_relation_kind` and
+                        // `dependency_cycle` are recorded against paths that parsed
+                        // *successfully*, so accepting any finding at all would let a file whose
+                        // row was taken by a duplicate be treated as accounted for and never
+                        // re-parsed — the invariant unenforced for exactly the file it protects.
+                        "SELECT DISTINCT path FROM findings \
+                         WHERE code IN ('schema_violation', 'merge_conflict', 'read_error');",
+                    )
+                    .map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to prepare findings path scan: {}", e),
+                        )
+                    })?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to scan finding paths for sweep: {}", e),
+                        )
+                    })?;
+                for r in rows {
+                    finding_paths.insert(r.map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to read finding path for sweep: {}", e),
+                        )
+                    })?);
                 }
             }
 
@@ -3082,41 +3158,23 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
             // driving purge from that table by itself left it in the cache permanently, still
             // queryable, with no file behind it.
             let mut known_paths: HashSet<String> = sync_map.keys().cloned().collect();
-            {
-                let mut stmt = tx
-                    .prepare("SELECT DISTINCT source_path FROM entities;")
-                    .map_err(|e| {
-                        QdevError::infrastructure_failure(
-                            "sqlite_error",
-                            format!("Failed to prepare entity source_path scan: {}", e),
-                        )
-                    })?;
-                let rows = stmt
-                    .query_map([], |row| row.get::<_, String>(0))
-                    .map_err(|e| {
-                        QdevError::infrastructure_failure(
-                            "sqlite_error",
-                            format!("Failed to scan entity source paths: {}", e),
-                        )
-                    })?;
-                for r in rows {
-                    known_paths.insert(r.map_err(|e| {
-                        QdevError::infrastructure_failure(
-                            "sqlite_error",
-                            format!("Failed to read entity source path: {}", e),
-                        )
-                    })?);
-                }
-            }
+            known_paths.extend(ids_by_path.keys().cloned());
 
-            let mut removed: Vec<&String> = known_paths
+            let mut removed: Vec<String> = known_paths
                 .iter()
                 .filter(|p| !disk_paths.contains(*p))
+                .cloned()
                 .collect();
             removed.sort();
-            for path in removed {
+            for path in &removed {
                 purge_removed_path(&tx, path)?;
                 purged += 1;
+                // Keep the in-memory view of the cache in step with what was just deleted, so
+                // the accounted-for check below sees a file whose row a cascade took away.
+                for id in ids_by_path.remove(path).unwrap_or_default() {
+                    path_of_id.remove(&id);
+                }
+                finding_paths.remove(path);
             }
 
             // 2. Sweep each on-disk file
@@ -3132,7 +3190,29 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                     Some((m, s, _)) => *m != mtime || *s != size_i64,
                     None => true,
                 };
-                if !meta_changed && !is_dirty {
+
+                // ...or if the cache has lost the row this file owns. The change gate above is
+                // an optimisation resting on the assumption that only a change to a file can
+                // invalidate the rows that file owns; a cascading purge, or another file taking
+                // over its id, breaks that assumption, and an unchanged file would then be
+                // trusted forever while `entities` has nothing for it. The invariant enforced
+                // here is that every known, readable entity file either has an `entities` row
+                // claiming it or a finding explaining why it does not.
+                //
+                // Both halves are answered from the maps loaded once above and kept in step
+                // with every purge and hydration this pass makes — no extra query and no extra
+                // I/O per file, so the boot budget keeps its shape. Kept in step rather than
+                // snapshotted because the two must agree: when two files declare one id, each
+                // takes the row from the other, so both re-parse and the file that ends up
+                // owning it is the last in the sorted order the loop walks — the same one a
+                // full rebuild leaves owning it.
+                let unaccounted = matches!(role, SweepFileRole::Markdown)
+                    && !meta_changed
+                    && !is_dirty
+                    && !ids_by_path.contains_key(rel)
+                    && !finding_paths.contains(rel);
+
+                if !meta_changed && !is_dirty && !unaccounted {
                     unchanged += 1;
                     continue;
                 }
@@ -3142,15 +3222,8 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                 let content = match fs::read_to_string(abs) {
                     Ok(c) => c,
                     Err(e) => {
-                        clear_findings_for_path(&tx, rel)?;
-                        record_finding(
-                            &tx,
-                            rel,
-                            "read_error",
-                            "error",
-                            &format!("File could not be read: {}", e),
-                        )?;
-                        flag_stale_by_source_path(&tx, rel)?;
+                        record_read_error(&tx, rel, &e)?;
+                        finding_paths.insert(rel.clone());
                         unchanged += 1;
                         continue;
                     }
@@ -3161,16 +3234,49 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                     None => true,
                 };
 
-                if hash_changed || is_dirty {
+                if hash_changed || is_dirty || unaccounted {
                     match role {
                         SweepFileRole::Markdown => {
                             // `parsed` counts only successful upserts; conflicted / schema-violating
                             // files are retained stale and not counted here.
                             let outcome =
                                 hydrate_markdown_file(&tx, workspace_root, abs, &content)?;
-                            if matches!(outcome, HydrateOutcome::Parsed { .. }) {
-                                parsed += 1;
-                                parsed_paths.insert(rel.clone());
+                            match &outcome {
+                                HydrateOutcome::Parsed { id } => {
+                                    parsed += 1;
+                                    parsed_paths.insert(rel.clone());
+                                    // Mirror the row moves this hydration just made. Taking an
+                                    // id from another file leaves *that* file without a row, and
+                                    // it must then be re-parsed rather than trusted — which is
+                                    // how two files declaring one id settle on the same winner a
+                                    // full rebuild would pick, the last one in sorted order.
+                                    let claimed = ids_by_path.entry(rel.clone()).or_default();
+                                    let displaced: Vec<String> =
+                                        claimed.iter().filter(|old| *old != id).cloned().collect();
+                                    claimed.insert(id.clone());
+                                    for old in displaced {
+                                        claimed.remove(&old);
+                                        path_of_id.remove(&old);
+                                    }
+                                    if let Some(previous) =
+                                        path_of_id.insert(id.clone(), rel.clone())
+                                    {
+                                        if previous != *rel {
+                                            if let Some(ids) = ids_by_path.get_mut(&previous) {
+                                                ids.remove(id);
+                                                if ids.is_empty() {
+                                                    ids_by_path.remove(&previous);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    finding_paths.remove(rel);
+                                }
+                                _ => {
+                                    // Conflicted, schema-invalid or id-less: the file carries a
+                                    // finding that explains why it has no fresh row.
+                                    finding_paths.insert(rel.clone());
+                                }
                             }
                         }
                         SweepFileRole::Scratch => {
@@ -3752,6 +3858,25 @@ fn clear_findings_for_path(tx: &rusqlite::Transaction, path: &str) -> Result<(),
     })
 }
 
+/// Records the single answer both hydration paths give an unreadable file: the path's findings
+/// are reset to one `read_error`, and any rows it owns are retained flagged stale (a full
+/// rebuild has no such rows, so there the stale flag is a no-op and the two paths agree).
+fn record_read_error(
+    tx: &rusqlite::Transaction,
+    rel_path: &str,
+    err: &std::io::Error,
+) -> Result<(), QdevError> {
+    clear_findings_for_path(tx, rel_path)?;
+    record_finding(
+        tx,
+        rel_path,
+        "read_error",
+        "error",
+        &format!("File could not be read: {}", err),
+    )?;
+    flag_stale_by_source_path(tx, rel_path)
+}
+
 fn record_finding(
     tx: &rusqlite::Transaction,
     path: &str,
@@ -3813,7 +3938,13 @@ fn validate_relations_graph(tx: &rusqlite::Transaction) -> Result<(), QdevError>
     let mut entity_info: HashMap<String, (EntityKind, String)> = HashMap::new();
     {
         let mut stmt = tx
-            .prepare("SELECT id, kind, source_path FROM entities;")
+            .prepare(
+                // `stale = 0` only: a stale row holds pre-edit content retained so reads keep
+                // working, and a full rebuild of the same tree has no row for it at all. Counting
+                // it as present would suppress the `dangling_relation` a rebuild reports on every
+                // edge pointing into it — the convergence this story exists to restore.
+                "SELECT id, kind, source_path FROM entities WHERE stale = 0;",
+            )
             .map_err(|e| {
                 QdevError::infrastructure_failure(
                     "sqlite_error",
@@ -3853,7 +3984,17 @@ fn validate_relations_graph(tx: &rusqlite::Transaction) -> Result<(), QdevError>
     let mut relations: Vec<(String, String, String)> = Vec::new();
     {
         let mut stmt = tx
-            .prepare("SELECT source_id, relation, target_id FROM relations ORDER BY source_id, relation, target_id;")
+            .prepare(
+                // Only edges declared by a *live* entity. A stale entity's retained edges are
+                // pre-edit content that a full rebuild of the same tree does not have, so
+                // counting them would let a `dependency_cycle` be reported for a cycle that only
+                // closes through content the file no longer declares. Edges pointing *into* a
+                // stale entity are still here — their source is live — and are reported as
+                // dangling, which is what a rebuild does too.
+                "SELECT r.source_id, r.relation, r.target_id FROM relations r \
+                 JOIN entities e ON e.id = r.source_id AND e.stale = 0 \
+                 ORDER BY r.source_id, r.relation, r.target_id;",
+            )
             .map_err(|e| {
                 QdevError::infrastructure_failure(
                     "sqlite_error",
@@ -4101,7 +4242,15 @@ fn clear_owned_child_rows(
     Ok(())
 }
 
-/// Deletes an entity row plus every cache row keyed to it (cascade and target-side relations).
+/// Deletes an entity row plus every cache row the entity's own file owned: its detail row, its
+/// constraints, and the relations it *declared* (`source_id`).
+///
+/// Relations pointing **into** the entity (`target_id`) are deliberately left alone: an edge is
+/// a fact declared by the file that names it, and that file is unchanged and will not be
+/// re-parsed, so deleting its edge here destroys state no later pass restores. Keeping the row
+/// is what lets `validate_relations_graph` report `dangling_relation` — the same answer a full
+/// rebuild of the tree gives, since the rebuild re-reads the declaring file. The `relations`
+/// table has no foreign key precisely so a row pointing at an absent entity is representable.
 fn purge_entity_with_children(
     tx: &rusqlite::Transaction,
     id: &str,
@@ -4139,7 +4288,7 @@ fn purge_entity_with_children(
         )
     })?;
     tx.execute(
-        "DELETE FROM relations WHERE source_id = ?1 OR target_id = ?1;",
+        "DELETE FROM relations WHERE source_id = ?1;",
         rusqlite::params![id],
     )
     .map_err(|e| {
@@ -4203,9 +4352,12 @@ fn entity_rows_for_source_path(
     Ok(owned)
 }
 
-/// Purges every cache row owned by a removed file path: entity rows (with child cascade and
-/// target-side relations), scratchpad entries by story id, gate runs by evidence path,
-/// gates when qdev.toml disappears, the sync_state row, and the path's findings.
+/// Purges every cache row owned by a removed file path: entity rows (with child cascade and the
+/// relations those entities declared), scratchpad entries by story id, gate runs by evidence
+/// path, gates when qdev.toml disappears, the sync_state row, and the path's findings.
+///
+/// Rows owned by *other* files are never touched — in particular relations pointing into a
+/// purged entity survive and are reported as `dangling_relation`.
 fn purge_removed_path(tx: &rusqlite::Transaction, rel_path: &str) -> Result<(), QdevError> {
     for (entity_id, kind) in entity_rows_for_source_path(tx, rel_path)? {
         purge_entity_with_children(tx, &entity_id, kind)?;

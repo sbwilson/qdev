@@ -878,3 +878,81 @@ fn test_run_validation_includes_the_off_convention_check_without_failing_the_run
     assert_eq!(findings[0].code, "entity_file_off_convention");
     assert!(!qdev_core::has_error_finding(&findings));
 }
+
+/// Three of the four stale-row skips had no test: every fixture in this file builds
+/// `stale: false` rows, so removing the guards from the two deferred-work checks and the
+/// off-convention check left the suite green — and with them the divergence this story removes
+/// (a sweep reporting a finding derived from pre-edit content a rebuild never reports).
+#[test]
+fn test_computed_checks_skip_stale_rows() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let store = SqliteStore::open_in_memory().unwrap();
+
+    // A deferred-work entity whose file no longer parses: the row is retained, marked stale.
+    let mut dw = entity(
+        "DW-a1b2",
+        EntityKind::DeferredWork,
+        "docs/state/dw/DW-a1b2.md",
+    );
+    dw.stale = true;
+    store.upsert_entity(&dw).unwrap();
+    store
+        .upsert_deferred_work(&DeferredWorkRecord {
+            id: "DW-a1b2".to_string(),
+            // Both an orphan origin *and* an unacceptable risk with no rationale, so a
+            // non-stale row here would produce two computed findings.
+            origin_story_id: Some("E9S9".to_string()),
+            target_module: "core".to_string(),
+            status: Some("open".to_string()),
+            safety_risk: Some("unacceptable".to_string()),
+            rationale: None,
+            gate: None,
+            resolution: None,
+        })
+        .unwrap();
+
+    // A story whose filename does not carry its id, also stale.
+    let mut off = entity("E1S4", EntityKind::Story, "docs/specs/stories/whatever.md");
+    off.stale = true;
+    store.upsert_entity(&off).unwrap();
+
+    let config = Config::default();
+    let findings = qdev_core::run_validation(&store, root, &config).unwrap();
+    let computed: Vec<&str> = findings
+        .iter()
+        .map(|f| f.code.as_str())
+        .filter(|c| {
+            matches!(
+                *c,
+                "orphan_deferred_work" | "dw_missing_rationale" | "entity_file_off_convention"
+            )
+        })
+        .collect();
+    assert!(
+        computed.is_empty(),
+        "no computed finding may be derived from a stale row: {computed:?}"
+    );
+
+    // The same rows, not stale, must produce all three — otherwise this test would pass for the
+    // wrong reason (a fixture that never triggers the checks at all).
+    let mut dw_live = dw.clone();
+    dw_live.stale = false;
+    store.upsert_entity(&dw_live).unwrap();
+    let mut off_live = off.clone();
+    off_live.stale = false;
+    store.upsert_entity(&off_live).unwrap();
+
+    let findings = qdev_core::run_validation(&store, root, &config).unwrap();
+    let codes: Vec<&str> = findings.iter().map(|f| f.code.as_str()).collect();
+    for expected in [
+        "orphan_deferred_work",
+        "dw_missing_rationale",
+        "entity_file_off_convention",
+    ] {
+        assert!(
+            codes.contains(&expected),
+            "a live row must still produce {expected}: {codes:?}"
+        );
+    }
+}
