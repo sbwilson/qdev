@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-11-2026 14:00
+last_updated: 09-11-2026 18:00
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -49,6 +49,18 @@ development_status:
   1-21-relation-command-contracts: done
   1-22-init-cache-migration: done
   1-23-hex-allocators-and-invariant-coverage: done
+
+  # Scheduled from the pass-3 acceptance gate (2026-09-11). All seven are blocking for epic 1;
+  # each owns named findings from `epic-1-cross-story-review-2026-09-11-pass-3.md`, and the
+  # ledger entry for each finding names the key that owns it. Specs are written by bmad-build
+  # when the story starts. Order matters where noted: 1-27 uses 1-24's resolver.
+  1-24-identity-answers-from-the-rule: backlog          # P3-2, P3-6
+  1-25-unchanged-is-not-healthy: backlog                # P3-1
+  1-26-a-kind-change-repairs-itself: backlog            # NEW-4
+  1-27-fix-ids-leaves-every-entity-resolvable: backlog  # P3-4 (after 1-24)
+  1-28-an-unreadable-directory-is-a-finding: backlog    # NEW-8 / P3-3
+  1-29-one-gate-for-relation-writes: backlog            # P3-5
+  1-30-derivation-sites-are-enumerable: backlog         # P3-11
 
   epic-2: backlog
   2-1-state-machine-lifecycle-hooks: backlog

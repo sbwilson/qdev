@@ -374,3 +374,89 @@ called done.
   `:2405`). Corrected in both places and in the ledger entry that repeated it.
 - The unidentified test flake now has a verification command that preserves failure output; ten
   consecutive clean full-suite runs since, four of them under load. Still open, still unidentified.
+
+---
+
+## Part 5 — The schedule
+
+Seven stories, keyed in `sprint-status.yaml` at `backlog`, each owning named findings. Every
+blocking ledger entry names the key that owns it, so the disposition, the ledger and the sprint
+say the same thing — the reconciliation whose absence dropped NEW-4 and NEW-8.
+
+Each story is stated as **the rule it establishes**, not the bug it fixes. That is pass 2's lesson
+applied: the three invariant stories that stated a rule closed their classes, and each still has
+exactly one hole at a site its inventory did not list — so every story below must also say *how its
+sites are enumerated*, not just fix the ones named here. Specs are written by `bmad-build` when the
+story starts.
+
+### 1-24 `identity-answers-from-the-rule` — owns P3-2, P3-6
+**Rule: which file holds entity X is decided by the identity rule, never by the filesystem's case
+behaviour.** `find_file_in_dir`'s `dir.join("<id>.md").is_file()` probe delegates the question to
+the OS, which on macOS and Windows answers for spellings no rule admits — producing a phantom
+"Multiple entity files match" for a lone `e1s1.md`, and resolving `E1S7.MD` for writers while
+`validate` says that name carries nothing. Enumerate the directory once and judge every entry by
+the rule; two matches must mean two files, which means comparing canonical paths (or identity, not
+spelling). Sites are enumerable because there is one resolver — that is the point of the story.
+Also settles what `validate`'s off-convention warning may claim, since today it is wrong about
+`.MD` on the platform this is developed on, and gives `update`/`unrelate` a message that names the
+file and the rename rather than "Entity file not found" for a file that exists.
+
+### 1-25 `unchanged-is-not-healthy` — owns P3-1
+**Rule: a file whose content has not changed is unchanged, not healthy — the sweep may clear only
+findings whose cause it has re-checked.** Today the hash-unchanged branch clears every finding for
+the path and un-stales the row, so `touch` on a file holding merge-conflict markers makes
+`qdev validate` exit 0 forever while a rebuild exits 1. The clear-and-unstale was written for a
+previous `read_error`, where the file could not be read at all; it is wrong for a stored hash that
+is the hash of content that failed to parse. The distinction to encode: findings that mean *I could
+not look* versus findings that mean *I looked and it was broken*. Enumeration: the finding codes
+are a closed set in `SCHEMA_DDL`'s writers, so the story must classify all six.
+
+### 1-26 `a-kind-change-repairs-itself` — owns NEW-4
+**Rule: after any write, the cache holds what a rebuild of the same tree would hold.** A `kind` edit
+through the write path overwrites the cached kind before hydration's repair can compare against it,
+and the previous kind's detail row survives every sweep — `qdev list epics` answers differently
+either side of a rebuild. `delete_entity_row_shallow` already knows the kind→detail-table mapping;
+the write path must use it. Enumeration: the mapping is one table, so the test is that every kind
+with a detail table round-trips a change to every other.
+
+### 1-27 `fix-ids-leaves-every-entity-resolvable` — owns P3-4 *(after 1-24)*
+**Rule: `--fix-ids` may not finish with an id owned by a file no writer can resolve, and what it
+reports is what it did.** The keeper guard enforces only the directory half of the identity rule, so
+a copy named to sort before `<id>.md` is kept, the compliant file is renumbered, and the run exits 0
+reporting success. Depends on 1-24 for the resolution question. Folds in the two filed exit-code
+defects — exit 0 where `validate` exits 1, and exit 1 with a payload naming no finding — and the
+mid-repair abort that drops the reference redirect it promised, leaving an edge pointing at what is
+now a different entity.
+
+### 1-28 `an-unreadable-directory-is-a-finding` — owns NEW-8 / P3-3
+**Rule: a directory qdev cannot read is a finding, not an empty directory.** `collect_markdown_files`
+and `scan_duplicate_planning_ids` both swallow `read_dir` failures, so the sweep purges the rows of
+everything under an unreadable directory, `validate` and `doctor` report a clean workspace, and the
+allocator — whose cached half those rows were — then hands out an id that is taken. Purge must not
+treat "not seen" as "deleted" when the walk itself failed. Closes the two filed scan-blindness
+entries with it.
+
+### 1-29 `one-gate-for-relation-writes` — owns P3-5
+**Rule: an edge enters the workspace through one gate, whichever command writes it.**
+`update --field relations=…` writes the cycle, dangling-target and invalid-kind edges `relate`
+refuses, at exit 0. The three guards need the graph, which `--field` never consults. Enumeration:
+route the generic field writer's `relations` value through the same validation `relate` uses, so a
+future fourth guard cannot be added to one door only. Folds in the case-variant `--field Status=`
+key, the same shape at a smaller scale.
+
+### 1-30 `derivation-sites-are-enumerable` — owns P3-11
+**Rule: "a stale row is absent for derivation" is enforceable, not remembered.** `query.rs`'s
+`blocked` is a fifth site reading a bare `get_entity`, so `qdev get` says go where `qdev validate`
+calls the same dependency dangling — after a story whose whole subject was this rule, with an
+inventory of four. A fourth manually-found site would be the same bug again, so this story owes a
+mechanism: renaming the read to `get_entity_including_stale` (already filed as an option), a clippy
+`disallowed-methods` entry, or a type that cannot be read without answering the question. The choice
+is a trade recorded in the ledger; the story's job is to make it.
+
+**Sequencing.** 1-24 first (1-27 depends on it). 1-25, 1-26 and 1-30 are independent and touch the
+cache lifecycle, so running them together risks conflicts in `sqlite.rs` — sequence them. 1-28 and
+1-29 are independent of everything else.
+
+**What closes the epic.** All seven `done`, then a pass 4 whose reproduction agent re-runs
+pass 3's findings *and* pass 2's, since two of pass 2's survived a pass. The gate closes when a pass
+finds no blocking defect and no dropped finding — not when the list happens to be short.
