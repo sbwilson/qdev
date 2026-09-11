@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-11-2026 18:00
+last_updated: 09-11-2026 18:45
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -55,7 +55,7 @@ development_status:
   # ledger entry for each finding names the key that owns it. Specs are written by bmad-build
   # when the story starts. Order matters where noted: 1-27 uses 1-24's resolver.
   1-24-identity-answers-from-the-rule: done             # P3-2, P3-6
-  1-25-unchanged-is-not-healthy: backlog                # P3-1
+  1-25-unchanged-is-not-healthy: review                 # P3-1
   1-26-a-kind-change-repairs-itself: backlog            # NEW-4
   1-27-fix-ids-leaves-every-entity-resolvable: backlog  # P3-4 (after 1-24)
   1-28-an-unreadable-directory-is-a-finding: backlog    # NEW-8 / P3-3

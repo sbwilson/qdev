@@ -2172,6 +2172,38 @@ fn test_unreadable_scratch_and_evidence_files_record_read_error_on_both_paths() 
             "sweep must record a read_error for {rel}: {sweep_paths:?}"
         );
     }
+
+    // Readable again, with new content: the `read_error` must stop being reported. These two
+    // roles record no findings of their own, so nothing but the re-hydration itself can clear
+    // the one a failed read left, and a rebuild — which truncates `findings` first — has none.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for rel in [scratch_rel, evidence_rel] {
+            fs::set_permissions(root.join(rel), fs::Permissions::from_mode(0o644)).unwrap();
+        }
+    }
+    write_at(
+        root,
+        scratch_rel,
+        "{\"seq\":1,\"text\":\"note\"}\n{\"seq\":2,\"text\":\"more\"}\n",
+    );
+    write_at(
+        root,
+        evidence_rel,
+        "{\"id\":\"run-1\",\"note\":\"readable\"}\n",
+    );
+    swept.sweep_workspace(root, &storage).unwrap();
+
+    for rel in [scratch_rel, evidence_rel] {
+        assert_eq!(
+            swept.get_findings_for_path(rel).unwrap().len(),
+            0,
+            "a {rel} that reads again must stop being reported: {:?}",
+            swept.get_findings_for_path(rel).unwrap()
+        );
+    }
+    assert_sweep_equals_rebuild(&swept, root, &storage);
 }
 
 // ---------------------------------------------------------------------------
@@ -3097,5 +3129,370 @@ fn test_repeated_sweeps_over_three_files_declaring_one_id_keep_one_winner() {
         3,
     );
     assert_eq!(count_rows(root, "SELECT COUNT(*) FROM entities;"), 1);
+    assert_sweep_equals_rebuild(&store, root, &storage);
+}
+
+// ---------------------------------------------------------------------------
+// An unchanged file is unchanged, not healthy (spec-1-25)
+//
+// The hash-unchanged branch used to read "content unchanged since the last hydration" as "the
+// file is healthy" and clear every finding for the path. The stored hash is the hash of whatever
+// the last hydration saw, and that hydration may have *failed*, so the tests below drive every
+// row of the story's matrix: a broken file whose stamp moves without its content keeps its
+// finding and its stale flag, while the read-error recovery the branch was written for still
+// works.
+// ---------------------------------------------------------------------------
+
+/// Rewrites a file with the bytes it already holds: the stamp moves, the content hash does not.
+/// This is `touch`, an editor's save-with-no-change, `git checkout -- .` and `cp -p` — every
+/// content-preserving metadata change reaches the same branch.
+fn rewrite_identical(root: &Path, rel: &str) {
+    let path = root.join(rel);
+    let content = fs::read(&path).unwrap();
+    fs::write(&path, content).unwrap();
+}
+
+/// A metadata-only change that does not rewrite the file at all: the mode moves, so `ctime` and
+/// therefore the `max(mtime, ctime)` stamp move, while mtime, size and content stay put.
+#[cfg(unix)]
+fn chmod_only(root: &Path, rel: &str, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(root.join(rel), fs::Permissions::from_mode(mode)).unwrap();
+}
+
+fn conflicted_story(id: &str) -> String {
+    story_md(id, &format!("Story {id}")) + "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\n"
+}
+
+fn schema_invalid_story(id: &str) -> String {
+    // A story with no `title` at all: the frontmatter parses, the schema rejects it.
+    story_md(id, "Title").replace("title: \"Title\"\n", "")
+}
+
+fn codes_for(store: &SqliteStore, rel: &str) -> Vec<String> {
+    let mut codes: Vec<String> = store
+        .get_findings_for_path(rel)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.code)
+        .collect();
+    codes.sort();
+    codes
+}
+
+#[test]
+fn test_touch_over_merge_conflict_keeps_the_finding_and_the_stale_flag() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    let rel = "docs/specs/stories/E1S1.md";
+
+    fs::write(story_path(root, "E1S1"), conflicted_story("E1S1")).unwrap();
+    store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(codes_for(&store, rel), vec!["merge_conflict".to_string()]);
+    assert!(entity_stale(&store, "E1S1"));
+
+    // The stamp moves, the content does not. The finding must survive: nothing re-checked it.
+    rewrite_identical(root, rel);
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        summary.parsed, 0,
+        "a conflicted file is re-derived but still never upserted"
+    );
+    assert_eq!(
+        codes_for(&store, rel),
+        vec!["merge_conflict".to_string()],
+        "a touch must not erase a finding whose cause is still in the file"
+    );
+    assert!(
+        entity_stale(&store, "E1S1"),
+        "nor un-stale the row it retained"
+    );
+
+    // And a rebuild of the same tree reports the same thing, which is the invariant.
+    let swept = store.list_findings().unwrap();
+    store.reset_and_rebuild(root, &storage).unwrap();
+    let rebuilt = store.list_findings().unwrap();
+    assert_eq!(
+        swept
+            .iter()
+            .map(|f| (f.path.as_str(), f.code.as_str()))
+            .collect::<Vec<_>>(),
+        rebuilt
+            .iter()
+            .map(|f| (f.path.as_str(), f.code.as_str()))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn test_touch_over_schema_violation_keeps_the_finding_and_the_row_stale() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    let rel = "docs/specs/stories/E1S1.md";
+
+    fs::write(story_path(root, "E1S1"), schema_invalid_story("E1S1")).unwrap();
+    store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(codes_for(&store, rel), vec!["schema_violation".to_string()]);
+
+    rewrite_identical(root, rel);
+    store.sweep_workspace(root, &storage).unwrap();
+
+    assert_eq!(
+        codes_for(&store, rel),
+        vec!["schema_violation".to_string()],
+        "the violation is still in the file, so it is still reported"
+    );
+    assert!(
+        store.get_entity("E1S1").unwrap().unwrap().stale,
+        "`get` must keep answering `stale: true` for a file that no longer has a title"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_chmod_only_over_a_broken_file_clears_nothing() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    let rel = "docs/specs/stories/E1S1.md";
+
+    fs::write(story_path(root, "E1S1"), conflicted_story("E1S1")).unwrap();
+    store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(codes_for(&store, rel), vec!["merge_conflict".to_string()]);
+
+    // Mode only: mtime and size are untouched, the stamp moves through ctime.
+    let before = fs::metadata(root.join(rel)).unwrap();
+    chmod_only(root, rel, 0o600);
+    let after = fs::metadata(root.join(rel)).unwrap();
+    assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+    assert_eq!(before.len(), after.len());
+
+    store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        codes_for(&store, rel),
+        vec!["merge_conflict".to_string()],
+        "a mode change says nothing about the content"
+    );
+    assert!(entity_stale(&store, "E1S1"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_read_error_over_a_schema_violation_reports_the_violation_again() {
+    // The trap this story's mechanism exists for: `record_read_error` *clears* the path's
+    // findings first, so once a schema-invalid file becomes unreadable there is no
+    // `schema_violation` left in the table to preserve. Classifying codes would go clean here;
+    // re-deriving does not.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    let rel = "docs/specs/stories/E1S1.md";
+
+    fs::write(story_path(root, "E1S1"), schema_invalid_story("E1S1")).unwrap();
+    store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(codes_for(&store, rel), vec!["schema_violation".to_string()]);
+
+    if !make_unreadable_in_place(root, rel) {
+        eprintln!("skipping: this environment can read a 0o000 file");
+        return;
+    }
+    store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        codes_for(&store, rel),
+        vec!["read_error".to_string()],
+        "the read_error replaces the violation while the file cannot be read"
+    );
+
+    // Readable again, content unchanged: the file is still broken and must be reported as such.
+    chmod_only(root, rel, 0o644);
+    store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        codes_for(&store, rel),
+        vec!["schema_violation".to_string()],
+        "the workspace must not go clean over a file that is still invalid"
+    );
+    assert!(entity_stale(&store, "E1S1"));
+
+    // The findings converge with a rebuild's. (The retained stale row does not, and is not
+    // expected to: that is the epic's documented exception, asserted in
+    // `test_unreadable_previously_parsed_file_retains_its_rows_stale`.)
+    let swept = store.list_findings().unwrap();
+    store.reset_and_rebuild(root, &storage).unwrap();
+    let rebuilt = store.list_findings().unwrap();
+    assert_eq!(
+        swept
+            .iter()
+            .map(|f| (f.path.as_str(), f.code.as_str()))
+            .collect::<Vec<_>>(),
+        rebuilt
+            .iter()
+            .map(|f| (f.path.as_str(), f.code.as_str()))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn test_touch_over_a_healthy_file_is_still_neither_parsed_nor_stale() {
+    // The budget side of the rule: re-derivation applies only to paths whose last hydration
+    // failed, so an unchanged healthy file is still a stamp-and-size refresh with no parse.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1", "E1S2"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    let before = store.get_entity("E1S1").unwrap().unwrap();
+
+    rewrite_identical(root, "docs/specs/stories/E1S1.md");
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+
+    assert_eq!(summary.parsed, 0, "an unchanged healthy file never parses");
+    let after = store.get_entity("E1S1").unwrap().unwrap();
+    assert_eq!(after.content_hash, before.content_hash);
+    assert!(!after.stale);
+    assert!(store.list_findings().unwrap().is_empty());
+}
+
+#[test]
+fn test_broken_file_with_no_retained_row_reports_the_same_finding_on_every_run() {
+    // The second face of the defect: with no `entities` row to retain, the `unaccounted` gate
+    // restored the finding on the *next* sweep, so two identical consecutive runs disagreed —
+    // clean, then broken, then clean. Every run must now agree.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "One");
+    // Hand-authored and never valid, so no row was ever written for it.
+    write_at(
+        root,
+        "docs/specs/stories/E1S8.md",
+        &conflicted_story("E1S8"),
+    );
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    let rel = "docs/specs/stories/E1S8.md";
+    assert_eq!(codes_for(&store, rel), vec!["merge_conflict".to_string()]);
+    assert!(store.get_entity("E1S8").unwrap().is_none());
+
+    rewrite_identical(root, rel);
+    for run in 0..3 {
+        store.sweep_workspace(root, &storage).unwrap();
+        assert_eq!(
+            codes_for(&store, rel),
+            vec!["merge_conflict".to_string()],
+            "run {run} disagreed with the ones before it"
+        );
+    }
+    assert_sweep_equals_rebuild(&store, root, &storage);
+}
+
+#[test]
+fn test_fixing_a_broken_file_clears_the_finding_and_the_stale_flag() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &["E1S1"]);
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    let rel = "docs/specs/stories/E1S1.md";
+
+    fs::write(story_path(root, "E1S1"), conflicted_story("E1S1")).unwrap();
+    store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(codes_for(&store, rel), vec!["merge_conflict".to_string()]);
+
+    // Markers removed: the condition is re-checked and gone.
+    write_story(root, "E1S1", "Story E1S1");
+    store.sweep_workspace(root, &storage).unwrap();
+    assert!(codes_for(&store, rel).is_empty());
+    assert!(!entity_stale(&store, "E1S1"));
+    assert_sweep_equals_rebuild(&store, root, &storage);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_every_matrix_state_at_once_sweeps_equal_to_a_rebuild_and_is_idempotent() {
+    // One tree carrying every state in the story's matrix, swept twice (the idempotence pair)
+    // and then compared table by table against a full rebuild of the same tree.
+    //
+    // Each broken file here is broken from the start and so has no previously-parsed row: a row
+    // retained stale over a file that *did* parse before is the epic's one documented divergence
+    // from a rebuild (`test_unreadable_previously_parsed_file_retains_its_rows_stale`), and is
+    // asserted on its own in the tests above rather than mixed into this comparison.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "Healthy");
+    write_at(
+        root,
+        "docs/specs/stories/E1S8.md",
+        &conflicted_story("E1S8"),
+    );
+    write_at(
+        root,
+        "docs/specs/stories/E1S9.md",
+        &schema_invalid_story("E1S9"),
+    );
+    write_story(root, "E1S2", "Recovers");
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    let recovering = "docs/specs/stories/E1S2.md";
+    if !make_unreadable_in_place(root, recovering) {
+        eprintln!("skipping: this environment can read a 0o000 file");
+        return;
+    }
+    store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        codes_for(&store, recovering),
+        vec!["read_error".to_string()]
+    );
+
+    // Now apply one content-preserving change of each shape and let the tree settle.
+    rewrite_identical(root, "docs/specs/stories/E1S1.md"); // healthy, touched
+    rewrite_identical(root, "docs/specs/stories/E1S8.md"); // conflicted, touched
+    chmod_only(root, "docs/specs/stories/E1S9.md", 0o600); // schema-invalid, chmod only
+    chmod_only(root, recovering, 0o644); // unreadable -> readable again
+
+    store.sweep_workspace(root, &storage).unwrap();
+    let first = dump_tables(&cache_db(root));
+
+    // Idempotence: a second sweep over the same unchanged tree changes nothing.
+    store.sweep_workspace(root, &storage).unwrap();
+    let second = dump_tables(&cache_db(root));
+    for &table in ALL_TABLE_NAMES {
+        if table == "sync_meta" {
+            continue;
+        }
+        assert_eq!(
+            first.get(table),
+            second.get(table),
+            "table '{table}' differs between two consecutive sweeps of an unchanged tree"
+        );
+    }
+
+    // The states really are what the matrix says.
+    assert_eq!(
+        codes_for(&store, "docs/specs/stories/E1S8.md"),
+        vec!["merge_conflict".to_string()]
+    );
+    assert_eq!(
+        codes_for(&store, "docs/specs/stories/E1S9.md"),
+        vec!["schema_violation".to_string()]
+    );
+    assert!(
+        codes_for(&store, recovering).is_empty(),
+        "the recovered file is the one case that does go clean"
+    );
+    assert!(!entity_stale(&store, "E1S2"));
+    assert!(!entity_stale(&store, "E1S1"));
+
     assert_sweep_equals_rebuild(&store, root, &storage);
 }

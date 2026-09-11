@@ -3142,23 +3142,23 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
             // saying why there is none.
             let mut finding_paths: HashSet<String> = HashSet::new();
             {
-                let mut stmt = tx
-                    .prepare(
-                        // Only the codes that explain why a file has no row count as an
-                        // explanation. `dangling_relation`, `invalid_relation_kind` and
-                        // `dependency_cycle` are recorded against paths that parsed
-                        // *successfully*, so accepting any finding at all would let a file whose
-                        // row was taken by a duplicate be treated as accounted for and never
-                        // re-parsed — the invariant unenforced for exactly the file it protects.
-                        "SELECT DISTINCT path FROM findings \
-                         WHERE code IN ('schema_violation', 'merge_conflict', 'read_error');",
+                // Only the codes that explain why a file has no row count as an explanation.
+                // `dangling_relation`, `invalid_relation_kind` and `dependency_cycle` are
+                // recorded against paths that parsed *successfully*, so accepting any finding at
+                // all would let a file whose row was taken by a duplicate be treated as accounted
+                // for and never re-parsed — the invariant unenforced for exactly the file it
+                // protects. The split is `FindingCode::means_hydration_failed`, so this set is
+                // also, and by the same definition, "the paths whose last hydration failed".
+                let sql = format!(
+                    "SELECT DISTINCT path FROM findings WHERE code IN ({});",
+                    FindingCode::sql_in_list(true)
+                );
+                let mut stmt = tx.prepare(&sql).map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to prepare findings path scan: {}", e),
                     )
-                    .map_err(|e| {
-                        QdevError::infrastructure_failure(
-                            "sqlite_error",
-                            format!("Failed to prepare findings path scan: {}", e),
-                        )
-                    })?;
+                })?;
                 let rows = stmt
                     .query_map([], |row| row.get::<_, String>(0))
                     .map_err(|e| {
@@ -3291,7 +3291,17 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                     None => true,
                 };
 
-                if hash_changed || is_dirty || unaccounted {
+                // Content unchanged is not the same thing as healthy: the stored hash is the
+                // hash of whatever the last hydration saw, and that hydration may have failed —
+                // on conflict markers, on the schema, or because the file could not be read at
+                // all. `finding_paths` holds exactly the paths in that state (see
+                // `FindingCode::means_hydration_failed`), and for them the answer is re-derived
+                // rather than assumed: they re-parse, which is what a full rebuild does, so the
+                // two agree. A healthy workspace has no such path, so the warm sweep pays
+                // nothing for this.
+                let last_hydration_failed = finding_paths.contains(rel);
+
+                if hash_changed || is_dirty || unaccounted || last_hydration_failed {
                     match role {
                         SweepFileRole::Markdown => {
                             // `parsed` counts only successful upserts; conflicted / schema-violating
@@ -3337,16 +3347,26 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                             }
                         }
                         SweepFileRole::Scratch => {
+                            // Non-entity roles record no findings of their own, so the only
+                            // finding such a path can carry is a `read_error` from a sweep that
+                            // could not read it. Reading it now answers that question, and a
+                            // rebuild — which starts from an empty `findings` table — has none.
+                            clear_findings_for_path(&tx, rel)?;
+                            finding_paths.remove(rel);
                             hydrate_scratch_file(&tx, workspace_root, abs, &content)?;
                             parsed += 1;
                             parsed_paths.insert(rel.clone());
                         }
                         SweepFileRole::Evidence => {
+                            clear_findings_for_path(&tx, rel)?;
+                            finding_paths.remove(rel);
                             hydrate_evidence_file(&tx, workspace_root, abs, &content)?;
                             parsed += 1;
                             parsed_paths.insert(rel.clone());
                         }
                         SweepFileRole::Config => {
+                            clear_findings_for_path(&tx, rel)?;
+                            finding_paths.remove(rel);
                             refresh_gates(&tx, &content)?;
                             upsert_sync_state_row(&tx, rel, stamp, size, &hash)?;
                             parsed += 1;
@@ -3354,15 +3374,23 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                         }
                     }
                 } else {
-                    // Hash unchanged (a touch, a `chmod`, or a same-size edit that turned out to
-                    // be identical): refresh the stamp and size only.
+                    // Hash unchanged *and* the last hydration of this path succeeded (a touch, a
+                    // `chmod`, or a same-size edit that turned out to be identical over a healthy
+                    // file): refresh the stamp and size only, with no parse.
                     //
-                    // A file that was unreadable and is now readable again arrives here with its
-                    // content unchanged, so its `read_error` finding and its stale flag must be
-                    // cleared — the file is fine now, and a rebuild of the same tree has neither.
-                    // Leaving them would keep `qdev validate` exiting 1 forever on a healthy
-                    // workspace, which is a convergence break in exactly the case the readability
-                    // detection made reachable.
+                    // The clear below is not a claim that the file is fine — that claim is what
+                    // made `touch` erase a `merge_conflict`. It is reached only for a path with
+                    // no hydration-failure finding, where the only findings that can remain are
+                    // the whole-graph codes, and `validate_relations_graph` re-derives every one
+                    // of those from the current tables a few lines further down. The stale flag
+                    // is cleared for the same reason: the flag is only ever set beside a
+                    // hydration-failure finding, so a path that reaches here has nothing left
+                    // that justifies it, and a rebuild of the same tree has neither.
+                    //
+                    // A file that was unreadable and is readable again no longer arrives here: a
+                    // `read_error` is a hydration failure, so it re-parses above and ends with
+                    // its finding and stale flag cleared by hydration itself — the same
+                    // recovery, re-derived instead of assumed.
                     clear_findings_for_path(&tx, rel)?;
                     finding_paths.remove(rel);
                     unstale_by_source_path(&tx, rel)?;
@@ -4004,6 +4032,90 @@ ON CONFLICT(path) DO UPDATE SET
     })
 }
 
+/// The closed set of codes the cache records in `findings`.
+///
+/// It exists for the classification below. [`FindingCode::means_hydration_failed`] answers, for a
+/// path carrying a code, whether the last attempt to hydrate that path produced a row — the
+/// question the sweep's hash-unchanged branch rests on.
+///
+/// What is guaranteed, and by what: every match over this enum is exhaustive with no wildcard
+/// arm, so a seventh code does not **compile** until its author has decided which side of the
+/// classification it falls on. The *enumeration* [`FindingCode::all`] is weaker — an author can
+/// satisfy `next_variant` with `NewCode => None` and leave the new code unreachable from `all`,
+/// and hence out of both SQL lists below — so it is pinned by `test_finding_code_enumeration`
+/// instead, which fails if `all` does not yield every variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FindingCode {
+    MergeConflict,
+    SchemaViolation,
+    ReadError,
+    DanglingRelation,
+    InvalidRelationKind,
+    DependencyCycle,
+}
+
+impl FindingCode {
+    /// The wire value stored in `findings.code`.
+    fn as_str(self) -> &'static str {
+        match self {
+            FindingCode::MergeConflict => "merge_conflict",
+            FindingCode::SchemaViolation => "schema_violation",
+            FindingCode::ReadError => "read_error",
+            FindingCode::DanglingRelation => "dangling_relation",
+            FindingCode::InvalidRelationKind => "invalid_relation_kind",
+            FindingCode::DependencyCycle => "dependency_cycle",
+        }
+    }
+
+    /// True when the code means *the last hydration of this path did not produce a row*: the file
+    /// could not be read, held conflict markers, or failed the schema. False when it means the
+    /// file parsed and the whole-graph pass then objected to what it said — those three are
+    /// deleted and re-derived in full by `validate_relations_graph` on every sweep, so they carry
+    /// no claim about the file's own state.
+    ///
+    /// This is the one site that answers "did the last hydration succeed?", and the sweep asks it
+    /// of nothing else.
+    fn means_hydration_failed(self) -> bool {
+        match self {
+            FindingCode::MergeConflict | FindingCode::SchemaViolation | FindingCode::ReadError => {
+                true
+            }
+            FindingCode::DanglingRelation
+            | FindingCode::InvalidRelationKind
+            | FindingCode::DependencyCycle => false,
+        }
+    }
+
+    /// The next variant in declaration order, or `None` at the end. Only [`FindingCode::all`]
+    /// uses it. The exhaustive match forces a new variant's author to *look* here, but it cannot
+    /// force them to link it in — `test_finding_code_enumeration` is what catches a variant `all`
+    /// cannot reach.
+    fn next_variant(self) -> Option<FindingCode> {
+        match self {
+            FindingCode::MergeConflict => Some(FindingCode::SchemaViolation),
+            FindingCode::SchemaViolation => Some(FindingCode::ReadError),
+            FindingCode::ReadError => Some(FindingCode::DanglingRelation),
+            FindingCode::DanglingRelation => Some(FindingCode::InvalidRelationKind),
+            FindingCode::InvalidRelationKind => Some(FindingCode::DependencyCycle),
+            FindingCode::DependencyCycle => None,
+        }
+    }
+
+    fn all() -> impl Iterator<Item = FindingCode> {
+        std::iter::successors(Some(FindingCode::MergeConflict), |c| c.next_variant())
+    }
+
+    /// `'a', 'b'` for splicing into a SQL `IN (…)`. The values are compile-time literals of
+    /// `[a-z_]`, so there is nothing here to escape or inject.
+    fn sql_in_list(hydration_failed: bool) -> String {
+        FindingCode::all()
+            .filter(|c| c.means_hydration_failed() == hydration_failed)
+            .map(|c| format!("'{}'", c.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 fn clear_findings_for_path(tx: &rusqlite::Transaction, path: &str) -> Result<(), QdevError> {
     tx.execute(
         "DELETE FROM findings WHERE path = ?1;",
@@ -4030,7 +4142,7 @@ fn record_read_error(
     record_finding(
         tx,
         rel_path,
-        "read_error",
+        FindingCode::ReadError,
         "error",
         &format!("File could not be read: {}", err),
     )?;
@@ -4040,7 +4152,7 @@ fn record_read_error(
 fn record_finding(
     tx: &rusqlite::Transaction,
     path: &str,
-    code: &str,
+    code: FindingCode,
     severity: &str,
     message: &str,
 ) -> Result<(), QdevError> {
@@ -4055,7 +4167,7 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
 "#,
         rusqlite::params![
             path,
-            code,
+            code.as_str(),
             severity,
             message,
             message,
@@ -4066,7 +4178,12 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
     .map_err(|e| {
         QdevError::infrastructure_failure(
             "sqlite_error",
-            format!("Failed to record finding '{}' for '{}': {}", code, path, e),
+            format!(
+                "Failed to record finding '{}' for '{}': {}",
+                code.as_str(),
+                path,
+                e
+            ),
         )
     })
 }
@@ -4084,7 +4201,12 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
 ///     working edge list (not from storage) so multiple disjoint cycles are all found.
 fn validate_relations_graph(tx: &rusqlite::Transaction) -> Result<(), QdevError> {
     tx.execute(
-        "DELETE FROM findings WHERE code IN ('dangling_relation', 'invalid_relation_kind', 'dependency_cycle');",
+        // The complement of the hydration-failure codes: these three are re-derived in full
+        // below, so they are deleted in full first.
+        &format!(
+            "DELETE FROM findings WHERE code IN ({});",
+            FindingCode::sql_in_list(false)
+        ),
         [],
     )
     .map_err(|e| {
@@ -4203,7 +4325,7 @@ fn validate_relations_graph(tx: &rusqlite::Transaction) -> Result<(), QdevError>
                 record_finding(
                     tx,
                     source_path,
-                    "dangling_relation",
+                    FindingCode::DanglingRelation,
                     "error",
                     &format!(
                         "Relation '{}' on '{}' targets '{}', which does not exist",
@@ -4216,7 +4338,7 @@ fn validate_relations_graph(tx: &rusqlite::Transaction) -> Result<(), QdevError>
                     record_finding(
                         tx,
                         source_path,
-                        "invalid_relation_kind",
+                        FindingCode::InvalidRelationKind,
                         "error",
                         &format!(
                             "Relation '{}' from {} ({}) to {} ({}) is not an allowed kind pair",
@@ -4249,7 +4371,7 @@ fn validate_relations_graph(tx: &rusqlite::Transaction) -> Result<(), QdevError>
                 continue;
             }
             if let Some((_, path)) = entity_info.get(node) {
-                record_finding(tx, path, "dependency_cycle", "error", &message)?;
+                record_finding(tx, path, FindingCode::DependencyCycle, "error", &message)?;
             }
         }
         if cycle.len() < 2 {
@@ -4702,7 +4824,7 @@ fn hydrate_markdown_file(
         record_finding(
             tx,
             &rel_path,
-            "merge_conflict",
+            FindingCode::MergeConflict,
             "error",
             "File contains merge conflict markers ('<<<<<<<') and was not parsed",
         )?;
@@ -4713,7 +4835,13 @@ fn hydrate_markdown_file(
     let frontmatter = match extract_frontmatter(content) {
         Ok(fm) => fm,
         Err(e) => {
-            record_finding(tx, &rel_path, "schema_violation", "error", &e.to_string())?;
+            record_finding(
+                tx,
+                &rel_path,
+                FindingCode::SchemaViolation,
+                "error",
+                &e.to_string(),
+            )?;
             flag_stale_by_source_path(tx, &rel_path)?;
             return Ok(HydrateOutcome::SchemaViolation {
                 errors: vec![ValidationError {
@@ -4730,7 +4858,7 @@ fn hydrate_markdown_file(
             record_finding(
                 tx,
                 &rel_path,
-                "schema_violation",
+                FindingCode::SchemaViolation,
                 "error",
                 "Frontmatter has no non-empty 'id'",
             )?;
@@ -4746,7 +4874,13 @@ fn hydrate_markdown_file(
             .map(|e| e.to_string())
             .collect::<Vec<_>>()
             .join("; ");
-        record_finding(tx, &rel_path, "schema_violation", "error", &message)?;
+        record_finding(
+            tx,
+            &rel_path,
+            FindingCode::SchemaViolation,
+            "error",
+            &message,
+        )?;
         flag_stale_by_source_path(tx, &rel_path)?;
         return Ok(HydrateOutcome::SchemaViolation { errors });
     }
@@ -5572,4 +5706,73 @@ fn sha256_digest(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
     format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod finding_code_tests {
+    use super::FindingCode;
+
+    /// `all()` is not compiler-checked (see its doc comment), so it is checked here: every
+    /// variant must be reachable from it, the two `sql_in_list` partitions must be disjoint and
+    /// jointly cover it, and each wire value must stay the one already written into every
+    /// existing cache — `findings.code` is data on disk, not an internal name.
+    #[test]
+    fn test_finding_code_enumeration() {
+        let all: Vec<FindingCode> = FindingCode::all().collect();
+
+        // Every variant, named one by one: a seventh code that `next_variant` does not link in
+        // fails here rather than silently dropping out of both SQL lists.
+        assert_eq!(
+            all,
+            vec![
+                FindingCode::MergeConflict,
+                FindingCode::SchemaViolation,
+                FindingCode::ReadError,
+                FindingCode::DanglingRelation,
+                FindingCode::InvalidRelationKind,
+                FindingCode::DependencyCycle,
+            ],
+            "FindingCode::all must yield every variant, in declaration order"
+        );
+
+        // The wire values, pinned against the cache on disk.
+        assert_eq!(
+            all.iter().map(|c| c.as_str()).collect::<Vec<_>>(),
+            vec![
+                "merge_conflict",
+                "schema_violation",
+                "read_error",
+                "dangling_relation",
+                "invalid_relation_kind",
+                "dependency_cycle",
+            ]
+        );
+
+        // Disjoint and jointly covering: the hydration-failure list and its complement are the
+        // two SQL code lists, and a code in neither (or in both) would go unswept or be deleted
+        // by the whole-graph pass that does not own it.
+        let failed = FindingCode::sql_in_list(true);
+        let succeeded = FindingCode::sql_in_list(false);
+        for code in &all {
+            let quoted = format!("'{}'", code.as_str());
+            assert_ne!(
+                failed.contains(&quoted),
+                succeeded.contains(&quoted),
+                "'{}' must appear in exactly one of the two SQL lists",
+                code.as_str()
+            );
+        }
+        assert_eq!(
+            failed.matches('\'').count() / 2 + succeeded.matches('\'').count() / 2,
+            all.len(),
+            "the two lists together must name every code exactly once"
+        );
+
+        // And the classification itself, so a reclassification is a deliberate edit here too.
+        assert_eq!(failed, "'merge_conflict', 'schema_violation', 'read_error'");
+        assert_eq!(
+            succeeded,
+            "'dangling_relation', 'invalid_relation_kind', 'dependency_cycle'"
+        );
+    }
 }
