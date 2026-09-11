@@ -807,6 +807,16 @@ updated_by:
     assert_eq!(rebuilt_story.title.as_deref(), Some("First Story"));
 }
 
+/// Dumps every table as stringified rows, with the two columns a pass stamps from the wall clock
+/// as it writes — `findings.found_at` and `sync_meta.last_synced_at` — reduced to whether they are
+/// set. Both record *when the writing pass ran*, so comparing two builds by them asserts that the
+/// two happened in the same second: true on a fast host, false on a slow one, and nothing to do
+/// with the cache. Set-vs-NULL is kept, so a pass that failed to stamp one still shows up.
+///
+/// Every other column is compared by value, including the ones whose names end `_at`:
+/// `entities.updated_at` is the frontmatter's value or else derived from the file's own change
+/// stamp, and the rest come from file content. Those are exactly the comparisons this test exists
+/// for.
 fn dump_all_tables(db_path: &Path) -> BTreeMap<String, Vec<Vec<String>>> {
     let conn = rusqlite::Connection::open(db_path).unwrap();
     let mut table_dump = BTreeMap::new();
@@ -819,11 +829,25 @@ fn dump_all_tables(db_path: &Path) -> BTreeMap<String, Vec<Vec<String>>> {
         };
 
         let col_count = stmt.column_count();
+        let is_pass_clock: Vec<bool> = (0..col_count)
+            .map(|i| {
+                let column = stmt.column_name(i).unwrap();
+                (table == "findings" && column == "found_at")
+                    || (table == "sync_meta" && column == "last_synced_at")
+            })
+            .collect();
         let rows = stmt
             .query_map([], |row| {
                 let mut vals = Vec::new();
-                for i in 0..col_count {
+                for (i, pass_clock) in is_pass_clock.iter().enumerate() {
                     let val: rusqlite::types::Value = row.get(i)?;
+                    if *pass_clock {
+                        vals.push(match val {
+                            rusqlite::types::Value::Null => "NULL".to_string(),
+                            _ => "<set>".to_string(),
+                        });
+                        continue;
+                    }
                     vals.push(match val {
                         rusqlite::types::Value::Null => "NULL".to_string(),
                         rusqlite::types::Value::Integer(i) => i.to_string(),

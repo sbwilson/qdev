@@ -450,6 +450,15 @@ updated_by:
         rebuilt_dump.keys().collect::<Vec<_>>()
     );
 
+    // The other column two passes cannot agree on is `findings.found_at`, stamped from the wall
+    // clock as each finding is recorded. This fixture is finding-free, so the comparison below
+    // never reaches it — asserted rather than assumed, because a fixture that grows a dangling
+    // relation later would otherwise reintroduce the same second-boundary bet silently.
+    assert!(
+        initial_dump["findings"].is_empty() && rebuilt_dump["findings"].is_empty(),
+        "fixture must stay finding-free, or `found_at` has to be excluded from the comparison"
+    );
+
     for (table, initial_rows) in &initial_dump {
         let rebuilt_rows = &rebuilt_dump[table];
         // `sync_meta` records *when* each pass ran, not the content it describes, so it is
