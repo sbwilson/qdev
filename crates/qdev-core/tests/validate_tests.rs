@@ -1070,11 +1070,13 @@ fn test_ids_in_use_includes_cache_only_ids() {
 }
 
 /// The off-convention check judges every file hydration reads, so a `.MD` file is judged by the
-/// same rule as a `.md` one. Its name is not one the write path resolves (`filename_carries_id`
-/// requires `.md`), which is exactly what the warning exists to say — and excluding `.MD` here
-/// silenced the one signal that would have named it.
+/// same rule as a `.md` one — and the rule matches the extension case-insensitively, so a `.MD`
+/// name that carries its id is silent. It was not always: the warning fired for `E1S2.MD` while
+/// the write path resolved that very file on macOS, so the one signal naming it was false on the
+/// platform it was read on. What the gate decides is which files the convention applies to, not
+/// what the convention says.
 #[test]
-fn test_off_convention_check_judges_uppercase_md_extension() {
+fn test_off_convention_check_judges_uppercase_md_extension_by_the_same_rule() {
     let store = SqliteStore::open_in_memory().unwrap();
     store
         .upsert_entity(&entity(
@@ -1083,22 +1085,35 @@ fn test_off_convention_check_judges_uppercase_md_extension() {
             "docs/specs/stories/E1S2.MD",
         ))
         .unwrap();
-
-    let findings =
+    assert!(
         qdev_core::find_off_convention_entity_files(&store, &qdev_core::StorageConfig::default())
+            .unwrap()
+            .is_empty(),
+        "a `.MD` name that carries its id is resolvable, so nothing is off convention"
+    );
+
+    // A `.MD` name that carries no id is still judged, and still named.
+    let off = SqliteStore::open_in_memory().unwrap();
+    off.upsert_entity(&entity(
+        "E1S2",
+        EntityKind::Story,
+        "docs/specs/stories/notes.MD",
+    ))
+    .unwrap();
+    let findings =
+        qdev_core::find_off_convention_entity_files(&off, &qdev_core::StorageConfig::default())
             .unwrap();
     assert_eq!(findings.len(), 1, "{findings:?}");
     assert_eq!(findings[0].code, "entity_file_off_convention");
     assert_eq!(findings[0].severity, "warning");
-    assert_eq!(findings[0].path, "docs/specs/stories/E1S2.MD");
+    assert_eq!(findings[0].path, "docs/specs/stories/notes.MD");
     let message = findings[0].message.as_deref().unwrap();
     assert!(
         message.contains("docs/specs/stories/E1S2.md"),
         "the expected name must be reported: {message}"
     );
 
-    // A `.md` file whose name does carry its id is still silent — the fix widens which files are
-    // judged, not the rule they are judged by.
+    // A `.md` file whose name carries its id is silent, as it always was.
     let clean = SqliteStore::open_in_memory().unwrap();
     clean
         .upsert_entity(&entity(

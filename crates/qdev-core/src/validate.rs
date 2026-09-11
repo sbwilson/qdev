@@ -407,10 +407,11 @@ pub fn find_off_convention_entity_files(
         // named for their run and their story, not for an entity id.
         //
         // The extension is matched case-insensitively, exactly as `collect_markdown_files` does:
-        // a `.MD` file is hydrated like any other, so judging only `.md` names silenced the one
-        // signal that would have warned about it — and a `.MD` name is *not* one the write path
-        // resolves (`filename_carries_id` requires `.md`), so it is the very case the warning
-        // exists for.
+        // a `.MD` file is hydrated like any other, so it is judged here like any other. What it
+        // is judged *by* is `filename_carries_id`, which now matches the extension
+        // case-insensitively too — so `E1S1.MD` carries its id, the write path resolves it on
+        // every host, and no warning fires for it. This gate only decides which files the
+        // convention applies to; the convention itself lives in one place.
         if !Path::new(&rel)
             .extension()
             .map(|ext| ext.eq_ignore_ascii_case("md"))
@@ -429,37 +430,154 @@ pub fn find_off_convention_entity_files(
             continue;
         }
 
-        let expected = format!(
-            "{}/{}",
-            normalize_rel(&crate::write::directory_for_kind(
-                Some(storage),
-                entity.kind
-            )),
-            crate::write::canonical_file_name(&entity.id)
-        );
-        let reason = match (name_carries_id, dir_is_standard) {
-            (false, true) => "its name does not carry that id",
-            (true, false) => "it is outside every standard entity directory",
-            _ => {
-                "its name does not carry that id and it is outside every standard entity directory"
-            }
-        };
         findings.push(FindingRecord {
             path: rel.clone(),
             code: "entity_file_off_convention".to_string(),
             severity: WARNING_SEVERITY.to_string(),
-            message: Some(format!(
-                "'{}' holds entity '{}' but {}; the write path resolves entities by file name, so {} it to '{}' (a '-slug' or '_slug' suffix after the id is allowed)",
-                rel,
-                entity.id,
-                reason,
-                if dir_is_standard { "rename" } else { "move" },
-                expected
+            message: Some(off_convention_message(
+                &rel,
+                &entity.id,
+                entity.kind,
+                storage,
+                name_carries_id,
+                dir_is_standard,
             )),
             found_at: found_at.clone(),
         });
     }
     Ok(findings)
+}
+
+/// What `qdev` says about a file that holds an id under a name the identity rule does not
+/// resolve — the finding above and the write path's refusal say it with this one function, so
+/// the two cannot describe the same file differently.
+pub(crate) fn off_convention_message(
+    rel: &str,
+    id: &str,
+    kind: EntityKind,
+    storage: &crate::config::StorageConfig,
+    name_carries_id: bool,
+    dir_is_standard: bool,
+) -> String {
+    let expected = format!(
+        "{}/{}",
+        normalize_rel(&crate::write::directory_for_kind(Some(storage), kind)),
+        crate::write::canonical_file_name(id)
+    );
+    // All four combinations are reachable, `(true, true)` included: a conventionally named file
+    // in *another* kind's standard directory satisfies both halves and is still not the file a
+    // write for that other kind resolves. Saying "its name does not carry that id" there would
+    // be two false claims and the wrong remedy, so it has its own arm — and when the file is
+    // already at the path this message would name, the remedy is the kind, not a move.
+    if name_carries_id && dir_is_standard && rel == expected {
+        return format!(
+            "'{}' holds entity '{}' and is named for it, but it is filed as a '{}'; a write that resolves another kind's directory will not find it, so address it as a '{}'",
+            rel,
+            id,
+            kind.as_str(),
+            kind.as_str()
+        );
+    }
+    let (reason, verb) = match (name_carries_id, dir_is_standard) {
+        (true, true) => ("it is not in the directory for its kind", "move"),
+        (false, true) => ("its name does not carry that id", "rename"),
+        (true, false) => ("it is outside every standard entity directory", "move"),
+        (false, false) => (
+            "its name does not carry that id and it is outside every standard entity directory",
+            "move",
+        ),
+    };
+    format!(
+        "'{}' holds entity '{}' but {}; the write path resolves entities by file name, so {} it to '{}' (a '-slug' or '_slug' suffix after the id is allowed)",
+        rel,
+        id,
+        reason,
+        verb,
+        expected
+    )
+}
+
+/// The file that holds `id` when the identity rule resolved none, and what to say about it.
+///
+/// Called only on [`crate::write::resolve_entity_file`]'s not-found path, so that "Entity file
+/// not found for 'E1S9'" is never the whole answer when a file in the workspace plainly holds
+/// `E1S9`: the refusal names that file and the rename that would fix it, in exactly the words
+/// `qdev validate` uses for the same file. A file holds an id if it *declares* it in its
+/// frontmatter or *carries* it in its name — the same two halves the in-use set is built from
+/// ([`ids_in_use`]), asked of one id — case-insensitively, because resolution is: `qdev update
+/// e1s9` must get the same explanation as `qdev update E1S9`, not a bare not-found.
+///
+/// **Every** holder is named, not the first: two off-convention files can hold one id, and a
+/// refusal that names one of them sends the user to rename it and straight into the same
+/// refusal on the other.
+///
+/// This walks the spec and state trees, which resolution itself must never do; that is
+/// affordable here because it runs once, on a path that is already returning an error, and it
+/// keeps the write path free of the cache dependency that would otherwise be its only source
+/// for this (`qdev create story` has to work with no cache at all).
+pub(crate) fn off_convention_file_holding_id(
+    workspace_root: &Path,
+    storage: &crate::config::StorageConfig,
+    id: &str,
+) -> Option<String> {
+    let standard_dirs: HashSet<String> = EntityKind::all()
+        .iter()
+        .map(|kind| normalize_rel(&crate::write::directory_for_kind(Some(storage), *kind)))
+        .collect();
+
+    let mut files = Vec::new();
+    collect_markdown_files(&workspace_root.join(&storage.specs_dir), &mut files);
+    collect_markdown_files(&workspace_root.join(&storage.state_dir), &mut files);
+    files.sort();
+    files.dedup();
+
+    let mut explanations = Vec::new();
+    for file in &files {
+        let file_name = match file.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => continue,
+        };
+        let content = std::fs::read_to_string(file).unwrap_or_default();
+        let frontmatter = extract_frontmatter(&content).unwrap_or_default();
+        let declared = frontmatter
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|declared| declared.eq_ignore_ascii_case(id));
+        let carried = crate::write::id_carried_by_filename(&file_name)
+            .filter(|carried| carried.eq_ignore_ascii_case(id));
+        // The rename target is spelled with the id the *file* holds, not the id the user typed:
+        // `qdev update e1s9` must still be told to rename to `E1S9.md`.
+        let held_id = match (declared, &carried) {
+            (Some(declared), _) => declared.to_string(),
+            (None, Some(carried)) => carried.clone(),
+            (None, None) => continue,
+        };
+        let rel = file
+            .strip_prefix(workspace_root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let dir = match rel.rsplit_once('/') {
+            Some((dir, _)) => dir.to_string(),
+            None => String::new(),
+        };
+        // The kind is hydration's answer, so the path this names is the path the next sweep
+        // will judge the file against.
+        let kind = crate::store::determine_entity_kind(file, &held_id, &frontmatter);
+        explanations.push(off_convention_message(
+            &rel,
+            &held_id,
+            kind,
+            storage,
+            crate::write::filename_carries_id(&file_name, &held_id),
+            standard_dirs.contains(&dir),
+        ));
+    }
+    match explanations.len() {
+        0 => None,
+        1 => Some(explanations.remove(0)),
+        _ => Some(explanations.join("; and ")),
+    }
 }
 
 /// A workspace-relative path as a `/`-separated string, with any trailing separator removed, so

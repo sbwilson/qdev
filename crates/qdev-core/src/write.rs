@@ -1179,15 +1179,27 @@ pub fn directory_for_kind(storage: Option<&StorageConfig>, kind: EntityKind) -> 
 /// (case-insensitively)? This is the filename half of the one identity rule stated on
 /// [`resolve_entity_file`], and the single place that rule is spelled out: `find_file_in_dir`
 /// resolves writes with it and `qdev validate` reports a file that fails it.
+///
+/// **The id and the extension are both matched case-insensitively**, so `e1s1.md`, `E1S1.MD`
+/// and `E1S1-buffer.Md` all carry `E1S1`. The extension half was once literal, which made
+/// resolution disagree with occupancy ([`id_carried_by_filename`] has always matched it
+/// case-insensitively) and, worse, made the answer depend on the host filesystem: the deleted
+/// `.is_file()` probe in `find_file_in_dir` resolved `E1S7.MD` on macOS and Windows while the
+/// rule said it carried nothing, and Linux disagreed with both. Extension case was never the
+/// part of a name that made it unresolvable, so it is now legal rather than a repairable defect
+/// — `<id>.md` is still the only spelling any writer *creates*.
 pub(crate) fn filename_carries_id(file_name: &str, id: &str) -> bool {
-    if !file_name.ends_with(".md") {
+    let Some((stem, ext)) = file_name.rsplit_once('.') else {
+        return false;
+    };
+    if !ext.eq_ignore_ascii_case("md") {
         return false;
     }
-    let name_lower = file_name.to_ascii_lowercase();
+    let stem_lower = stem.to_ascii_lowercase();
     let id_lower = id.to_ascii_lowercase();
-    name_lower == format!("{}.md", id_lower)
-        || name_lower.starts_with(&format!("{}-", id_lower))
-        || name_lower.starts_with(&format!("{}_", id_lower))
+    stem_lower == id_lower
+        || stem_lower.starts_with(&format!("{}-", id_lower))
+        || stem_lower.starts_with(&format!("{}_", id_lower))
 }
 
 /// The inverse of [`filename_carries_id`]: the id `file_name` carries, in canonical spelling,
@@ -1215,13 +1227,13 @@ fn recase_hex_id(candidate: &str) -> String {
 }
 
 pub fn id_carried_by_filename(file_name: &str) -> Option<String> {
-    // The extension is matched case-insensitively, like hydration's own walk — *not* like the
-    // resolution rule, which requires a literal `.md`. That asymmetry is deliberate: this
-    // function answers "does this name occupy an id?", and an `E1S1.MD` file occupies the name
-    // whether or not the write path would resolve it. Requiring lowercase here left a hole in
-    // the intersection of two matrix rows — a `.MD` file whose frontmatter will not parse was
-    // in neither half of the union, so allocation handed out its id and `create_story` then
-    // refused with `file_exists` for an id the user never chose.
+    // The extension is matched case-insensitively, like hydration's own walk — and now like
+    // [`filename_carries_id`] too, so occupancy and resolution give one answer on this axis
+    // instead of two. Requiring lowercase here left a hole in the intersection of two matrix
+    // rows — a `.MD` file whose frontmatter will not parse was in neither half of the union, so
+    // allocation handed out its id and `create_story` then refused with `file_exists` for an id
+    // the user never chose. Widening resolution to match (2026-09-11) removed the remaining
+    // asymmetry rather than this one: nothing about *which ids a workspace owns* changed.
     let (stem, ext) = file_name.rsplit_once('.')?;
     if !ext.eq_ignore_ascii_case("md") {
         return None;
@@ -1271,6 +1283,12 @@ pub fn canonical_file_name(id: &str) -> String {
 /// the id part is replaced with `new_id` as written, so the new name is canonically cased even
 /// when the old one was not. A name that does not carry `old_id` at all cannot have a suffix
 /// identified, so it becomes the canonical `<new_id>.md`.
+///
+/// Everything after the id is preserved, which includes the extension's case: `E1S7.MD`
+/// renumbers to `E1S8.MD`. That is deliberate and consistent rather than a gap — the extension
+/// is matched case-insensitively by [`filename_carries_id`], so `E1S8.MD` is a name the write
+/// path resolves and `qdev validate` does not complain about, exactly like the slug it sits
+/// beside.
 pub fn renamed_file_name(current_name: &str, old_id: &str, new_id: &str) -> String {
     if filename_carries_id(current_name, old_id) {
         let suffix = current_name.get(old_id.len()..).unwrap_or("");
@@ -1280,8 +1298,6 @@ pub fn renamed_file_name(current_name: &str, old_id: &str, new_id: &str) -> Stri
     }
 }
 
-/// Finds a file matching `id.md` or `id-*.md` or `id_*.md` in `dir` (case-insensitively).
-/// Returns an error if multiple files match the entity ID.
 /// The write path's "which file holds this id?" question, for callers outside this module.
 ///
 /// Answers with the one file in `dir` whose name carries `id` per the identity rule, `None` if
@@ -1291,28 +1307,43 @@ pub fn find_file_in_dir_for_id(dir: &Path, id: &str) -> Result<Option<PathBuf>, 
     find_file_in_dir(dir, id)
 }
 
+/// Every entry in `dir` judged by [`filename_carries_id`], and nothing else.
+///
+/// **The filesystem is never asked to resolve a spelling.** This used to short-circuit on
+/// `dir.join("<id>.md").is_file()`, which delegates the question to the OS — and on a
+/// case-insensitive filesystem the OS answers for spellings the rule does not admit. A lone
+/// `e1s1.md` was then found twice, once as the probe's `E1S1.md` and once as itself, so
+/// `qdev update E1S1` refused with "Multiple entity files match" naming a file that does not
+/// exist; and `E1S7.MD` resolved on macOS and Windows but not on Linux. Listing the directory
+/// and judging each real name gives one answer on every host, and two matches mean two files
+/// because they are two directory entries.
+///
+/// One consequence is deliberately left standing: a `read_dir` that *fails* is still swallowed,
+/// and without the probe there is no second source, so an unreadable directory now answers "no
+/// file holds this id" for every id in it rather than only for the slugged ones. That is a
+/// worse shape than before, and it is story 1-28's rule to fix (an unreadable directory must be
+/// an error, not an empty answer) — recorded here so the next reader does not take the silence
+/// for a decision.
 fn find_file_in_dir(dir: &Path, id: &str) -> Result<Option<PathBuf>, QdevError> {
     if !dir.exists() {
         return Ok(None);
     }
-    let direct = dir.join(canonical_file_name(id));
     let mut matches = Vec::new();
-    if direct.is_file() {
-        matches.push(direct);
-    }
-
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file() {
                 if let Some(name) = entry.file_name().to_str() {
-                    if filename_carries_id(name, id) && !matches.contains(&path) {
+                    if filename_carries_id(name, id) {
                         matches.push(path);
                     }
                 }
             }
         }
     }
+    // `read_dir` yields entries in filesystem order, so two genuine matches must be reported in
+    // a stable order for the refusal to be reproducible.
+    matches.sort();
 
     match matches.len() {
         0 => Ok(None),
@@ -1333,6 +1364,30 @@ fn find_file_in_dir(dir: &Path, id: &str) -> Result<Option<PathBuf>, QdevError> 
     }
 }
 
+/// The refusal [`resolve_entity_file`] returns when the rule resolves no file for `id`.
+///
+/// "Entity file not found for 'E1S9'" is true but useless when `docs/specs/stories/notes.md`
+/// plainly holds `E1S9` and `qdev get E1S9` just returned it: the id *is* in the workspace, under
+/// a name the rule does not resolve. So the not-found path asks
+/// [`crate::validate::off_convention_file_holding_id`] — which is where `qdev validate`'s
+/// `entity_file_off_convention` warning is worded too — and appends the file and the rename that
+/// would fix it. When nothing holds the id, the bare message is the whole truth and stands.
+fn entity_file_not_found(
+    workspace_root: &Path,
+    storage: Option<&StorageConfig>,
+    id: &str,
+) -> QdevError {
+    let default_storage = StorageConfig::default();
+    let st = storage.unwrap_or(&default_storage);
+    match crate::validate::off_convention_file_holding_id(workspace_root, st, id) {
+        Some(explanation) => QdevError::usage_error(format!(
+            "Entity file not found for '{}': {}",
+            id, explanation
+        )),
+        None => QdevError::usage_error(format!("Entity file not found for '{}'", id)),
+    }
+}
+
 /// Resolves an entity file path and entity kind given workspace root, optional kind, ID, and
 /// optional storage config. **The single entry point every writer uses** — no caller grows its
 /// own lookup.
@@ -1344,7 +1399,9 @@ fn find_file_in_dir(dir: &Path, id: &str) -> Result<Option<PathBuf>, QdevError> 
 /// `X-<slug>.md` or `X_<slug>.md` (see [`filename_carries_id`]). Reads answer "which file is
 /// entity X?" from frontmatter `id` and remember the path; writes answer it from the file name,
 /// which under this convention is the same file — so the write path needs no cache dependency
-/// and `qdev create story` keeps working outside an initialised workspace.
+/// and `qdev create story` keeps working outside an initialised workspace. Resolution itself
+/// reads exactly one directory; only the *refusal* below walks the spec and state trees, once,
+/// to name the file that holds the id — an error path, never the answer path.
 ///
 /// The convention is enforced, not assumed: `qdev validate` reports a `warning`-severity
 /// `entity_file_off_convention` finding for every hydrated entity whose file breaks either half
@@ -1377,10 +1434,7 @@ pub fn resolve_entity_file(
         if let Some(path) = find_file_in_dir(&dir, trimmed_id)? {
             return Ok((kind, trimmed_id.to_string(), path));
         }
-        return Err(QdevError::usage_error(format!(
-            "Entity file not found for '{}'",
-            trimmed_id
-        )));
+        return Err(entity_file_not_found(workspace_root, storage, trimmed_id));
     }
 
     // No kind passed: infer kind from identifier grammar
@@ -1430,10 +1484,7 @@ pub fn resolve_entity_file(
     }
 
     match fallback_matches.len() {
-        0 => Err(QdevError::usage_error(format!(
-            "Entity file not found for '{}'",
-            trimmed_id
-        ))),
+        0 => Err(entity_file_not_found(workspace_root, storage, trimmed_id)),
         1 => Ok(fallback_matches.remove(0)),
         _ => Err(QdevError::usage_error(format!(
             "Ambiguous entity ID '{}' matches multiple entity kinds: {:?}",
@@ -1983,16 +2034,17 @@ pub fn create_story(options: &StoryCreateOptions) -> Result<StoryCreateResult, Q
         }))
     })?;
 
+    // The name is spelled by `canonical_file_name`, never by a second `format!` here: this is
+    // the same rule `resolve_entity_file` resolves by, and a story created under a name only
+    // this function knows how to build is a story no writer can find.
     let rel_dir = directory_for_kind(options.storage.as_ref(), EntityKind::Story);
+    let file_name = canonical_file_name(story_id);
     let rel_path = format!(
-        "{}/{}.md",
+        "{}/{}",
         rel_dir.to_string_lossy().replace('\\', "/"),
-        story_id
+        file_name
     );
-    let abs_path = options
-        .workspace_root
-        .join(&rel_dir)
-        .join(format!("{}.md", story_id));
+    let abs_path = options.workspace_root.join(&rel_dir).join(&file_name);
 
     // 3. Advisory write lock, same file and timeout as every other write.
     let cache_dir_rel = options

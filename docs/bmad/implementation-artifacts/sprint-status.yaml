@@ -54,7 +54,7 @@ development_status:
   # each owns named findings from `epic-1-cross-story-review-2026-09-11-pass-3.md`, and the
   # ledger entry for each finding names the key that owns it. Specs are written by bmad-build
   # when the story starts. Order matters where noted: 1-27 uses 1-24's resolver.
-  1-24-identity-answers-from-the-rule: backlog          # P3-2, P3-6
+  1-24-identity-answers-from-the-rule: done             # P3-2, P3-6
   1-25-unchanged-is-not-healthy: backlog                # P3-1
   1-26-a-kind-change-repairs-itself: backlog            # NEW-4
   1-27-fix-ids-leaves-every-entity-resolvable: backlog  # P3-4 (after 1-24)

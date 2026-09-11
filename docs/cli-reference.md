@@ -85,17 +85,24 @@ cache and takes no lock, so no `.qdev/` directory is left behind.
 **A file is named for the entity it holds.** One rule answers "which file is entity `X`?" for
 reads and writes alike: `X` lives under its kind's directory (`docs/specs/stories/`,
 `docs/specs/adrs/`, `docs/state/dw/`, … per `[storage]`) in a file named `X.md`, `X-<slug>.md` or
-`X_<slug>.md`. Reads answer from the frontmatter `id`; writes answer from the file name, which
+`X_<slug>.md` — the id and the `.md` extension are both matched case-insensitively, so `e1s1.md`
+and `E1S1.MD` hold `E1S1` too, on every filesystem (`X.md` stays the only spelling qdev itself
+writes). The rule decides this, never the filesystem: resolution lists the directory and judges
+each real name, so the answer is the same on a case-sensitive host and a case-insensitive one.
+Reads answer from the frontmatter `id`; writes answer from the file name, which
 under this convention is the same file — so `qdev get`, `qdev update` and `qdev relate` never
 disagree about which file an entity is, and `create story` still works with no cache present.
 
 Consequences worth knowing:
 
-- Two files matching one id is a usage error (exit 2) naming both, never a guess.
+- Two files matching one id is a usage error (exit 2) naming both, never a guess — and both
+  named files exist, because a match is a directory entry rather than a spelling the OS accepted.
 - A file whose name does not carry its id, or that lives outside every entity directory, is
   still *read* (hydration walks the spec and state trees recursively) but cannot be written.
   `qdev validate` reports it as `entity_file_off_convention` at `warning` severity, naming the
-  file and the name it should have; a warning alone keeps `validate` at exit 0.
+  file and the name it should have; a warning alone keeps `validate` at exit 0. A write attempted
+  on such an entity is refused with that same sentence — the file holding the id and the rename
+  that would fix it — rather than a bare "Entity file not found".
 - Renaming is never done behind your back. The one exception is `qdev validate --fix-ids`, which
   renames as it renumbers — a renumbered entity accepts `qdev update` immediately, with no manual
   `mv` — and reports `old_path`/`new_path` alongside `old_id`/`new_id` so the git-visible move is

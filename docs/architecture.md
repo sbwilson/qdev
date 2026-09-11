@@ -265,7 +265,13 @@ local override.
 ### Identity: a file is named for the entity it holds
 
 One rule answers "which file is entity `X`?" for every reader and every writer. `X` lives in its
-kind's directory above, in a file named `X.md`, `X-<slug>.md` or `X_<slug>.md`. Hydration answers
+kind's directory above, in a file named `X.md`, `X-<slug>.md` or `X_<slug>.md`, **with the id and
+the `.md` extension both matched case-insensitively** — `e1s1.md` and `E1S1.MD` hold `E1S1` as
+surely as `E1S1.md` does, on every filesystem. `X.md` stays the only spelling a writer creates;
+the others are legal names, not repairable defects. The rule decides this, never the filesystem:
+resolution lists the directory and judges each real name, and asks the OS nothing that a
+case-insensitive host would answer differently from a case-sensitive one. Two matches therefore
+mean two files. Hydration answers
 from the frontmatter `id` and records the file's path; the write path answers from the file name,
 which under this convention is the same file — so it needs no cache dependency and `qdev create
 story` still works outside an initialised workspace. Frontmatter `id` remains the entity's
@@ -274,9 +280,20 @@ identity; the file name is how a writer finds it.
 The convention is enforced rather than assumed: `qdev validate` reports
 `entity_file_off_convention` (`warning`) for a hydrated entity whose file name does not carry its
 id or that lives outside every entity directory — readable, since hydration walks both trees
-recursively, but not writable. Two files matching one id is a usage error naming both. The only
+recursively, but not writable. A write refused for such a file says so: the refusal names the file
+holding the id and the rename that would fix it, in the same words the warning uses, rather than
+"Entity file not found" for a file that plainly exists. Two files matching one id is a usage error
+naming both, and after this rule both named files exist. The only
 sanctioned rename is `qdev validate --fix-ids`, which renames as it renumbers so the renumbered
 entity is immediately writable, and reports the move in its payload.
+
+There is exactly one implementation of each half of the rule — `write::filename_carries_id` for
+the name, `write::directory_for_kind` for the directory, `write::canonical_file_name` for the
+spelling a writer creates — and
+`crates/qdev-core/tests/architecture_tests.rs` fails, naming the file and line, when any other
+site builds an entity file name from an id or probes the filesystem for one. That test is how the
+rule's sites stay enumerable: a second answer has to be argued for in the allow-list rather than
+appearing quietly.
 
 <a id="identity-in-use"></a>
 

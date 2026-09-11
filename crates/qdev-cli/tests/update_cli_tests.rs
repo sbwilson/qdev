@@ -1285,3 +1285,242 @@ updated_by:
         "a refused update must leave the file alone: {content}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The identity rule answers "which file holds entity X", never the filesystem
+// ---------------------------------------------------------------------------
+
+fn story_doc(id: &str) -> String {
+    format!(
+        r#"---
+id: {id}
+title: "Story {id}"
+status: draft
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#
+    )
+}
+
+/// A lone `e1s1.md` is one file, so it resolves once. The resolver used to probe
+/// `dir.join("E1S1.md").is_file()` before listing the directory, and on a case-insensitive host
+/// the OS answered for that spelling too — so the single file was found twice, under two
+/// different strings, and every writer refused with "Multiple entity files match" naming
+/// `E1S1.md`, a file that does not exist, for an entity `qdev get` returns at exit 0.
+#[test]
+fn test_a_lowercase_file_name_resolves_once_for_every_writer() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories).unwrap();
+    fs::write(stories.join("e1s1.md"), story_doc("E1S1")).unwrap();
+    fs::write(stories.join("E1S2.md"), story_doc("E1S2")).unwrap();
+
+    let mut get = Command::cargo_bin("qdev").unwrap();
+    get.current_dir(root)
+        .args(["get", "E1S1", "--json"])
+        .assert()
+        .success();
+
+    let mut update = Command::cargo_bin("qdev").unwrap();
+    update
+        .current_dir(root)
+        .args(["update", "E1S1", "--status", "ready"])
+        .assert()
+        .success()
+        .code(0);
+    assert!(fs::read_to_string(stories.join("e1s1.md"))
+        .unwrap()
+        .contains("status: ready"));
+
+    let mut relate = Command::cargo_bin("qdev").unwrap();
+    relate
+        .current_dir(root)
+        .args(["relate", "E1S1", "depends_on", "E1S2"])
+        .assert()
+        .success()
+        .code(0);
+
+    let mut unrelate = Command::cargo_bin("qdev").unwrap();
+    unrelate
+        .current_dir(root)
+        .args(["unrelate", "E1S1", "depends_on", "E1S2"])
+        .assert()
+        .success()
+        .code(0);
+}
+
+/// "Multiple entity files match" now means two directory entries, so every name it prints is a
+/// name `ls` would print.
+#[test]
+fn test_two_real_files_are_named_and_both_exist() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories).unwrap();
+    fs::write(stories.join("E1S1.md"), story_doc("E1S1")).unwrap();
+    fs::write(stories.join("E1S1-copy.md"), story_doc("E1S1")).unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["update", "E1S1", "--status", "ready", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["error"]["code"], "usage_error");
+    let message = val["error"]["message"].as_str().unwrap().to_string();
+    assert!(message.contains("Multiple entity files match"), "{message}");
+    for named in ["E1S1.md", "E1S1-copy.md"] {
+        assert!(message.contains(named), "{message}");
+        assert!(
+            stories.join(named).is_file(),
+            "the refusal must name only files that exist: {named}"
+        );
+    }
+}
+
+/// Both spellings of one name are two files only on a case-sensitive host; where the host will
+/// not hold both, there is nothing to assert and the test says so rather than pretending.
+#[test]
+fn test_both_extension_spellings_are_two_files_on_a_case_sensitive_host() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories).unwrap();
+    fs::write(stories.join("E1S1.md"), story_doc("E1S1")).unwrap();
+    fs::write(stories.join("E1S1.MD"), story_doc("E1S1")).unwrap();
+    let entries = fs::read_dir(&stories).unwrap().count();
+    if entries < 2 {
+        // Case-insensitive filesystem (macOS, Windows): the second write replaced the first, so
+        // there is one file and this row has nothing to assert *here*. The rule itself is pinned
+        // host-independently by
+        // `write_tests::test_an_uppercase_extension_takes_part_in_the_multiple_match_refusal`,
+        // which makes two files that differ in the stem as well as the extension. Say so out
+        // loud: a row that silently does not run reads as a row that passed.
+        eprintln!(
+            "SKIPPED test_both_extension_spellings_are_two_files_on_a_case_sensitive_host: \
+             this filesystem is case-insensitive, so `E1S1.md` and `E1S1.MD` are one file"
+        );
+        // What does hold on every host: the surviving file resolves, rather than the pair being
+        // reported as a duplicate of itself.
+        let mut cmd = Command::cargo_bin("qdev").unwrap();
+        cmd.current_dir(root)
+            .args(["update", "E1S1", "--status", "ready"])
+            .assert()
+            .success()
+            .code(0);
+        return;
+    }
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["update", "E1S1", "--status", "ready", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let message = val["error"]["message"].as_str().unwrap().to_string();
+    assert!(message.contains("Multiple entity files match"), "{message}");
+    assert!(
+        message.contains("E1S1.md") && message.contains("E1S1.MD"),
+        "{message}"
+    );
+}
+
+/// "Entity file not found for 'E1S9'" is true and useless when `notes.md` plainly holds `E1S9`
+/// and `qdev get E1S9` just returned it. The refusal names the file and the rename that fixes
+/// it — in the words `qdev validate` uses for the same file.
+#[test]
+fn test_an_id_held_by_an_unresolvable_name_is_refused_with_the_rename_that_fixes_it() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories).unwrap();
+    fs::write(stories.join("notes.md"), story_doc("E1S9")).unwrap();
+
+    let mut get = Command::cargo_bin("qdev").unwrap();
+    get.current_dir(root)
+        .args(["get", "E1S9", "--json"])
+        .assert()
+        .success();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["update", "E1S9", "--status", "ready", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["error"]["code"], "usage_error");
+    let message = val["error"]["message"].as_str().unwrap().to_string();
+    assert!(
+        message.contains("Entity file not found for 'E1S9'"),
+        "{message}"
+    );
+    assert!(message.contains("docs/specs/stories/notes.md"), "{message}");
+    assert!(message.contains("docs/specs/stories/E1S9.md"), "{message}");
+
+    // And `qdev validate` says the same thing about the same file.
+    let mut validate = Command::cargo_bin("qdev").unwrap();
+    let validate_assert = validate
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .success();
+    let validate_val: Value = serde_json::from_slice(&validate_assert.get_output().stdout).unwrap();
+    let warning = validate_val["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "entity_file_off_convention")
+        .unwrap_or_else(|| panic!("{validate_val}"))
+        .clone();
+    let warning_message = warning["message"].as_str().unwrap();
+    assert!(
+        message.ends_with(warning_message),
+        "the refusal must quote the warning verbatim:\n  refusal: {message}\n  warning: {warning_message}"
+    );
+}
+
+/// Nothing on disk stays a plain not-found: the refusal only grows a file name when a file
+/// really holds the id.
+#[test]
+fn test_an_id_no_file_holds_is_still_a_bare_not_found() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["update", "E1S1", "--status", "ready", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(
+        val["error"]["message"], "Entity file not found for 'E1S1'",
+        "{val}"
+    );
+}

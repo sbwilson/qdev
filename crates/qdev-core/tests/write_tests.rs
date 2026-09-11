@@ -1392,3 +1392,268 @@ fn test_frontmatter_version_accepts_every_yaml_integer_form() {
         );
     }
 }
+
+/// The rule answers, not the filesystem. A directory holding exactly one file that carries an id
+/// resolves that file whatever the case of its name — and resolves it *once*, because a match is
+/// a directory entry rather than a spelling the OS was willing to open.
+#[test]
+fn test_one_file_carrying_an_id_resolves_once_whatever_its_case() {
+    for name in ["e1s1.md", "E1S1.md", "E1S1.MD", "E1S1-buffer.Md"] {
+        let tmp = TempDir::new().unwrap();
+        let stories_dir = tmp.path().join("docs/specs/stories");
+        fs::create_dir_all(&stories_dir).unwrap();
+        fs::write(stories_dir.join(name), "---").unwrap();
+
+        let (kind, _, path) = qdev_core::resolve_entity_file(tmp.path(), None, "E1S1", None)
+            .unwrap_or_else(|e| panic!("{name} must resolve: {}", e.message()));
+        assert_eq!(kind, EntityKind::Story);
+        assert_eq!(
+            path,
+            stories_dir.join(name),
+            "{name} must resolve to itself, not to a spelling the filesystem accepted"
+        );
+        assert!(
+            path.is_file(),
+            "the resolved path must be a path that exists: {}",
+            path.display()
+        );
+    }
+}
+
+/// Two matches mean two files: every name the refusal prints is a directory entry.
+#[test]
+fn test_two_files_carrying_one_id_name_two_files_that_exist() {
+    let tmp = TempDir::new().unwrap();
+    let stories_dir = tmp.path().join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    fs::write(stories_dir.join("E1S1.md"), "---").unwrap();
+    fs::write(stories_dir.join("E1S1-copy.md"), "---").unwrap();
+
+    let err = qdev_core::resolve_entity_file(tmp.path(), None, "E1S1", None).unwrap_err();
+    assert_eq!(err.exit_code(), ExitCode::UsageError);
+    let message = err.message().to_string();
+    assert!(message.contains("Multiple entity files match"), "{message}");
+    for named in ["E1S1.md", "E1S1-copy.md"] {
+        assert!(message.contains(named), "{message}");
+        assert!(stories_dir.join(named).is_file());
+    }
+}
+
+/// An id held only by a name the rule does not resolve is refused with that file and the rename
+/// that would fix it, rather than with "not found" for a file that plainly exists.
+#[test]
+fn test_not_found_names_the_file_that_holds_the_id() {
+    let tmp = TempDir::new().unwrap();
+    let stories_dir = tmp.path().join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    fs::write(stories_dir.join("notes.md"), "---\nid: E1S9\n---\n").unwrap();
+
+    let err = qdev_core::resolve_entity_file(tmp.path(), None, "E1S9", None).unwrap_err();
+    assert_eq!(err.exit_code(), ExitCode::UsageError);
+    let message = err.message().to_string();
+    assert!(message.contains("docs/specs/stories/notes.md"), "{message}");
+    assert!(message.contains("docs/specs/stories/E1S9.md"), "{message}");
+
+    // With nothing holding the id, the bare message is the whole truth.
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join("docs/specs/stories")).unwrap();
+    let err = qdev_core::resolve_entity_file(tmp.path(), None, "E1S9", None).unwrap_err();
+    assert_eq!(err.message(), "Entity file not found for 'E1S9'");
+}
+
+/// `create_story` writes the name the resolver reads: one spelling of the rule, so a created
+/// story is never a story no writer can find.
+#[test]
+fn test_create_story_writes_the_name_the_resolver_reads() {
+    let tmp = TempDir::new().unwrap();
+    let res = create_story(&StoryCreateOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        story_id: "E1S1".to_string(),
+        title: Some("Buffer layout".to_string()),
+        appetite: None,
+        safety_class: None,
+        target_modules: Vec::new(),
+        owners: Vec::new(),
+        author: Author::new("human", "simon"),
+    })
+    .unwrap();
+
+    let (_, _, path) = qdev_core::resolve_entity_file(tmp.path(), None, &res.id, None).unwrap();
+    assert_eq!(path, tmp.path().join(&res.rel_path));
+    assert_eq!(
+        path.file_name().unwrap().to_string_lossy(),
+        qdev_core::canonical_file_name(&res.id)
+    );
+}
+
+/// The extension is matched case-insensitively; it is not matched loosely. `.mdx`, `.markdown`,
+/// a trailing `.bak` and a name with no extension at all carry no id, or the rule would resolve
+/// files hydration never reads.
+#[test]
+fn test_only_an_md_extension_carries_an_id() {
+    for name in [
+        "E1S1.mdx",
+        "E1S1.markdown",
+        "E1S1.md.bak",
+        "E1S1.txt",
+        "E1S1",
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let stories_dir = tmp.path().join("docs/specs/stories");
+        fs::create_dir_all(&stories_dir).unwrap();
+        fs::write(stories_dir.join(name), "---").unwrap();
+
+        let err = qdev_core::resolve_entity_file(tmp.path(), None, "E1S1", None)
+            .err()
+            .unwrap_or_else(|| panic!("{name} must not carry E1S1"));
+        assert_eq!(err.exit_code(), ExitCode::UsageError);
+        assert!(
+            err.message().contains("Entity file not found"),
+            "{name}: {}",
+            err.message()
+        );
+    }
+
+    // A `_slug` under an uppercase extension is two legal halves of one name, and carries.
+    let tmp = TempDir::new().unwrap();
+    let stories_dir = tmp.path().join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    fs::write(stories_dir.join("E1S1_buffer.MD"), "---").unwrap();
+    let (_, _, path) = qdev_core::resolve_entity_file(tmp.path(), None, "E1S1", None).unwrap();
+    assert!(path.ends_with("E1S1_buffer.MD"));
+}
+
+/// Two files carrying one id are two files whatever their extensions' case, and neither the
+/// refusal nor this test needs the host's opinion: the names differ in the stem too, so a
+/// case-insensitive filesystem holds both.
+#[test]
+fn test_an_uppercase_extension_takes_part_in_the_multiple_match_refusal() {
+    let tmp = TempDir::new().unwrap();
+    let stories_dir = tmp.path().join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    fs::write(stories_dir.join("E1S1.md"), "---").unwrap();
+    fs::write(stories_dir.join("E1S1-copy.MD"), "---").unwrap();
+
+    let err = qdev_core::resolve_entity_file(tmp.path(), None, "E1S1", None).unwrap_err();
+    let message = err.message().to_string();
+    assert!(message.contains("Multiple entity files match"), "{message}");
+    assert!(
+        message.contains("E1S1.md") && message.contains("E1S1-copy.MD"),
+        "{message}"
+    );
+}
+
+/// `renamed_file_name` preserves everything after the id, the extension's case included — and
+/// under the widened rule that is a name the write path then resolves, which is the whole
+/// reason preserving it is safe.
+#[test]
+fn test_renumbering_preserves_an_uppercase_extension_and_stays_resolvable() {
+    assert_eq!(
+        qdev_core::renamed_file_name("E1S7.MD", "E1S7", "E1S8"),
+        "E1S8.MD"
+    );
+    assert_eq!(
+        qdev_core::renamed_file_name("E1S7-buffer.Md", "E1S7", "E1S8"),
+        "E1S8-buffer.Md"
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let stories_dir = tmp.path().join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    fs::write(
+        stories_dir.join(qdev_core::renamed_file_name("E1S7.MD", "E1S7", "E1S8")),
+        "---",
+    )
+    .unwrap();
+    let (_, _, path) = qdev_core::resolve_entity_file(tmp.path(), None, "E1S8", None).unwrap();
+    assert!(path.ends_with("E1S8.MD"));
+}
+
+/// A holder outside every standard entity directory is a *move*, not a rename, and the target is
+/// its kind's directory — the other branch of the refusal's explanation.
+#[test]
+fn test_not_found_tells_a_misplaced_file_to_move() {
+    let tmp = TempDir::new().unwrap();
+    let misc = tmp.path().join("docs/specs/misc");
+    fs::create_dir_all(&misc).unwrap();
+    fs::create_dir_all(tmp.path().join("docs/specs/stories")).unwrap();
+    fs::write(misc.join("E1S9.md"), "---\nid: E1S9\n---\n").unwrap();
+
+    let err = qdev_core::resolve_entity_file(tmp.path(), None, "E1S9", None).unwrap_err();
+    let message = err.message().to_string();
+    assert!(message.contains("docs/specs/misc/E1S9.md"), "{message}");
+    assert!(message.contains("move it to"), "{message}");
+    assert!(message.contains("docs/specs/stories/E1S9.md"), "{message}");
+}
+
+/// A file whose frontmatter will not parse declares nothing, so only its *name* holds the id —
+/// and the refusal still names it, because the in-use halves are a union, not an intersection.
+#[test]
+fn test_not_found_names_a_holder_whose_frontmatter_will_not_parse() {
+    let tmp = TempDir::new().unwrap();
+    let misc = tmp.path().join("docs/specs/misc");
+    fs::create_dir_all(&misc).unwrap();
+    fs::create_dir_all(tmp.path().join("docs/specs/stories")).unwrap();
+    fs::write(misc.join("E1S9-notes.md"), "---\nid: [unterminated\n---\n").unwrap();
+
+    let err = qdev_core::resolve_entity_file(tmp.path(), None, "E1S9", None).unwrap_err();
+    let message = err.message().to_string();
+    assert!(
+        message.contains("docs/specs/misc/E1S9-notes.md"),
+        "{message}"
+    );
+}
+
+/// Resolution is case-insensitive, so the explanation must be too: `qdev update e1s9` gets the
+/// same file and the same rename as `qdev update E1S9`, spelled with the id the file holds.
+#[test]
+fn test_the_refusal_is_case_insensitive_about_the_id_it_was_asked_for() {
+    let tmp = TempDir::new().unwrap();
+    let stories_dir = tmp.path().join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    fs::write(stories_dir.join("notes.md"), "---\nid: E1S9\n---\n").unwrap();
+
+    let err = qdev_core::resolve_entity_file(tmp.path(), None, "e1s9", None).unwrap_err();
+    let message = err.message().to_string();
+    assert!(message.contains("docs/specs/stories/notes.md"), "{message}");
+    assert!(message.contains("docs/specs/stories/E1S9.md"), "{message}");
+}
+
+/// Two off-convention files can hold one id. Naming only the first sends the user to rename it
+/// and straight into the same refusal on the second, so every holder is named.
+#[test]
+fn test_the_refusal_names_every_holder() {
+    let tmp = TempDir::new().unwrap();
+    let stories_dir = tmp.path().join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    fs::write(stories_dir.join("notes.md"), "---\nid: E1S9\n---\n").unwrap();
+    fs::write(stories_dir.join("draft.md"), "---\nid: E1S9\n---\n").unwrap();
+
+    let err = qdev_core::resolve_entity_file(tmp.path(), None, "E1S9", None).unwrap_err();
+    let message = err.message().to_string();
+    assert!(message.contains("docs/specs/stories/notes.md"), "{message}");
+    assert!(message.contains("docs/specs/stories/draft.md"), "{message}");
+}
+
+/// The fourth combination: a conventionally named file in a standard directory that a write for
+/// *another* kind still cannot resolve. It is not a rename and not a move to where the file
+/// already is — the mismatch is the kind, and the message says so.
+#[test]
+fn test_a_conventional_file_in_another_kinds_directory_is_told_about_the_kind() {
+    let tmp = TempDir::new().unwrap();
+    let stories_dir = tmp.path().join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    fs::create_dir_all(tmp.path().join("docs/specs/adrs")).unwrap();
+    fs::write(stories_dir.join("AD-9.md"), "---\nid: AD-9\n---\n").unwrap();
+
+    let err = qdev_core::resolve_entity_file(tmp.path(), Some(EntityKind::Adr), "AD-9", None)
+        .unwrap_err();
+    let message = err.message().to_string();
+    assert!(message.contains("docs/specs/stories/AD-9.md"), "{message}");
+    assert!(message.contains("filed as a 'story'"), "{message}");
+    assert!(
+        !message.contains("rename it") && !message.contains("move it"),
+        "the file is already where its own kind's rule puts it: {message}"
+    );
+}

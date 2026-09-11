@@ -1827,11 +1827,12 @@ fn test_fix_ids_still_repairs_a_duplicate_in_its_kind_directory() {
     assert_eq!(create_val["id"], "E1S3", "{create_val}");
 }
 
-/// A `.MD` file whose name does not carry its id draws the off-convention warning it would draw
-/// for a `.md` file. Hydration reads it either way; judging only `.md` names silenced the one
-/// signal that would have named this file.
+/// A `.MD` file whose name *does* carry its id is a legal name, not a repairable defect: the
+/// extension is matched case-insensitively by the identity rule, so the write path resolves it
+/// on every host and no warning fires for it. The warning used to fire here while the write path
+/// resolved the file anyway on macOS — a claim that was false on the platform it was read on.
 #[test]
-fn test_off_convention_warning_covers_uppercase_md_extension() {
+fn test_uppercase_md_extension_carries_its_id_and_draws_no_warning() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     setup_workspace(root);
@@ -1873,9 +1874,85 @@ updated_by:
         .iter()
         .filter(|f| f["code"] == "entity_file_off_convention")
         .collect();
+    assert!(off.is_empty(), "{val}");
+
+    // And the write path agrees: the edit lands in the file that exists, and no file under the
+    // canonical spelling is conjured beside it.
+    let mut update = Command::cargo_bin("qdev").unwrap();
+    update
+        .current_dir(root)
+        .args(["update", "E1S9", "--status", "ready", "--json"])
+        .assert()
+        .success();
+    assert!(fs::read_to_string(stories_dir.join("E1S9.MD"))
+        .unwrap()
+        .contains("status: ready"));
+
+    // `relate` reports the path the file actually has, not a spelling no file carries — which
+    // is also the path it writes to the cache.
+    write_story(&stories_dir, "E1S8");
+    let mut relate = Command::cargo_bin("qdev").unwrap();
+    let relate_assert = relate
+        .current_dir(root)
+        .args(["relate", "E1S9", "depends_on", "E1S8"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&relate_assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("docs/specs/stories/E1S9.MD"),
+        "relate must report the real path: {stdout}"
+    );
+}
+
+/// The extension's case is legal; the rest of the name still has to carry the id. A `.MD` file
+/// named for nothing draws the warning exactly as its `.md` twin does — the gate decides which
+/// files the convention applies to, not what the convention says.
+#[test]
+fn test_off_convention_warning_covers_uppercase_md_extension() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    fs::write(
+        stories_dir.join("notes.MD"),
+        r#"---
+id: E1S9
+title: "Story E1S9"
+status: draft
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .success()
+        .code(0);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let off: Vec<&Value> = val["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "entity_file_off_convention")
+        .collect();
     assert_eq!(off.len(), 1, "{val}");
     assert_eq!(off[0]["severity"], "warning");
-    assert_eq!(off[0]["path"], "docs/specs/stories/E1S9.MD");
+    assert_eq!(off[0]["path"], "docs/specs/stories/notes.MD");
     assert!(off[0]["message"]
         .as_str()
         .unwrap()
