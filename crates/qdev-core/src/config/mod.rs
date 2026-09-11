@@ -277,18 +277,28 @@ fn validate_storage_section(val: &toml::Value, filename: &str) -> Result<(), Qde
                     "must name a directory, but is empty",
                 ));
             }
-            let path = std::path::Path::new(trimmed);
-            if path.is_absolute() {
+            // Judged the same way on every platform, deliberately, and so not by
+            // `Path::is_absolute` or `Path::components`: both answer for the host. `qdev.toml` is
+            // committed and shared, so a value the loader accepts on Linux and refuses on Windows
+            // is a workspace that builds for one developer and not the next. `/absolute/path` is
+            // not "absolute" to Windows — it has no drive prefix — yet joining it onto the root
+            // still lands outside the workspace, on whatever drive is current; `C:\x` is an
+            // ordinary relative name to Unix and an escape to Windows. Both are refused
+            // everywhere.
+            let segments: Vec<&str> = trimmed.split(['/', '\\']).collect();
+            let drive_prefixed = {
+                let first = segments[0];
+                let mut chars = first.chars();
+                matches!((chars.next(), chars.next()), (Some(c), Some(':')) if c.is_ascii_alphabetic())
+            };
+            if segments[0].is_empty() || drive_prefixed {
                 return Err(storage_path_error(
                     key,
                     filename,
                     "must be relative to the workspace root, but is absolute",
                 ));
             }
-            if path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
+            if segments.contains(&"..") {
                 return Err(storage_path_error(
                     key,
                     filename,

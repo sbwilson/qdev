@@ -975,6 +975,16 @@ fn test_storage_paths_must_be_relative_non_empty_and_inside_the_workspace() {
             ("/absolute/path", "is absolute"),
             ("../escape", "contains '..'"),
             ("nested/../..", "contains '..'"),
+            // The same shapes spelled the Windows way. `qdev.toml` is committed and shared, so
+            // every one of these is refused on every platform: a value that loads on Linux and
+            // fails on Windows is a workspace that works for one developer and not the next.
+            // `\\absolute\\path` is what `/absolute/path` looks like to Windows — and neither is
+            // "absolute" there, since a drive prefix is what makes a Windows path absolute, which
+            // is why asking `Path::is_absolute` let this through.
+            ("\\\\absolute\\\\path", "is absolute"),
+            ("C:\\\\x", "is absolute"),
+            ("C:x", "is absolute"),
+            ("nested\\\\..\\\\..", "contains '..'"),
         ] {
             let temp = TempDir::new().unwrap();
             let root = temp.path();
