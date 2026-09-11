@@ -1,10 +1,10 @@
 # Epic 1 Context: The Relational Storage & CLI Substrate
 
-<!-- Generated from planning artifacts. Regenerate with compile-epic-context if planning docs change. -->
+<!-- Compiled from planning artifacts. Edit freely. Regenerate with compile-epic-context if planning docs change. -->
 
 ## Goal
 
-Establish the relational storage and CLI substrate that serves as qdev's foundation: a high-performance, offline-first developer tool where Git-tracked Markdown files with YAML frontmatter are the single source of truth and a local SQLite cache provides instant relational indexing. This epic delivers the two-crate architecture (`qdev-cli` and `qdev-core`), dual configuration loading, strict entity frontmatter schemas with collision-resistant IDs, a sub-30 ms incremental metadata sweep hydration engine, an advisory-locked atomic write path that preserves frontmatter comments, a deterministic JSON query engine, bidirectional relationship tracking with cycle detection, and workspace validation. Completing this epic guarantees all downstream workflow engines, verification gates, and AI agent skills interact with a robust, cross-platform, non-interactive CLI and storage layer.
+Epic 1 builds the foundation everything else in qdev stands on: a two-crate Rust workspace whose CLI already speaks the final JSON envelope and exit codes, a dual configuration loader, strict hand-editable Markdown entity formats with embedded JSON Schemas, a collision-resistant identifier grammar, a rebuildable SQLite cache with an incremental hydration sweep, an atomic and attributed write path, and the query, relation, and validation surfaces built on top. It matters because every later epic — workflow, gates, and AI context — assumes a stable storage contract and a stable output contract; changing either later would invalidate work already done. The epic is complete when a developer can create a story, hand-edit the file, and read it back as validated JSON in under 30 ms on a 1,000-entity fixture.
 
 ## Stories
 
@@ -24,51 +24,41 @@ Establish the relational storage and CLI substrate that serves as qdev's foundat
 
 ## Requirements & Constraints
 
-- **Single Source of Truth & Rebuildable Index**: Every entity is stored in Git as an individual Markdown file with YAML frontmatter. The local SQLite database serves strictly as a rebuildable index; wiping `.qdev/cache/` must incur zero data loss and regenerate an identical database.
-- **Universal JSON & Strict Exit Codes**: Every command must support `--json`. Success payloads carry `schema_version`. Errors are emitted with a uniform structure (`{"error": {"code", "message", "details"}}`) to stdout in JSON mode. Process exit codes are standardized across all commands: `0` (success), `1` (logical failure / validation findings), `2` (usage error), `3` (refused by policy or needs confirmation), `4` (infrastructure failure / timeout / corruption), and `5` (concurrency conflict / lock timeout / version mismatch).
-- **Boot Latency & Performance**: The incremental hydration sweep on command boot must complete in ≤ 30 ms for a 1,000-entity repository with one modified file on standard hardware.
-- **Hydration Resilience & Error Containment**: Branch switching, checkouts, and external file changes must be detected and synced automatically. Files with merge conflict markers (`<<<<<<<`) produce a file-specific `merge_conflict` validation finding without halting hydration of valid files. Schema-invalid files generate `schema_violation` findings while retaining their previous cache rows marked as stale.
-- **Comment-Preserving Frontmatter Mutations**: Programmatic updates to entity frontmatter must apply line-based patches that preserve existing comments, key ordering, and blank lines byte-for-byte outside the modified fields.
-- **Audited Attribution & Optimistic Concurrency**: Every entity update records author type (`human` or `agent`) and author ID (`developer_id`), incrementing the entity `version`. Mutations support optimistic locking via `--if-version <N>`, failing with exit code 5 on mismatches.
-- **Isolated Query Projections**: Query commands return only the requested entity and immediate metadata by default. Extended relations, constraints, and scratchpad ledgers are omitted unless explicitly requested via expansion flags.
-- **Dual Configuration Model**: Project-wide policies in committed `qdev.toml` merge with gitignored developer preferences in `.qdev.local.toml`. Local scalar keys override project keys individually; array collections (`[[modules]]`, `[[gates]]`) override the entire list rather than merging element-wise. Developer identity falls back to `git config user.email` if missing.
-- **Workspace Integrity Validation**: The validation engine identifies dangling relations, circular dependencies (`depends_on` cycles), duplicate planning IDs across branches, merge conflicts, schema violations, orphan deferred work, and missing risk rationale for safety mitigations.
-- **Zero External Runtimes & Zero Telemetry**: The CLI operates as a standalone binary with no runtime dependencies on Python, Node, or JVM, and performs zero unsolicited network calls.
+- Markdown with YAML frontmatter is the only source of truth, one file per entity, committed to Git. SQLite is a local, gitignored index that can be deleted and rebuilt at any time with no loss.
+- Entity files are meant to be edited by hand. Bad input must produce reported findings, never a lockout and never a hard parse failure that stops the rest of the workspace from hydrating.
+- Every command supports `--json`, every success payload carries a schema version, and every error is the same envelope on stdout with a documented exit code (success / logical failure / usage / refused by policy / infrastructure / conflict).
+- Every command must complete without stdin when non-interactive mode is requested or stdin is not a TTY; a prompt that cannot be answered fails closed with a structured error naming the flag that would have answered it. Every prompt has a flag equivalent.
+- macOS, Linux, and Windows are first-class and all three are exercised in CI. No signals, shell scripts, or POSIX-only locking on any required path; no external runtime (Python, Node, JVM) is needed to operate.
+- Concurrent qdev processes across worktrees must read and write safely.
+- No telemetry and no network calls beyond what the user explicitly configures; this is enforced by test.
+- Every mutation records author type (human or agent) and author id, and bumps the entity version.
+- Latency target: hydration of 1,000 entities with one change in ≤ 30 ms on the CI reference machine, measured by benchmark test.
+- Queries return only the requested entity and its declared neighbours; expansion is opt-in. Bodies of related entities and scratchpad content are never included by default.
+- JSON output must be byte-identical across runs for the same inputs.
+- Traceability from requirement through story to relations must be queryable in both directions.
 
 ## Technical Decisions
 
-- **Two-Crate Architecture**: Strict workspace boundary between `qdev-cli` and `qdev-core`. `qdev-cli` handles argument parsing via clap, terminal interaction, human-readable table rendering, and JSON output emission. `qdev-core` implements domain models, the `Store` trait, SQLite operations, hydration, validation, and write logic without any dependencies on clap or terminal crates, and without writing to stdout or reading stdin.
-- **Synchronous SQLite (`rusqlite`)**: Database operations use synchronous `rusqlite` with bundled SQLite in `qdev-core`. No async runtimes (`tokio`) or ORMs are used in core, minimizing binary footprint and command boot overhead.
-- **WAL Mode & Advisory File Locking**: SQLite connections enable WAL mode with `busy_timeout = 5000ms`. File writes coordinate multi-process concurrency using an advisory lock on `.qdev/cache/write.lock` with a 5-second timeout, followed by an atomic write-temp-file-then-rename sequence.
-- **Incremental Metadata Sweep**: Hydration inspects file `mtime` and size against `sync_state`. Only modified files are hashed, and only files whose content hash changed are parsed. Cache rows touched by `qdev` writes are marked dirty to guarantee re-parsing regardless of filesystem timestamps.
-- **Cache Rebuild Over Migrations**: Cache schema changes trigger an automatic clean drop-and-rebuild from source Markdown files rather than schema migrations.
-- **Sprint-Independent ID Grammar**: Planning entity IDs never encode sprint numbers to eliminate citation rot across sprints.
-  - Epics: `E{n}`
-  - Stories: `E{n}S{m}`
-  - ADRs, Requirements, Hazards, PRDs: `AD-{n}`, `FR-{n}`, `NFR-{n}`, `HAZ-{n}`, `PRD-{n}`
-  - Negative constraints: `{owner}/NG-{k}` (no-go) and `{owner}/RH-{k}` (rabbit hole)
-  - Execution-time entities: `DW-{hex4+}` (deferred work) and `DEC-{hex4+}` (decisions) with collision-expanding hexadecimal suffixes.
-- **Relational DAG & Computed State**: Entity relations (`depends_on`, `extends`, `supersedes`, `traces_to`, `governed_by`, `mitigates`, `closes_dw`, `verifies`) are indexed in a relational table. Stories dynamically evaluate `blocked = true` when any `depends_on` target is not `done`.
-- **Cross-Platform Construction**: First-class support for macOS, Linux, and Windows. Process management, path handling, and locking avoid POSIX-only APIs, signals, or external shell scripts.
-
-## UX & Interaction Patterns
-
-- **Non-Interactive First & Closed-Fail Policy**: Every command is fully operational non-interactively. With `--non-interactive`, `QDEV_NONINTERACTIVE=1`, or a non-TTY stdin, prompts are forbidden. Commands that require input fail closed with exit code 3 (`needs_confirmation`) and structured error details identifying the missing flag.
-- **Interactive Scaffolding Wizard**: Running `qdev init` on a TTY prompts for project name, developer ID, and teams, setting up `.qdev.local.toml`, directory structures, and `.gitignore`. In non-interactive mode, all configuration is accepted via CLI flags.
-- **Dual Output Formatting**: Query, sync, validation, and diagnostic commands emit compact human-readable terminal tables by default when run interactively, and switch to deterministic, byte-identical JSON when `--json` is supplied.
-- **Guided ID Collision Resolution**: Validation detects duplicate planning IDs caused by parallel branches and provides an interactive `--fix-ids` workflow to renumber IDs and rewrite references across entity files and code citations. In non-interactive mode, `--fix-ids` requires `--yes` to proceed.
+- **Crate split.** `qdev-cli` owns clap, stdin/stdout, text and JSON formatting, and prompts; `qdev-core` owns the entity model, hydration, and all logic, and never touches stdout or stdin. `qdev-core` must not depend on clap or any terminal crate.
+- **Database.** Synchronous `rusqlite` with bundled SQLite. No async runtime, no ORM. WAL mode, `busy_timeout = 5000`, short atomic transactions; no write lock is held across external I/O or user input.
+- **Cache lifecycle.** The cache schema is versioned by pragma. A version mismatch triggers a full rebuild from files — never an in-place migration of cache data. A `Store` trait in core exposes every read and write later stories need, with SQLite as the only backend.
+- **Hydration.** On every boot, sweep `mtime` and size of all entity files against recorded sync state, hash only the changed candidates, and re-parse only those whose hash changed. Rows a qdev write marked dirty are always re-parsed regardless of metadata. Removed files are purged. No daemons, no lazy hydration.
+- **Degraded inputs.** Git conflict markers become a conflict finding scoped to that file; a schema-invalid file becomes a schema-violation finding with its previous cache row retained and flagged stale. Neither stops the sweep.
+- **Write path.** Advisory lock on a single workspace lock file with a 5 s timeout, then write-temp-then-rename, then upsert the cache row and mark it dirty. Frontmatter edits are line-based patches: comments, key order, and blank lines outside the edited keys survive byte-for-byte. Optimistic concurrency via an expected-version flag; mismatch is a conflict. Body edits target exactly one named Markdown section.
+- **Identifiers.** Planning IDs are sequential and never encode a sprint (epic, story, ADR, functional and non-functional requirement, hazard, PRD forms, plus nested constraint references). Execution-time IDs created concurrently by agents use short random hex suffixes that widen on collision. IDs are immutable once committed; allocation scans files rather than the cache; validate detects collisions. The default hygiene citation regex must match every ID form and nothing else.
+- **Schemas.** JSON Schema documents for every entity kind and every payload type are embedded in the binary and printable. Each entity requires id, title where applicable, status, version, and created/updated attribution carrying both author type and id. Fixtures hold one valid and at least two invalid examples per kind, used by tests. Schemas round-trip against live output.
+- **Relations.** Relations live in the owning entity's frontmatter and are stored in a relations table with source and target kinds checked against the allowed pairs. A dangling target is a finding, not a dropped relation; a dependency cycle is a finding naming the cycle. `blocked` on a story is computed from unmet dependencies, not stored.
+- **Config.** A committed project file merges with a gitignored local file; local keys override project keys individually and array-of-table sections are replaced wholesale, never merged element-wise. The local file's absence is not an error, and developer identity falls back to the Git user email. Config sections later stories consume are parsed into typed structs now. Schema violations exit as usage errors naming the key and the file.
+- **Doctor extensibility.** Diagnostics are registered through a registry in core so later epics add their own sections rather than editing one command.
+- **Superseded decision to respect.** Cache-schema migration during init reports and applies the rebuild without confirming; the confirmation flag is accepted and inert. See `docs/bmad/implementation-artifacts/spec-init-cache-migration.md`.
 
 ## Cross-Story Dependencies
 
-- **Story 1.1 → All Stories**: Scaffolds `qdev-cli` and `qdev-core`, defining the output JSON envelope, error taxonomy, exit codes, and interactivity detection needed by every subcommand.
-- **Story 1.2 → Stories 1.3, 1.6, 1.8**: Dual config parser provides storage directory paths, module registries, and developer identity fallbacks.
-- **Story 1.3 → Stories 1.4, 1.6**: `qdev init` bootstraps the directory hierarchy (`docs/specs/*`, `docs/state/*`, `.qdev/cache/`) and gitignore configuration.
-- **Stories 1.4 & 1.5 → Stories 1.6, 1.7, 1.8, 1.10**: Frontmatter schemas, ID classification, and allocation logic govern entity persistence, parsing, and relation extraction.
-- **Story 1.6 → Stories 1.7, 1.9, 1.10, 1.12**: SQLite schema definitions and the `Store` trait establish the queryable database layer for hydration and queries.
-- **Story 1.7 → Stories 1.9, 1.10, 1.11, 1.12**: Incremental hydration sweep reads Markdown files into the cache, unblocking entity queries, relation graph building, and validation.
-- **Story 1.8 → Stories 1.10, 1.11**: The atomic write path and advisory locking provide mutation primitives for relation management (`qdev relate`) and ID fixes (`qdev validate --fix-ids`).
-- **Story 1.9 & 1.10 → Story 1.11**: Query engine and DAG dependency cycle detection directly feed `qdev validate`.
-- **Downstream Epic Dependencies**:
-  - **Epic 2 (Workflow & Governance)**: Relies on Epic 1's atomic write path, frontmatter patching, `Store` trait, relation indexing, and computed `blocked` state.
-  - **Epic 3 (Gates & Evidence)**: Relies on the universal JSON envelope, exit codes, and schema validation.
-  - **Epic 4 (AI Integration)**: Relies on isolated entity projections, deterministic JSON queries, and schema exports.
+- 1.1 (envelope, exit codes, interactivity) underpins every other story in the epic; nothing else can be finished before its output contract exists.
+- 1.2 feeds 1.3 (init writes the config it just learned to read) and supplies the module registry and gate config that 1.10, 1.11, and Epic 3 consume.
+- 1.4 and 1.5 together define what hydration parses: 1.6 and 1.7 depend on both, and 1.13 prints the schemas 1.4 defines.
+- 1.6 must land before 1.7, 1.8, 1.9, and 1.12; the `Store` trait it defines is the seam those stories write against.
+- 1.8 is the only mutation path — 1.10's relate/unrelate and 1.11's id-renumber fix both go through it, as does story creation in 1.5.
+- 1.9 and 1.10 both read hydrated state from 1.7; 1.9's payload includes the inherited constraints and computed `blocked` that 1.10 produces.
+- 1.11 aggregates findings produced by 1.7 and 1.10 rather than re-deriving them; 1.12's doctor surfaces the same finding counts.
+- Downstream: Epic 2's state machine, leases, and scratchpads build on the write path and the `Store` trait; Epic 3's gates consume the gate config parsed in 1.2 and the module registry from 1.2/1.10; Epic 4's context projection depends on 1.9's isolation guarantees and 1.4's constraint representation.

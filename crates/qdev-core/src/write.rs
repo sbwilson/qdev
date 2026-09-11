@@ -5,6 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
+use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 
 use crate::config::StorageConfig;
@@ -941,6 +942,9 @@ pub fn purge_entity_row_for_moved_file(
 /// Upserts an updated entity into the SQLite cache `entities` (and kind-specific) table,
 /// records its dirty status in `dirty_entities`, and invalidates `sync_state`.
 /// Configures WAL mode and `busy_timeout = 5000ms`.
+///
+/// When `entity.kind` differs from the kind the cache already holds for this id, the *previous*
+/// kind's detail rows are deleted in the same transaction — see [`upsert_cache_with_relation`].
 pub fn upsert_cache_and_mark_dirty(
     cache_db_path: &Path,
     entity: &EntityRecord,
@@ -955,6 +959,12 @@ pub fn upsert_cache_and_mark_dirty(
 /// in-process reader (`qdev relate`'s own cycle pre-check, `query_entity`, `render_graph_dot`)
 /// saw pre-write state, and two relation operations in one process would validate the second
 /// against a graph that ignored the first.
+///
+/// Also the site that keeps a *kind change* repairable: when `entity.kind` differs from the kind
+/// the cache holds for this id, the previous kind's detail rows are deleted in the same
+/// transaction, through hydration's own kind->table mapping. Hydration cannot do it afterwards —
+/// its repair compares against the cached kind, which this upsert has already replaced — so
+/// without it the orphan survives every sweep and only `sync --rebuild` removes it.
 pub fn upsert_cache_with_relation(
     cache_db_path: &Path,
     entity: &EntityRecord,
@@ -1032,6 +1042,45 @@ pub fn upsert_cache_with_relation(
         };
         for stale_id in &stale_path_ids {
             delete_entity_row_shallow(&tx, stale_id)?;
+        }
+
+        // 0b. A write may change an entity's *kind*. The `ON CONFLICT(id)` update below
+        // replaces the cached kind in place, which is the whole reason hydration's repair
+        // (`clear_owned_child_rows`) cannot reach this case: it asks the `entities` table what
+        // the previous kind was, and by the time any later sweep looks, the write has already
+        // stored the new one, so the comparison finds equality and drops nothing. The previous
+        // kind's detail row then outlives every sweep and only `sync --rebuild` removes it —
+        // and it is user-visible, because `get_entity` and `list_entities` LEFT JOIN `stories`.
+        //
+        // The write path is the only place that still holds both halves, so it answers here,
+        // in the same transaction, through the shared kind->table mapping. Note this drops only
+        // the *previous* kind's rows: materializing the new kind's detail row stays hydration's
+        // job on the sweep the dirty marker below already forces, the same one-pass lag every
+        // other non-story field has.
+        let prev_kind: Option<String> = tx
+            .query_row(
+                "SELECT kind FROM entities WHERE id = ?1;",
+                rusqlite::params![entity.id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!(
+                        "Failed to read the cached kind of entity '{}': {}",
+                        entity.id, e
+                    ),
+                )
+            })?;
+        if let Some(prev_kind) = prev_kind
+            .as_deref()
+            .and_then(|k| EntityKind::from_str_loose(k).ok())
+        {
+            // The equal-kind case — every ordinary `update` — issues no delete at all.
+            if prev_kind != entity.kind {
+                crate::store::sqlite::delete_kind_detail_row(&tx, &entity.id, prev_kind)?;
+            }
         }
 
         // 1. Upsert into entities table (preserve existing created_by via COALESCE if omitted)

@@ -1731,3 +1731,588 @@ fn test_a_conventional_file_in_another_kinds_directory_is_told_about_the_kind() 
         "the file is already where its own kind's rule puts it: {message}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Kind changes through the write path (spec-1-26)
+// ---------------------------------------------------------------------------
+//
+// The defect: the `entities` upsert replaced the cached kind in place and left the previous
+// kind's detail row behind. Hydration's repair compares the *cached* kind against the new one,
+// so after a qdev write the two already agree and the orphan survives every sweep — only
+// `sync --rebuild` removed it, and `get`/`list` LEFT JOIN `stories`, so it was user-visible.
+
+/// The six kinds that own a detail table, and the tables each one owns. Named here rather than
+/// derived, so the matrix below is a statement about the schema and not a restatement of the
+/// mapping it is testing.
+const DETAIL_TABLES: &[(EntityKind, &[&str])] = &[
+    (EntityKind::Story, &["stories"]),
+    (EntityKind::Sprint, &["sprints", "sprint_assignments"]),
+    (EntityKind::DeferredWork, &["deferred_work"]),
+    (EntityKind::Decision, &["decisions"]),
+    (EntityKind::Soup, &["soup_dependencies"]),
+    (EntityKind::Evidence, &["gate_runs"]),
+];
+
+/// Every kind, so a flip's destination covers the seven that own no detail table too.
+const ALL_KINDS: &[EntityKind] = &[
+    EntityKind::Prd,
+    EntityKind::Requirement,
+    EntityKind::Epic,
+    EntityKind::Story,
+    EntityKind::Adr,
+    EntityKind::Hazard,
+    EntityKind::Sprint,
+    EntityKind::Release,
+    EntityKind::DeferredWork,
+    EntityKind::Decision,
+    EntityKind::Scratchpad,
+    EntityKind::Soup,
+    EntityKind::Evidence,
+];
+
+/// The status a kind's detail table will accept. Three of the six detail tables carry a `CHECK`
+/// on `status` and no two of them agree — `sprints` wants `planning|active|completed|paused|
+/// abandoned`, `deferred_work` wants `open|done|wont_fix`, `gate_runs` wants `pass|fail|infra` —
+/// so a kind change has to carry a status the destination accepts. `qdev update` does both in
+/// one write, which is what the fixtures below do.
+fn status_for(kind: EntityKind) -> &'static str {
+    match kind {
+        EntityKind::Sprint => "active",
+        EntityKind::DeferredWork => "open",
+        EntityKind::Evidence => "pass",
+        _ => "draft",
+    }
+}
+
+/// The `sprints` / `sprint_assignments` key, mirroring `sqlite.rs`'s private `sprint_number`.
+fn sprint_key(id: &str) -> i64 {
+    id.strip_prefix("sprint-")
+        .unwrap_or(id)
+        .parse::<i64>()
+        .unwrap_or(0)
+}
+
+/// How many detail rows the cache holds for `id` under `kind`, across every table that kind
+/// owns. `sprint_assignments` is keyed by sprint number rather than entity id, which is exactly
+/// why a delete-by-id pass that does not know the mapping misses it.
+fn detail_row_count(conn: &rusqlite::Connection, id: &str, kind: EntityKind) -> i64 {
+    // Not `unwrap_or(&[])`: a kind absent from `DETAIL_TABLES` would silently count zero rows
+    // and turn every "the orphan is gone" assertion about it into a vacuous pass.
+    let tables = DETAIL_TABLES
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, t)| *t)
+        .unwrap_or_else(|| panic!("{} owns no detail table in DETAIL_TABLES", kind.as_str()));
+    tables
+        .iter()
+        .map(|&table| {
+            let (sql, param): (String, Box<dyn rusqlite::ToSql>) = match table {
+                "sprints" => (
+                    "SELECT count(*) FROM sprints WHERE id = ?1;".to_string(),
+                    Box::new(sprint_key(id)),
+                ),
+                "sprint_assignments" => (
+                    "SELECT count(*) FROM sprint_assignments WHERE sprint_id = ?1;".to_string(),
+                    Box::new(sprint_key(id)),
+                ),
+                other => (
+                    format!("SELECT count(*) FROM \"{other}\" WHERE id = ?1;"),
+                    Box::new(id.to_string()),
+                ),
+            };
+            conn.query_row(&sql, rusqlite::params![param], |r| r.get::<_, i64>(0))
+                .unwrap()
+        })
+        .sum()
+}
+
+/// Frontmatter carrying every detail kind's fields at once, so the *only* thing that changes
+/// when `kind:` is flipped is which detail row hydration materializes. Every field here is
+/// permitted by all thirteen schemas (none sets `additionalProperties: false`, and the three
+/// enum-constrained names — `appetite`, `safety_class`, `safety_risk` — carry the same enum in
+/// every schema that declares them), so no flip in the matrix is refused for the wrong reason.
+///
+/// `updated_at` is pinned: without it hydration derives it from the file's own change stamp, and
+/// a sweep-versus-rebuild comparison becomes a bet on both runs landing in the same second.
+fn every_kind_frontmatter(id: &str, kind: EntityKind) -> String {
+    format!(
+        r#"---
+id: {id}
+kind: {kind}
+title: "Fixture {id}"
+status: {status}
+version: 1
+updated_at: "2026-01-01T00:00:00Z"
+owners: ["simon"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+constraints:
+  - id: C1
+    kind: no_go
+    text: "a constraint no kind change may touch"
+epic_id: E1
+seq: 1
+appetite: small
+safety_class: ClassB
+target_modules: ["core"]
+release_version: "1.2.0"
+started_at: "2026-01-01T00:00:00Z"
+completed_at: "2026-01-02T00:00:00Z"
+assignments:
+  - story_id: E1S9
+    assigned_at: "2026-01-01T00:00:00Z"
+origin_story_id: E1S9
+target_module: core
+safety_risk: negligible
+rationale: "deferred for now"
+gate: build
+resolution: open
+subject_id: E1S9
+decision_type: human_ruling
+topic: "a topic"
+context: "some context"
+ruling: "a ruling"
+created_at: "2026-01-01T00:00:00Z"
+name: libfoo
+dependency_version: "0.1.0"
+license: MIT
+cve_status: none
+introduced_by_story: E1S9
+evaluated_for_release: "1.2.0"
+story_id: E1S9
+gate_id: build
+commit_sha: deadbeef
+exit_code: 0
+duration_ms: 12
+metric_value: 1.5
+summary: "a summary"
+output_hash: abc123
+ran_at: "2026-01-01T00:00:00Z"
+---
+
+Body for {id}.
+"#,
+        kind = kind.as_str(),
+        status = status_for(kind)
+    )
+}
+
+/// Builds a workspace holding one entity of `kind` at `rel_dir/<id>.md`, hydrated into a cache.
+fn kind_flip_workspace(
+    root: &std::path::Path,
+    rel_dir: &str,
+    id: &str,
+    kind: EntityKind,
+) -> SqliteStore {
+    fs::write(
+        root.join("qdev.toml"),
+        "[project]\nname = \"KindFlipTest\"\n",
+    )
+    .unwrap();
+    let dir = root.join(rel_dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(format!("{id}.md")),
+        every_kind_frontmatter(id, kind),
+    )
+    .unwrap();
+    qdev_core::store::ensure_cache(root, &qdev_core::StorageConfig::default()).unwrap()
+}
+
+/// Flips `id`'s `kind:` through the real write path, the way `qdev update --field kind=` does.
+fn flip_kind(root: &std::path::Path, id: &str, to: EntityKind, version: u64) {
+    apply_entity_update(&EntityUpdateOptions {
+        workspace_root: root.to_path_buf(),
+        storage: None,
+        entity_kind: None,
+        entity_id: id.to_string(),
+        // One write, both fields — see `status_for`.
+        status: Some(status_for(to).to_string()),
+        title: None,
+        custom_fields: vec![(
+            "kind".to_string(),
+            serde_yaml::Value::String(to.as_str().to_string()),
+        )],
+        section: None,
+        section_file: None,
+        if_version: Some(version),
+        author: Author::new("agent", "claude-code"),
+    })
+    .unwrap();
+}
+
+/// Dumps every cache table as sorted stringified rows, with `findings.found_at` reduced to
+/// set-vs-NULL — it is stamped from the wall clock as each pass writes, so comparing it by value
+/// would assert that two runs happened in the same second. Mirrors `sweep_tests::dump_tables`;
+/// the two suites are separate binaries.
+fn dump_cache_tables(
+    db_path: &std::path::Path,
+) -> std::collections::BTreeMap<String, Vec<Vec<String>>> {
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    let mut dump = std::collections::BTreeMap::new();
+    for &table in qdev_core::store::ALL_TABLE_NAMES {
+        let mut stmt = match conn.prepare(&format!("SELECT * FROM \"{table}\";")) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let is_clock: Vec<bool> = (0..stmt.column_count())
+            .map(|i| table == "findings" && stmt.column_name(i).unwrap() == "found_at")
+            .collect();
+        let rows = stmt
+            .query_map([], |row| {
+                let mut vals = Vec::new();
+                for (i, clock) in is_clock.iter().enumerate() {
+                    let val: rusqlite::types::Value = row.get(i)?;
+                    if *clock {
+                        vals.push(match val {
+                            rusqlite::types::Value::Null => "NULL".to_string(),
+                            _ => "<set>".to_string(),
+                        });
+                        continue;
+                    }
+                    vals.push(match val {
+                        rusqlite::types::Value::Null => "NULL".to_string(),
+                        rusqlite::types::Value::Integer(i) => i.to_string(),
+                        rusqlite::types::Value::Real(f) => format!("{f:.4}"),
+                        rusqlite::types::Value::Text(t) => t,
+                        rusqlite::types::Value::Blob(b) => format!("{b:?}"),
+                    });
+                }
+                Ok(vals)
+            })
+            .unwrap();
+        let mut row_list: Vec<Vec<String>> = rows.map(|r| r.unwrap()).collect();
+        row_list.sort();
+        dump.insert(table.to_string(), row_list);
+    }
+    dump
+}
+
+/// The convergence assertion on the write side: sweep the tree the write left behind, then
+/// rebuild it from scratch, and require identical rows in every table.
+///
+/// The sweep is part of the assertion, not a way around it. The frozen decision for this story
+/// is that convergence is reached by the *next pass*: the write drops the orphan, and the new
+/// kind's detail row is materialized by the sweep the dirty marker already forces — the same
+/// one-pass lag every non-story field of a decision, sprint or SOUP entry already has. What may
+/// not survive that pass is the orphan, and before this fix it did: the sweep saw the cached
+/// kind already equal to the new one and dropped nothing.
+fn assert_write_converges_with_rebuild(store: &SqliteStore, root: &std::path::Path, label: &str) {
+    let storage = qdev_core::StorageConfig::default();
+    store.sweep_workspace(root, &storage).unwrap();
+    let db = root.join(".qdev/cache/cache.sqlite");
+    let swept = dump_cache_tables(&db);
+    store.reset_and_rebuild(root, &storage).unwrap();
+    let rebuilt = dump_cache_tables(&db);
+    for &table in qdev_core::store::ALL_TABLE_NAMES {
+        // `sync_meta` stamps *when* a pass ran, not what it found, so it is expected to advance
+        // between the sweep and the rebuild that follows it.
+        if table == "sync_meta" {
+            continue;
+        }
+        assert_eq!(
+            swept.get(table),
+            rebuilt.get(table),
+            "{label}: table '{table}' diverges between the written cache and a rebuild"
+        );
+    }
+}
+
+/// The matrix: every kind that owns a detail table, flipped to every other kind, with the
+/// previous kind's rows required gone *in the write's own transaction* — not after a sweep, and
+/// not only after a rebuild. Then the whole cache is compared table by table against a rebuild
+/// of the same tree.
+///
+/// Over every pair rather than over the one pair the review reproduced, because the defect is in
+/// the mapping: a kind that acquires a detail table and no deletion is the failure mode, and only
+/// an exhaustive matrix notices.
+#[test]
+fn test_every_kind_flip_drops_the_previous_kinds_detail_rows_and_converges() {
+    for &(from, _) in DETAIL_TABLES {
+        for &to in ALL_KINDS {
+            if to == from {
+                continue;
+            }
+            let label = format!("{} -> {}", from.as_str(), to.as_str());
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let store = kind_flip_workspace(root, "docs/specs/stories", "E1S1", from);
+            let db = root.join(".qdev/cache/cache.sqlite");
+
+            {
+                let conn = rusqlite::Connection::open(&db).unwrap();
+                assert!(
+                    detail_row_count(&conn, "E1S1", from) > 0,
+                    "{label}: the fixture must actually own a detail row before the flip"
+                );
+            }
+
+            flip_kind(root, "E1S1", to, 1);
+
+            {
+                let conn = rusqlite::Connection::open(&db).unwrap();
+                assert_eq!(
+                    detail_row_count(&conn, "E1S1", from),
+                    0,
+                    "{label}: the previous kind's detail rows outlived the write"
+                );
+                assert_eq!(
+                    conn.query_row("SELECT kind FROM entities WHERE id = 'E1S1';", [], |r| {
+                        r.get::<_, String>(0)
+                    })
+                    .unwrap(),
+                    to.as_str(),
+                    "{label}: the write must still store the new kind"
+                );
+                // Scope: the entity's own constraints are not the kind's detail rows and are
+                // left exactly as they were.
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT count(*) FROM constraints WHERE owner_id = 'E1S1';",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                    1,
+                    "{label}: constraints are not the kind's detail rows"
+                );
+            }
+
+            assert_write_converges_with_rebuild(&store, root, &label);
+        }
+    }
+}
+
+/// A sprint owns two tables, and `sprint_assignments` is keyed by sprint *number*, not by entity
+/// id — so a delete-by-id pass that does not consult the mapping silently leaves the assignments
+/// behind. The matrix above exercises this at sprint number 0; this pins the real id shape.
+#[test]
+fn test_flipping_a_sprint_drops_its_assignments_as_well_as_its_sprints_row() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let store = kind_flip_workspace(root, "docs/state/sprints", "sprint-3", EntityKind::Sprint);
+    let db = root.join(".qdev/cache/cache.sqlite");
+
+    let counts = |what: &str| -> (i64, i64) {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let sprints = conn
+            .query_row("SELECT count(*) FROM sprints WHERE id = 3;", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
+        let assignments = conn
+            .query_row(
+                "SELECT count(*) FROM sprint_assignments WHERE sprint_id = 3;",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        println!("{what}: sprints={sprints} assignments={assignments}");
+        (sprints, assignments)
+    };
+
+    assert_eq!(counts("before"), (1, 1), "the fixture must own both rows");
+
+    flip_kind(root, "sprint-3", EntityKind::Decision, 1);
+
+    assert_eq!(
+        counts("after"),
+        (0, 0),
+        "both the sprints row and its assignments must go with the kind"
+    );
+    assert_write_converges_with_rebuild(&store, root, "sprint-3 -> decision");
+}
+
+/// Flip and flip back, three writes deep: no row from an intermediate kind may survive, and the
+/// cache still equals a rebuild. The middle kind is the one a single-step test cannot catch.
+#[test]
+fn test_flipping_a_kind_back_and_forth_leaves_no_intermediate_rows() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let store = kind_flip_workspace(root, "docs/specs/stories", "E1S1", EntityKind::Story);
+    let db = root.join(".qdev/cache/cache.sqlite");
+
+    flip_kind(root, "E1S1", EntityKind::Decision, 1);
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        assert_eq!(
+            detail_row_count(&conn, "E1S1", EntityKind::Story),
+            0,
+            "the first flip left the stories row behind"
+        );
+    }
+
+    // The sweep in between is what makes this a real intermediate state: it materializes the
+    // `decisions` row, which the write path never writes itself. Without it the middle kind
+    // would own nothing and the flip back would have nothing to drop.
+    let storage = qdev_core::StorageConfig::default();
+    store.sweep_workspace(root, &storage).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        assert_eq!(
+            detail_row_count(&conn, "E1S1", EntityKind::Decision),
+            1,
+            "the intermediate kind must actually own a row for this test to mean anything"
+        );
+        assert_eq!(
+            detail_row_count(&conn, "E1S1", EntityKind::Story),
+            0,
+            "and the sweep must not resurrect the first kind's row"
+        );
+    }
+
+    flip_kind(root, "E1S1", EntityKind::Story, 2);
+
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        assert_eq!(
+            detail_row_count(&conn, "E1S1", EntityKind::Decision),
+            0,
+            "the intermediate kind's row survived the flip back"
+        );
+    }
+
+    assert_write_converges_with_rebuild(&store, root, "story -> decision -> story");
+}
+
+/// A kind the entity never had has nothing to drop, and the new kind's detail row appears on the
+/// next sweep — the documented one-pass lag, not a hole. The ADR is the matrix's "other kind →
+/// detail kind" row, which the matrix itself cannot start from.
+#[test]
+fn test_flipping_a_kind_that_owns_no_detail_table_to_one_that_does() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let store = kind_flip_workspace(root, "docs/specs/adrs", "AD-8", EntityKind::Adr);
+    let db = root.join(".qdev/cache/cache.sqlite");
+
+    flip_kind(root, "AD-8", EntityKind::Decision, 1);
+
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT kind FROM entities WHERE id = 'AD-8';", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "decision"
+        );
+        // Not the write's job: hydration materializes the *new* kind's row on the next sweep.
+        assert_eq!(detail_row_count(&conn, "AD-8", EntityKind::Decision), 0);
+    }
+
+    store
+        .sweep_workspace(root, &qdev_core::StorageConfig::default())
+        .unwrap();
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        assert_eq!(
+            detail_row_count(&conn, "AD-8", EntityKind::Decision),
+            1,
+            "the sweep the dirty marker forces must materialize the new kind's row"
+        );
+    }
+
+    assert_write_converges_with_rebuild(&store, root, "adr -> decision");
+}
+
+/// The equal-kind case stays free. Asserted on a *decision*, deliberately: the write path
+/// materializes no `decisions` row of its own (only `stories`), so a delete wrongly issued when
+/// the kind has not changed would erase the row outright with nothing to put it back until the
+/// next sweep. A story would hide that behind its own step-2 upsert, so it is checked too.
+#[test]
+fn test_an_update_that_does_not_change_the_kind_leaves_the_detail_row_alone() {
+    for (rel_dir, id, kind) in [
+        ("docs/state/decisions", "DEC-1", EntityKind::Decision),
+        ("docs/specs/stories", "E1S1", EntityKind::Story),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let store = kind_flip_workspace(root, rel_dir, id, kind);
+        let db = root.join(".qdev/cache/cache.sqlite");
+
+        apply_entity_update(&EntityUpdateOptions {
+            workspace_root: root.to_path_buf(),
+            storage: None,
+            entity_kind: None,
+            entity_id: id.to_string(),
+            status: Some(status_for(kind).to_string()),
+            title: None,
+            custom_fields: Vec::new(),
+            section: None,
+            section_file: None,
+            if_version: Some(1),
+            author: Author::new("agent", "claude-code"),
+        })
+        .unwrap();
+
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        assert_eq!(
+            detail_row_count(&conn, id, kind),
+            1,
+            "{}: an update that does not change the kind must not touch the detail row",
+            kind.as_str()
+        );
+        drop(conn);
+        assert_write_converges_with_rebuild(&store, root, kind.as_str());
+    }
+}
+
+/// A refused flip must leave the cache exactly as it was — the delete is inside the same
+/// transaction as the upsert, but the refusal happens before either, and the schema-validation
+/// gate is the only thing standing between a bad flip and a dropped detail row.
+///
+/// On a *story*, deliberately: the CLI's existing refusal test flips an ADR, which owns no
+/// detail table and so cannot observe a wrongly-issued delete at all.
+#[test]
+fn test_a_refused_kind_flip_leaves_the_previous_kinds_detail_row_alone() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    kind_flip_workspace(root, "docs/specs/stories", "E1S1", EntityKind::Story);
+    let db = root.join(".qdev/cache/cache.sqlite");
+
+    // `safety_risk: negligible` is fine under every schema that declares it, but `open` is not a
+    // `decision_type`, so the flip is judged by the decision schema and refused.
+    let err = apply_entity_update(&EntityUpdateOptions {
+        workspace_root: root.to_path_buf(),
+        storage: None,
+        entity_kind: None,
+        entity_id: "E1S1".to_string(),
+        status: None,
+        title: None,
+        custom_fields: vec![
+            (
+                "kind".to_string(),
+                serde_yaml::Value::String("decision".to_string()),
+            ),
+            (
+                "decision_type".to_string(),
+                serde_yaml::Value::String("not_a_decision_type".to_string()),
+            ),
+        ],
+        section: None,
+        section_file: None,
+        if_version: Some(1),
+        author: Author::new("agent", "claude-code"),
+    })
+    .unwrap_err();
+    assert_eq!(err.code, "schema_validation_failed");
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    assert_eq!(
+        detail_row_count(&conn, "E1S1", EntityKind::Story),
+        1,
+        "a refused flip must not drop the previous kind's detail row"
+    );
+    assert_eq!(
+        conn.query_row("SELECT kind FROM entities WHERE id = 'E1S1';", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap(),
+        "story",
+        "a refused flip must not change the cached kind either"
+    );
+}

@@ -4457,49 +4457,89 @@ fn sprint_number(id: &str) -> i64 {
         .unwrap_or(0)
 }
 
-/// Deletes the kind-specific detail row a single entity owns (`stories`, `sprints` +
-/// `sprint_assignments`, `deferred_work`, `decisions`, `soup_dependencies`, `gate_runs`).
-/// Shared by the purge cascade and by re-parse, which must drop the previous kind's row when
-/// an entity changes kind in place.
+/// Deletes every kind-specific detail row a single entity owns: `stories`, `sprints` *and* its
+/// `sprint_assignments`, `deferred_work`, `decisions`, `soup_dependencies`, or `gate_runs`.
+///
+/// This is the single site that answers "which detail rows does an entity of this kind own?".
+/// The purge cascade, the sweep's re-parse, the write path's id-change cleanup and the write
+/// path's kind-change cleanup all route through it, so a kind can never be dropped by one path
+/// and left behind by another.
+///
+/// The match is exhaustive by name on purpose: the seven kinds that own no detail table are
+/// listed rather than swept up by a wildcard, so adding an `EntityKind` variant — or giving an
+/// existing one a detail table — fails to compile until someone decides what a change away from
+/// that kind must delete.
 pub(crate) fn delete_kind_detail_row(
     tx: &rusqlite::Transaction,
     id: &str,
     kind: EntityKind,
 ) -> Result<(), QdevError> {
-    let (sql, param): (&str, Box<dyn rusqlite::ToSql>) = match kind {
-        EntityKind::Sprint => (
-            "DELETE FROM sprints WHERE id = ?1;",
-            Box::new(sprint_number(id)),
-        ),
-        EntityKind::Story => (
+    let statements: Vec<(&str, &str, Box<dyn rusqlite::ToSql>)> = match kind {
+        // A sprint owns two tables. `sprint_assignments` is keyed by sprint *number*, not by
+        // entity id, so nothing else in a delete-by-id pass reaches it. Assignments go first:
+        // `sprint_assignments.sprint_id` is a foreign key onto `sprints(id)`, and foreign keys
+        // are enforced.
+        EntityKind::Sprint => vec![
+            (
+                "sprint_assignments",
+                "DELETE FROM sprint_assignments WHERE sprint_id = ?1;",
+                Box::new(sprint_number(id)),
+            ),
+            (
+                "sprints",
+                "DELETE FROM sprints WHERE id = ?1;",
+                Box::new(sprint_number(id)),
+            ),
+        ],
+        EntityKind::Story => vec![(
+            "stories",
             "DELETE FROM stories WHERE id = ?1;",
             Box::new(id.to_string()),
-        ),
-        EntityKind::DeferredWork => (
+        )],
+        EntityKind::DeferredWork => vec![(
+            "deferred_work",
             "DELETE FROM deferred_work WHERE id = ?1;",
             Box::new(id.to_string()),
-        ),
-        EntityKind::Decision => (
+        )],
+        EntityKind::Decision => vec![(
+            "decisions",
             "DELETE FROM decisions WHERE id = ?1;",
             Box::new(id.to_string()),
-        ),
-        EntityKind::Soup => (
+        )],
+        EntityKind::Soup => vec![(
+            "soup_dependencies",
             "DELETE FROM soup_dependencies WHERE id = ?1;",
             Box::new(id.to_string()),
-        ),
-        EntityKind::Evidence => (
+        )],
+        EntityKind::Evidence => vec![(
+            "gate_runs",
             "DELETE FROM gate_runs WHERE id = ?1;",
             Box::new(id.to_string()),
-        ),
-        _ => return Ok(()),
+        )],
+        // The kinds that own no detail table. Named, not wildcarded — see the doc comment.
+        EntityKind::Prd
+        | EntityKind::Requirement
+        | EntityKind::Epic
+        | EntityKind::Adr
+        | EntityKind::Hazard
+        | EntityKind::Release
+        | EntityKind::Scratchpad => Vec::new(),
     };
 
-    tx.execute(sql, rusqlite::params![param]).map_err(|e| {
-        QdevError::infrastructure_failure(
-            "sqlite_error",
-            format!("Failed to purge {} row for '{}': {}", kind.as_str(), id, e),
-        )
-    })?;
+    for (table, sql, param) in statements {
+        tx.execute(sql, rusqlite::params![param]).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!(
+                    "Failed to purge {} row for {} '{}': {}",
+                    table,
+                    kind.as_str(),
+                    id,
+                    e
+                ),
+            )
+        })?;
+    }
     Ok(())
 }
 
@@ -4586,20 +4626,18 @@ fn purge_entity_with_children(
     id: &str,
     kind: EntityKind,
 ) -> Result<(), QdevError> {
-    if kind == EntityKind::Sprint {
-        tx.execute(
-            "DELETE FROM sprint_assignments WHERE sprint_id = ?1;",
-            rusqlite::params![sprint_number(id)],
-        )
-        .map_err(|e| {
-            QdevError::infrastructure_failure(
-                "sqlite_error",
-                format!("Failed to purge sprint assignments for '{}': {}", id, e),
-            )
-        })?;
-    }
+    // Detail rows — including a sprint's `sprint_assignments` — go through the shared mapping.
     delete_kind_detail_row(tx, id, kind)?;
 
+    // Not a second copy of the mapping, and not the hardcoding `delete_kind_detail_row` warns
+    // about: `kind` here is whatever `entities.kind` says *now*, and a cache written before the
+    // write path learned to drop the previous kind's rows can hold a `stories` row under an
+    // entity whose kind has since become something else. Purge is the only path that removes
+    // that entity row, so without this the orphan would outlive the file's deletion with no
+    // later pass able to find it. Deliberately only `stories`: it is the one detail table
+    // `get_entity`/`list_entities` LEFT JOIN, so it is the only orphan a user can observe, and
+    // widening it would be a purge cascade over tables this function has no reason to touch.
+    // Legacy repair, not policy — removable once no cache predating this story is in use.
     tx.execute("DELETE FROM stories WHERE id = ?1;", rusqlite::params![id])
         .map_err(|e| {
             QdevError::infrastructure_failure(

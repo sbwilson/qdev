@@ -1288,6 +1288,21 @@ updated_by:
         !content.contains("kind: story"),
         "a refused update must leave the file alone: {content}"
     );
+
+    // And the cache with it: the refusal happens before the upsert, so nothing of the old kind
+    // is dropped and nothing of the new one is written. Read back through `get`, which is where
+    // a wrongly-applied kind would surface.
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["get", "AD-8", "--json"])
+        .assert()
+        .success();
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(
+        val["kind"], "adr",
+        "a refused update must leave the cache alone: {val}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1526,5 +1541,86 @@ fn test_an_id_no_file_holds_is_still_a_bare_not_found() {
     assert_eq!(
         val["error"]["message"], "Entity file not found for 'E1S1'",
         "{val}"
+    );
+}
+
+/// The user-visible symptom NEW-4 was raised for: `update --field kind=` left the previous kind's
+/// detail row in the cache, and `get` / `list` both `LEFT JOIN stories`, so an *epic* answered
+/// with an `epic_id` and `list --epic E1` still listed it — until `sync --rebuild`, and only a
+/// rebuild, changed both answers.
+///
+/// The assertion is the invariant rather than the symptom: both commands must answer the same
+/// either side of a rebuild.
+#[test]
+fn test_a_kind_flip_answers_the_same_before_and_after_a_rebuild() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    create_sample_story(
+        root,
+        "E1S1",
+        r#"---
+id: E1S1
+title: Buffer layout
+status: draft
+version: 1
+owners: ["simon"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- Original criteria.
+"#,
+    );
+
+    let run = |args: &[&str]| -> Value {
+        let mut cmd = Command::cargo_bin("qdev").unwrap();
+        let assert = cmd.current_dir(root).args(args).assert().success();
+        serde_json::from_slice(&assert.get_output().stdout).unwrap()
+    };
+
+    // Hydrate, then confirm the fixture really is a story with a `stories` row behind it.
+    run(&["sync", "--json"]);
+    assert_eq!(run(&["get", "E1S1", "--json"])["epic_id"], "E1");
+
+    run(&["update", "E1S1", "--field", "kind=epic", "--json"]);
+
+    let get_before = run(&["get", "E1S1", "--json"]);
+    let list_before = run(&["list", "epic", "--epic", "E1", "--json"]);
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["sync", "--rebuild", "--json"])
+        .assert()
+        .success();
+
+    let get_after = run(&["get", "E1S1", "--json"]);
+    let list_after = run(&["list", "epic", "--epic", "E1", "--json"]);
+
+    assert_eq!(
+        get_before, get_after,
+        "`qdev get` answered differently either side of a rebuild"
+    );
+    assert_eq!(
+        list_before, list_after,
+        "`qdev list --epic` answered differently either side of a rebuild"
+    );
+
+    // And the answer is the right one: an epic is not a story and carries no owning epic.
+    assert_eq!(get_after["kind"], "epic");
+    assert!(
+        get_after.get("epic_id").is_none() || get_after["epic_id"].is_null(),
+        "an epic must not report an epic_id: {get_after}"
+    );
+    assert_eq!(
+        list_after["items"].as_array().unwrap().len(),
+        0,
+        "`list --epic E1` must not list the epic itself: {list_after}"
     );
 }
