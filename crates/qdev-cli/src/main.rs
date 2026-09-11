@@ -1990,8 +1990,13 @@ fn handle_validate(
 /// Renders a `SweepSummary` as a one-line human-readable count summary.
 fn render_sync_text(summary: &qdev_core::SweepSummary) -> String {
     format!(
-        "parsed={}, unchanged={}, hashed={}, purged={}, findings={}\n",
-        summary.parsed, summary.unchanged, summary.hashed, summary.purged, summary.findings
+        "parsed={}, unchanged={}, retained={}, hashed={}, purged={}, findings={}\n",
+        summary.parsed,
+        summary.unchanged,
+        summary.retained,
+        summary.hashed,
+        summary.purged,
+        summary.findings
     )
 }
 

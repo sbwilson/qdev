@@ -24,6 +24,11 @@
       "minimum": 0,
       "description": "Scanned files whose content hash was unchanged, so they were not re-parsed."
     },
+    "retained": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Files this pass read and tried to hydrate that produced no row: conflicted, schema-invalid, id-less, or unreadable. Optional: a payload from a build predating this field validates without it."
+    },
     "hashed": {
       "type": "integer",
       "minimum": 0,

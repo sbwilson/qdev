@@ -186,6 +186,16 @@ re-derive the answer rather than assume a healthy one.
 
 ## Spec Change Log
 
+- 2026-09-11 — Post-review pass over the story's own implementation (adversarial, edge-case and
+  verification-gap lenses). Six findings acted on, none requiring a change to the frozen intent:
+  the Config role's clear and `apply_relation_change`'s path spelling gained the tests they
+  lacked; separator normalization moved into `workspace_rel_path`, which walks components rather
+  than replacing backslashes (a backslash is legal in a Unix file name); `SweepSummary` gained
+  `retained`, so a file read and tried that produced no row is counted rather than falling out of
+  the totals; `FindingCode`'s doc no longer claims a closed set `Store::upsert_finding` can
+  bypass, and its test asserts the classification as data instead of as rendered SQL; `found_at`'s
+  meaning is now stated where it is defined. One divergence found and deliberately not fixed —
+  `entities.updated_at` after a touch — is in `deferred-work.md` with the reasoning.
 - 2026-09-11 — Implemented. No change to the frozen intent, and no deviation from it. One
   in-scope repair beyond the stated tasks: the non-Markdown role arms now clear a stale
   `read_error` when they re-hydrate, without which the fix would have regressed that recovery.

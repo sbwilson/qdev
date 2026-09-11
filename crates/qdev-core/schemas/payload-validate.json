@@ -3,7 +3,10 @@
   "title": "Validate Payload Schema",
   "description": "Output shape of `qdev validate --json`. The `--fix-ids` branch emits a renumber report instead and is covered by the `fix_ids` payload schema. Schema changes follow semver on schema_version; additive fields do not bump the major.",
   "type": "object",
-  "required": ["schema_version", "findings"],
+  "required": [
+    "schema_version",
+    "findings"
+  ],
   "properties": {
     "schema_version": {
       "type": "string"
@@ -12,7 +15,13 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["path", "code", "severity", "message", "found_at"],
+        "required": [
+          "path",
+          "code",
+          "severity",
+          "message",
+          "found_at"
+        ],
         "properties": {
           "path": {
             "type": "string"
@@ -24,10 +33,14 @@
             "type": "string"
           },
           "message": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "found_at": {
-            "type": "string"
+            "type": "string",
+            "description": "When the pass that is reporting this finding recorded it \u2014 not when the problem was first seen. A finding is re-derived rather than carried: the whole-graph codes are deleted and re-recorded on every sweep, and a hydration-failure code is re-recorded whenever its file is re-read. Do not age or order findings by it."
           }
         }
       }

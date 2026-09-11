@@ -286,6 +286,11 @@ pub struct SweepSummary {
     /// Files whose content this pass read and hashed. A warm sweep that skips every file leaves
     /// this at zero: it pins the incremental optimisation, not just its correctness.
     pub hashed: usize,
+    /// Files this pass read and tried to hydrate that produced no row: conflicted, schema-invalid,
+    /// id-less, or unreadable. Without it the counts do not add up — such a file is neither
+    /// `parsed` nor `unchanged`, so a workspace with a broken file reported a total short of the
+    /// files it had scanned, and the shortfall was invisible.
+    pub retained: usize,
     /// Removed files whose cache rows were purged this pass.
     pub purged: usize,
     /// Total finding rows remaining in the cache after this pass.

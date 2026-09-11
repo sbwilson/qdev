@@ -3539,7 +3539,21 @@ fn test_every_matrix_state_at_once_sweeps_equal_to_a_rebuild_and_is_idempotent()
     chmod_only(root, "docs/specs/stories/E1S9.md", 0o600); // schema-invalid, chmod only
     chmod_only(root, recovering, 0o644); // unreadable -> readable again
 
-    store.sweep_workspace(root, &storage).unwrap();
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    // Five files were scanned — the four stories plus `qdev.toml` — and every one of them lands
+    // in exactly one count: `E1S2` re-parsed after its read recovered, `E1S1` and `qdev.toml`
+    // were unchanged, and the conflicted and schema-invalid pair were read and retained. Before
+    // `retained` existed that pair fell out of the counts entirely, so `qdev sync` reported a
+    // total short of what it had looked at and nothing said so.
+    assert_eq!(
+        summary.parsed + summary.unchanged + summary.retained,
+        5,
+        "every scanned file must land in exactly one count: {summary:?}"
+    );
+    assert_eq!(
+        summary.retained, 2,
+        "the conflicted and schema-invalid pair"
+    );
     let first = dump_tables(&cache_db(root));
 
     // Idempotence: a second sweep over the same unchanged tree changes nothing.

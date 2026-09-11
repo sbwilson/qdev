@@ -203,6 +203,10 @@ CREATE TABLE IF NOT EXISTS findings (
     severity TEXT NOT NULL,
     message TEXT,
     message_key TEXT NOT NULL,
+    -- When the recording pass wrote this row, not when the problem was first seen: findings are
+    -- re-derived, never carried. `validate_relations_graph` deletes and re-records the three
+    -- whole-graph codes every sweep, and a hydration-failure code is re-recorded whenever its
+    -- file is re-read. Nothing may age or order findings by it.
     found_at TEXT NOT NULL,
     PRIMARY KEY (path, code, message_key)
 );
@@ -479,6 +483,8 @@ DELETE FROM sync_meta;
             // `parsed` counts only confirmed successful reads + hydrations this pass, matching
             // the meaning `sweep_workspace` gives `SweepSummary.parsed`.
             let mut parsed = 0usize;
+            // Files read and tried, that produced no row: the counts only add up with these.
+            let mut retained = 0usize;
             // Files whose content this pass read and hashed. A rebuild reads everything it
             // finds; the sweep counts the same thing, which is how a test can pin that a warm
             // sweep re-reads nothing.
@@ -510,6 +516,7 @@ DELETE FROM sync_meta;
                     Ok(c) => c,
                     Err(e) => {
                         record_read_error(&tx, &relative_path(workspace_root, file_path), &e)?;
+                        retained += 1;
                         continue;
                     }
                 };
@@ -517,6 +524,8 @@ DELETE FROM sync_meta;
                 let outcome = hydrate_markdown_file(&tx, workspace_root, file_path, &content)?;
                 if matches!(outcome, HydrateOutcome::Parsed { .. }) {
                     parsed += 1;
+                } else {
+                    retained += 1;
                 }
             }
 
@@ -586,6 +595,7 @@ DELETE FROM sync_meta;
             Ok(SweepSummary {
                 parsed,
                 unchanged: 0,
+                retained,
                 // A rebuild reads and hashes every file it finds, by definition.
                 hashed,
                 purged: 0,
@@ -3179,6 +3189,7 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
 
             let mut parsed = 0usize;
             let mut unchanged = 0usize;
+            let mut retained = 0usize;
             let mut hashed = 0usize;
             let mut purged = 0usize;
             // Paths whose hydration succeeded this pass. Only these consume a dirty row.
@@ -3278,9 +3289,11 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                 let content = match fs::read_to_string(abs) {
                     Ok(c) => c,
                     Err(e) => {
+                        // Read and failed, so not `unchanged`: the file produced no row, and is
+                        // counted where every other failed hydration is.
                         record_read_error(&tx, rel, &e)?;
                         finding_paths.insert(rel.clone());
-                        unchanged += 1;
+                        retained += 1;
                         continue;
                     }
                 };
@@ -3343,6 +3356,7 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                                     // Conflicted, schema-invalid or id-less: the file carries a
                                     // finding that explains why it has no fresh row.
                                     finding_paths.insert(rel.clone());
+                                    retained += 1;
                                 }
                             }
                         }
@@ -3498,6 +3512,7 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
             Ok(SweepSummary {
                 parsed,
                 unchanged,
+                retained,
                 hashed,
                 purged,
                 findings,
@@ -5754,31 +5769,50 @@ mod finding_code_tests {
             ]
         );
 
-        // Disjoint and jointly covering: the hydration-failure list and its complement are the
-        // two SQL code lists, and a code in neither (or in both) would go unswept or be deleted
-        // by the whole-graph pass that does not own it.
-        let failed = FindingCode::sql_in_list(true);
-        let succeeded = FindingCode::sql_in_list(false);
-        for code in &all {
-            let quoted = format!("'{}'", code.as_str());
-            assert_ne!(
-                failed.contains(&quoted),
-                succeeded.contains(&quoted),
-                "'{}' must appear in exactly one of the two SQL lists",
-                code.as_str()
-            );
-        }
+        // The classification itself, asserted over the data rather than over rendered SQL, so a
+        // reclassification is a deliberate edit here and a change to how the list is *formatted*
+        // is not a test failure. Disjoint and jointly covering by construction: a code in
+        // neither list would go unswept, and one in both would be deleted by the whole-graph
+        // pass that does not own it.
+        let partition = |failed: bool| {
+            all.iter()
+                .copied()
+                .filter(|c| c.means_hydration_failed() == failed)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            failed.matches('\'').count() / 2 + succeeded.matches('\'').count() / 2,
+            partition(true),
+            vec![
+                FindingCode::MergeConflict,
+                FindingCode::SchemaViolation,
+                FindingCode::ReadError,
+            ],
+            "these three mean the file produced no row"
+        );
+        assert_eq!(
+            partition(false),
+            vec![
+                FindingCode::DanglingRelation,
+                FindingCode::InvalidRelationKind,
+                FindingCode::DependencyCycle,
+            ],
+            "these three are recorded against files that parsed"
+        );
+        assert_eq!(
+            partition(true).len() + partition(false).len(),
             all.len(),
-            "the two lists together must name every code exactly once"
+            "the two sides together must name every code exactly once"
+        );
+        assert!(
+            !partition(true).is_empty() && !partition(false).is_empty(),
+            "an empty side would render as `IN ()` at one of the two call sites"
         );
 
-        // And the classification itself, so a reclassification is a deliberate edit here too.
-        assert_eq!(failed, "'merge_conflict', 'schema_violation', 'read_error'");
+        // One assertion on the rendered form, since it is spliced into SQL: quoted, comma
+        // separated, and nothing in it that would need escaping.
         assert_eq!(
-            succeeded,
-            "'dangling_relation', 'invalid_relation_kind', 'dependency_cycle'"
+            FindingCode::sql_in_list(true),
+            "'merge_conflict', 'schema_violation', 'read_error'"
         );
     }
 }
