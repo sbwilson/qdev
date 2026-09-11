@@ -717,7 +717,9 @@ fn test_fix_ids_waits_on_the_advisory_write_lock() {
     let before = read_story(&stories_dir, "E1S2");
 
     let root_buf = root.to_path_buf();
-    while_write_lock_held(root, std::time::Duration::from_millis(6000), || {
+    // The hold ends when the body returns; this is only a safety valve for a panicking assert,
+    // so it must clear the command's 5s timeout plus spawn time (see `update_cli_tests.rs`).
+    while_write_lock_held(root, std::time::Duration::from_millis(60_000), || {
         let mut cmd = Command::cargo_bin("qdev").unwrap();
         let assert = cmd
             .current_dir(&root_buf)

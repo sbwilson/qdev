@@ -475,13 +475,17 @@ updated_by:
     let lock_acquired_clone = lock_acquired.clone();
     let lock_path_clone = lock_path.clone();
 
-    // Spawn thread to hold lock for 6 seconds (longer than the 5s timeout)
+    // The `lock_released` flag below is what actually ends the hold, right after the assertion;
+    // the elapsed-time ceiling is only a safety valve for a panicking assert. It has to clear the
+    // command's own 5s timeout *plus* however long this runner takes to spawn the binary — at
+    // 6 seconds a slow Windows agent released the lock while `qdev` was still retrying, and the
+    // update then succeeded where the test demanded exit 5.
     let lock_holder_thread = thread::spawn(move || {
         let _guard =
             qdev_core::acquire_write_lock(&lock_path_clone, Duration::from_millis(5000)).unwrap();
         lock_acquired_clone.store(true, Ordering::SeqCst);
         let start = std::time::Instant::now();
-        while start.elapsed() < Duration::from_millis(6000)
+        while start.elapsed() < Duration::from_millis(60_000)
             && !lock_released_clone.load(Ordering::SeqCst)
         {
             thread::sleep(Duration::from_millis(50));

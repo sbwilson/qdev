@@ -251,7 +251,9 @@ fn test_sync_rebuild_waits_on_the_advisory_write_lock() {
             qdev_core::acquire_write_lock(&lock_path, Duration::from_millis(5000)).unwrap();
         acquired_c.store(true, Ordering::SeqCst);
         let start = std::time::Instant::now();
-        while start.elapsed() < Duration::from_millis(6000) && !release_c.load(Ordering::SeqCst) {
+        // The release flag ends the hold; this ceiling is only a safety valve, and must clear the
+        // command's 5s timeout plus process spawn on a slow runner (see `update_cli_tests.rs`).
+        while start.elapsed() < Duration::from_millis(60_000) && !release_c.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(50));
         }
     });

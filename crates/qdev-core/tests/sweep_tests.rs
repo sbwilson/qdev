@@ -84,8 +84,13 @@ fn entity_stale(store: &SqliteStore, id: &str) -> bool {
     store.get_entity(id).unwrap().unwrap().stale
 }
 
-/// Dumps every table as sorted stringified rows. `findings.found_at` (second-resolution wall
-/// clock) is dropped so a rebuild and a sweep of the same tree compare equal.
+/// Dumps every table as sorted stringified rows, with every `*_at` column outside `sync_meta`
+/// reduced to whether it is set. Those are second-resolution wall clocks stamped when a row is written, so they cannot
+/// take part in a sweep-equals-rebuild comparison: a sweep that correctly leaves an unchanged,
+/// healthy file alone keeps that row's original `updated_at`, while a rebuild re-parses the file
+/// and stamps it afresh. Comparing them asserts that the two runs happened in the same second,
+/// which is a property of the machine and not of the cache. Set-vs-NULL is kept, so a column a
+/// sweep forgot to populate at all still shows up.
 fn dump_tables(db_path: &Path) -> BTreeMap<String, Vec<Vec<String>>> {
     let conn = rusqlite::Connection::open(db_path).unwrap();
     let mut dump = BTreeMap::new();
@@ -96,16 +101,24 @@ fn dump_tables(db_path: &Path) -> BTreeMap<String, Vec<Vec<String>>> {
             Err(_) => continue,
         };
         let col_count = stmt.column_count();
-        let keep = if table == "findings" {
-            col_count - 1 // drop found_at
-        } else {
-            col_count
-        };
+        // `sync_meta` is exempt: it is never part of an equality comparison (it stamps when a
+        // pass ran, not what the pass found), and `test_rebuild_and_sweep_findings_equal` asserts
+        // the shape of the stamp it leaves.
+        let is_clock: Vec<bool> = (0..col_count)
+            .map(|i| table != "sync_meta" && stmt.column_name(i).unwrap().ends_with("_at"))
+            .collect();
         let rows = stmt
             .query_map([], |row| {
                 let mut vals = Vec::new();
-                for i in 0..keep {
+                for (i, clock) in is_clock.iter().enumerate() {
                     let val: rusqlite::types::Value = row.get(i)?;
+                    if *clock {
+                        vals.push(match val {
+                            rusqlite::types::Value::Null => "NULL".to_string(),
+                            _ => "<set>".to_string(),
+                        });
+                        continue;
+                    }
                     vals.push(match val {
                         rusqlite::types::Value::Null => "NULL".to_string(),
                         rusqlite::types::Value::Integer(i) => i.to_string(),
