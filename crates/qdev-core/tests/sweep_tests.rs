@@ -57,6 +57,19 @@ Body for {id}
     )
 }
 
+/// A story whose frontmatter carries `updated_at`, so the row it hydrates into does not depend on
+/// when the test ran. Without it `updated_at` falls back to the file's own change stamp, and a
+/// sweep that correctly skips an unchanged file keeps the value derived from the stamp its last
+/// hydration saw while a rebuild derives one from the current stamp — a real divergence (see
+/// `deferred-work.md`), and one that turns a sweep-equals-rebuild comparison into a bet on both
+/// runs landing in the same second.
+fn story_md_stamped(id: &str, title: &str) -> String {
+    story_md(id, title).replace(
+        "status: draft\n",
+        "status: draft\nupdated_at: \"2026-01-01T00:00:00Z\"\n",
+    )
+}
+
 fn story_path(root: &Path, id: &str) -> PathBuf {
     root.join("docs/specs/stories").join(format!("{id}.md"))
 }
@@ -84,13 +97,18 @@ fn entity_stale(store: &SqliteStore, id: &str) -> bool {
     store.get_entity(id).unwrap().unwrap().stale
 }
 
-/// Dumps every table as sorted stringified rows, with every `*_at` column outside `sync_meta`
-/// reduced to whether it is set. Those are second-resolution wall clocks stamped when a row is written, so they cannot
-/// take part in a sweep-equals-rebuild comparison: a sweep that correctly leaves an unchanged,
-/// healthy file alone keeps that row's original `updated_at`, while a rebuild re-parses the file
-/// and stamps it afresh. Comparing them asserts that the two runs happened in the same second,
-/// which is a property of the machine and not of the cache. Set-vs-NULL is kept, so a column a
-/// sweep forgot to populate at all still shows up.
+/// Dumps every table as sorted stringified rows, with `findings.found_at` reduced to whether it
+/// is set. That column is the one a sweep and a rebuild stamp from the wall clock as they write
+/// (`record_finding`), so comparing it would assert that the two runs happened in the same
+/// second — a property of the machine, not of the cache. Set-vs-NULL is kept, so a sweep that
+/// forgot to stamp it at all still shows up.
+///
+/// Every other `*_at` column is compared by value, deliberately. They look like clocks and are
+/// not: `entities.updated_at` is the frontmatter's, or else derived from the file's own change
+/// stamp, and `dirty_entities.dirty_at` is supplied by the write path. Blanking them would retire
+/// exactly the comparison that catches a wrong one — which is how `56692569348-03-01T04:12:02Z`
+/// once shipped in `updated_at` (see `hydrate_markdown_file`). `sync_meta` is compared by the one
+/// test that cares, not here.
 fn dump_tables(db_path: &Path) -> BTreeMap<String, Vec<Vec<String>>> {
     let conn = rusqlite::Connection::open(db_path).unwrap();
     let mut dump = BTreeMap::new();
@@ -101,11 +119,8 @@ fn dump_tables(db_path: &Path) -> BTreeMap<String, Vec<Vec<String>>> {
             Err(_) => continue,
         };
         let col_count = stmt.column_count();
-        // `sync_meta` is exempt: it is never part of an equality comparison (it stamps when a
-        // pass ran, not what the pass found), and `test_rebuild_and_sweep_findings_equal` asserts
-        // the shape of the stamp it leaves.
         let is_clock: Vec<bool> = (0..col_count)
-            .map(|i| table != "sync_meta" && stmt.column_name(i).unwrap().ends_with("_at"))
+            .map(|i| table == "findings" && stmt.column_name(i).unwrap() == "found_at")
             .collect();
         let rows = stmt
             .query_map([], |row| {
@@ -3442,7 +3457,13 @@ fn test_every_matrix_state_at_once_sweeps_equal_to_a_rebuild_and_is_idempotent()
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     write_qdev_toml(root, "");
-    write_story(root, "E1S1", "Healthy");
+    // The two files that end up with rows carry an explicit `updated_at`; see
+    // `story_md_stamped` for why the stamp-derived fallback cannot be compared here.
+    write_at(
+        root,
+        "docs/specs/stories/E1S1.md",
+        &story_md_stamped("E1S1", "Healthy"),
+    );
     write_at(
         root,
         "docs/specs/stories/E1S8.md",
@@ -3453,7 +3474,11 @@ fn test_every_matrix_state_at_once_sweeps_equal_to_a_rebuild_and_is_idempotent()
         "docs/specs/stories/E1S9.md",
         &schema_invalid_story("E1S9"),
     );
-    write_story(root, "E1S2", "Recovers");
+    write_at(
+        root,
+        "docs/specs/stories/E1S2.md",
+        &story_md_stamped("E1S2", "Recovers"),
+    );
     let storage = storage();
     let store = ensure_cache(root, &storage).unwrap();
 
