@@ -63,6 +63,8 @@ Body for {id}
 /// hydration saw while a rebuild derives one from the current stamp — a real divergence (see
 /// `deferred-work.md`), and one that turns a sweep-equals-rebuild comparison into a bet on both
 /// runs landing in the same second.
+// Used only by the whole-matrix test, which needs `chmod` and so is Unix-only.
+#[cfg(unix)]
 fn story_md_stamped(id: &str, title: &str) -> String {
     story_md(id, title).replace(
         "status: draft\n",
