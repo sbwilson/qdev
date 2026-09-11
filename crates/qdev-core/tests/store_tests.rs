@@ -1030,7 +1030,7 @@ updated_by:
     let storage = StorageConfig::default();
 
     // 2. Build initial cache
-    let _store1 = ensure_cache(root, &storage).unwrap();
+    let store1 = ensure_cache(root, &storage).unwrap();
     let cache_db_path = root.join(".qdev/cache/cache.sqlite");
     assert!(cache_db_path.exists());
 
@@ -1088,7 +1088,11 @@ updated_by:
         "sync_state must not be empty"
     );
 
-    // 4. Delete the entire .qdev/cache/ directory
+    // 4. Delete the entire .qdev/cache/ directory. The store's connection is closed first:
+    // Windows refuses to remove a file another handle still holds open, and it is the connection
+    // WAL mode keeps alive that would be holding it. On Unix the removal would succeed either
+    // way, which is why this only ever failed on the Windows leg.
+    drop(store1);
     let cache_dir = root.join(".qdev/cache");
     fs::remove_dir_all(&cache_dir).unwrap();
     assert!(!cache_dir.exists());
