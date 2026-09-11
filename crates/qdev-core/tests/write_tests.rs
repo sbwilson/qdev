@@ -585,6 +585,11 @@ updated_by:
     };
 
     let res = apply_entity_update(&update_opts).unwrap();
+    // One spelling for one file, on every platform: the sweep writes `entities.source_path` with
+    // forward slashes, so a write that spelled it with the native separator would give the file a
+    // second identity the sweep's path-keyed purge and stale flags could never match — and the
+    // CLI would print a path no file carries.
+    assert_eq!(res.rel_path, "docs/specs/stories/E12S4.md");
     assert_eq!(res.old_version, 1);
     assert_eq!(res.new_version, 2);
     assert_eq!(res.id, "E12S4");

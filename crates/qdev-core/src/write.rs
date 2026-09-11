@@ -1595,11 +1595,15 @@ pub fn apply_entity_update(options: &EntityUpdateOptions) -> Result<EntityUpdate
         options.storage.as_ref(),
     )?;
 
+    // Forward slashes, whatever the platform separator is: this string is both what the user is
+    // shown and what lands in `entities.source_path`, and the sweep writes that column with `/`.
+    // A Windows write spelling the same file `docs\specs\stories\E1S9.md` would give it a second
+    // identity the sweep's path-keyed purge and stale flags could never match.
     let rel_path = file_path
         .strip_prefix(&options.workspace_root)
         .unwrap_or(&file_path)
         .to_string_lossy()
-        .to_string();
+        .replace('\\', "/");
 
     // 2. Acquire advisory write lock on write.lock with 5s timeout
     let cache_dir_rel = options
@@ -2313,11 +2317,15 @@ pub fn apply_relation_change(
         options.storage.as_ref(),
     )?;
 
+    // Forward slashes, whatever the platform separator is: this string is both what the user is
+    // shown and what lands in `entities.source_path`, and the sweep writes that column with `/`.
+    // A Windows write spelling the same file `docs\specs\stories\E1S9.md` would give it a second
+    // identity the sweep's path-keyed purge and stale flags could never match.
     let rel_path = file_path
         .strip_prefix(&options.workspace_root)
         .unwrap_or(&file_path)
         .to_string_lossy()
-        .to_string();
+        .replace('\\', "/");
 
     // 2. Acquire advisory write lock on write.lock with 5s timeout
     let cache_dir_rel = options
