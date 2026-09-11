@@ -4032,7 +4032,13 @@ ON CONFLICT(path) DO UPDATE SET
     })
 }
 
-/// The closed set of codes the cache records in `findings`.
+/// The codes the sweep and the rebuild record in `findings`.
+///
+/// Not the closed set of what the column can hold: [`Store::upsert_finding`] takes a
+/// `FindingRecord` whose `code` is a `String` and writes it verbatim, so a caller outside this
+/// module can still store a code no variant here names — it would fall into neither SQL list and
+/// be cleared by the hash-unchanged branch. Closing that hole means changing the trait's
+/// signature, which is a wider change than this classification needs.
 ///
 /// It exists for the classification below. [`FindingCode::means_hydration_failed`] answers, for a
 /// path carrying a code, whether the last attempt to hydrate that path produced a row — the

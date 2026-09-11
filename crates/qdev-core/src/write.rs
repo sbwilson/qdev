@@ -56,6 +56,35 @@ fn is_lock_contended(err: &std::io::Error) -> bool {
     false
 }
 
+/// Spells a path relative to the workspace root with forward slashes, whatever the platform
+/// separator is. The result is both what the user is shown and what lands in
+/// `entities.source_path`, and the sweep writes that column with `/` — a Windows write spelling
+/// the same file `docs\specs\stories\E1S9.md` would give it a second identity the sweep's
+/// path-keyed purge and stale flags could never match.
+///
+/// It walks components rather than replacing backslashes in the string: on Unix a backslash is a
+/// legal character in a file name, and rewriting `a\b.md` to `a/b.md` would invent a path no file
+/// carries — swapping one identity split for another.
+pub(crate) fn workspace_rel_path(file_path: &Path, workspace_root: &Path) -> String {
+    let rel = file_path.strip_prefix(workspace_root).unwrap_or(file_path);
+    let mut out = String::new();
+    for component in rel.components() {
+        // A root or prefix component already carries its own separator, so it is spelled as `/`
+        // and nothing is appended after it. Every other component is joined with one `/`.
+        let piece = match component {
+            std::path::Component::RootDir => "/".to_string(),
+            other => other.as_os_str().to_string_lossy().to_string(),
+        };
+        if out.is_empty() || out.ends_with('/') {
+            out.push_str(&piece);
+        } else {
+            out.push('/');
+            out.push_str(&piece);
+        }
+    }
+    out
+}
+
 /// Acquires an exclusive advisory write lock on the specified file path with a timeout.
 /// Creates parent directories and the lock file if they do not exist.
 /// Fails with ExitCode::Conflict (`lock_timeout`) if the timeout expires.
@@ -1595,15 +1624,7 @@ pub fn apply_entity_update(options: &EntityUpdateOptions) -> Result<EntityUpdate
         options.storage.as_ref(),
     )?;
 
-    // Forward slashes, whatever the platform separator is: this string is both what the user is
-    // shown and what lands in `entities.source_path`, and the sweep writes that column with `/`.
-    // A Windows write spelling the same file `docs\specs\stories\E1S9.md` would give it a second
-    // identity the sweep's path-keyed purge and stale flags could never match.
-    let rel_path = file_path
-        .strip_prefix(&options.workspace_root)
-        .unwrap_or(&file_path)
-        .to_string_lossy()
-        .replace('\\', "/");
+    let rel_path = workspace_rel_path(&file_path, &options.workspace_root);
 
     // 2. Acquire advisory write lock on write.lock with 5s timeout
     let cache_dir_rel = options
@@ -2317,15 +2338,7 @@ pub fn apply_relation_change(
         options.storage.as_ref(),
     )?;
 
-    // Forward slashes, whatever the platform separator is: this string is both what the user is
-    // shown and what lands in `entities.source_path`, and the sweep writes that column with `/`.
-    // A Windows write spelling the same file `docs\specs\stories\E1S9.md` would give it a second
-    // identity the sweep's path-keyed purge and stale flags could never match.
-    let rel_path = file_path
-        .strip_prefix(&options.workspace_root)
-        .unwrap_or(&file_path)
-        .to_string_lossy()
-        .replace('\\', "/");
+    let rel_path = workspace_rel_path(&file_path, &options.workspace_root);
 
     // 2. Acquire advisory write lock on write.lock with 5s timeout
     let cache_dir_rel = options
@@ -2631,4 +2644,46 @@ pub fn apply_relation_change(
         changed: true,
         relations: relations_out,
     })
+}
+
+#[cfg(test)]
+mod path_spelling_tests {
+    use super::workspace_rel_path;
+    use std::path::Path;
+
+    /// The ordinary case, and the one the CLI prints.
+    #[test]
+    fn test_workspace_rel_path_is_forward_slashed() {
+        assert_eq!(
+            workspace_rel_path(
+                Path::new("/ws/docs/specs/stories/E1S9.md"),
+                Path::new("/ws")
+            ),
+            "docs/specs/stories/E1S9.md"
+        );
+    }
+
+    /// A backslash is a legal character in a Unix file name. Normalizing by string replacement
+    /// would rewrite this to `docs/specs/stories/od/d.md` — a path no file carries, and one the
+    /// sweep's `source_path` could never match either. Walking components leaves it alone.
+    #[cfg(unix)]
+    #[test]
+    fn test_workspace_rel_path_keeps_a_backslash_inside_a_unix_file_name() {
+        assert_eq!(
+            workspace_rel_path(
+                Path::new("/ws/docs/specs/stories/od\\d.md"),
+                Path::new("/ws")
+            ),
+            "docs/specs/stories/od\\d.md"
+        );
+    }
+
+    /// A path that does not sit under the root is spelled as it is, not silently rebased.
+    #[test]
+    fn test_workspace_rel_path_passes_through_a_foreign_path() {
+        assert_eq!(
+            workspace_rel_path(Path::new("/elsewhere/E1S9.md"), Path::new("/ws")),
+            "/elsewhere/E1S9.md"
+        );
+    }
 }

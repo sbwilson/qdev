@@ -2244,6 +2244,46 @@ fn test_unreadable_scratch_and_evidence_files_record_read_error_on_both_paths() 
 /// re-read — which is why no test could see a file that became unreadable behind unchanged
 /// metadata. Returns false where a 0o000 file is readable anyway (root, or a platform without
 /// POSIX modes), so the caller can skip rather than fail for the wrong reason.
+/// The third role arm the same repair was applied to. Scratch and evidence files are covered by
+/// the test above; `qdev.toml` is swept as `SweepFileRole::Config` and was covered by nothing, so
+/// deleting its `clear_findings_for_path` regressed no test. An unreadable-then-repaired config
+/// would then keep its `read_error` forever and `qdev validate` would exit 1 over a workspace a
+/// rebuild — which truncates `findings` first — calls clean.
+#[cfg(unix)]
+#[test]
+fn test_unreadable_then_repaired_config_stops_being_reported() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "One");
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    let rel = "qdev.toml";
+
+    if !make_unreadable_in_place(root, rel) {
+        eprintln!("skipping: this environment can read a 0o000 file");
+        return;
+    }
+    store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        codes_for(&store, rel),
+        vec!["read_error".to_string()],
+        "an unreadable config must be reported, not swallowed"
+    );
+
+    // Readable again, and edited: the re-hydration is the only thing that can clear the finding
+    // its failed read left, since a config file records no findings of its own.
+    chmod_only(root, rel, 0o644);
+    write_qdev_toml(root, "[gates]\nnone = []");
+    store.sweep_workspace(root, &storage).unwrap();
+    assert!(
+        codes_for(&store, rel).is_empty(),
+        "a config that reads again must stop being reported: {:?}",
+        codes_for(&store, rel)
+    );
+    assert_sweep_equals_rebuild(&store, root, &storage);
+}
+
 fn make_unreadable_in_place(root: &Path, rel: &str) -> bool {
     let path = root.join(rel);
     let before = fs::metadata(&path).unwrap();

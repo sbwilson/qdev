@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use qdev_core::store::{SqliteStore, Store};
 use qdev_core::{
-    acquire_write_lock, apply_entity_update, create_story, patch_frontmatter,
-    replace_markdown_section, sha256_digest, upsert_cache_and_mark_dirty,
+    acquire_write_lock, apply_entity_update, apply_relation_change, create_story,
+    patch_frontmatter, replace_markdown_section, sha256_digest, upsert_cache_and_mark_dirty,
     upsert_cache_with_relation, write_file_atomic, Author, EntityKind, EntityRecord,
-    EntityUpdateOptions, ExitCode, FrontmatterPatchOptions, RelationRowChange, StoryCreateOptions,
+    EntityUpdateOptions, ExitCode, FrontmatterPatchOptions, RelationChangeOptions,
+    RelationRowChange, StoryCreateOptions,
 };
 use tempfile::TempDir;
 
@@ -534,6 +535,74 @@ VALUES ('docs/specs/stories/E12S4.md', 'oldhash', '2026-09-01T00:00:00Z');
         sync_count, 0,
         "sync_state row must be invalidated when entity is marked dirty"
     );
+}
+
+/// The twin of the `rel_path` assertion in `test_apply_entity_update_end_to_end`. Both writers
+/// build that string the same way and both feed it to `entities.source_path`, so both need the
+/// same guard: without one, reverting this site's separator normalization fails nothing on any
+/// platform, and a Windows relation write would spell the file `docs\specs\stories\E12S4.md` —
+/// a second identity for one file, which the sweep's path-keyed purge and stale flags can never
+/// match.
+#[test]
+fn test_apply_relation_change_reports_a_forward_slash_path() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let stories_dir = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+
+    for id in ["E12S4", "E12S5"] {
+        fs::write(
+            stories_dir.join(format!("{id}.md")),
+            format!(
+                r#"---
+id: {id}
+title: Story {id}
+status: draft
+version: 1
+owners: ["simon"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    let res = apply_relation_change(&RelationChangeOptions {
+        workspace_root: root.to_path_buf(),
+        storage: None,
+        entity_kind: Some(EntityKind::Story),
+        entity_id: "E12S4".to_string(),
+        relation: "depends_on".to_string(),
+        target_id: "E12S5".to_string(),
+        add: true,
+        if_version: Some(1),
+        author: Author::new("human", "simon"),
+    })
+    .unwrap();
+
+    assert!(res.changed);
+    assert_eq!(res.rel_path, "docs/specs/stories/E12S4.md");
+
+    // And the spelling the cache kept is the same one, since that is what the sweep matches on.
+    let cache_db_path = root.join(".qdev/cache/cache.sqlite");
+    let conn = rusqlite::Connection::open(&cache_db_path).unwrap();
+    let stored: String = conn
+        .query_row(
+            "SELECT source_path FROM entities WHERE id = 'E12S4';",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, "docs/specs/stories/E12S4.md");
 }
 
 #[test]
