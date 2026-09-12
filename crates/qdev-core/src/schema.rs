@@ -156,6 +156,7 @@ pub enum PayloadKind {
     List,
     Sync,
     Doctor,
+    Transition,
 }
 
 impl PayloadKind {
@@ -169,6 +170,7 @@ impl PayloadKind {
             PayloadKind::List => include_str!("../schemas/payload-list.json"),
             PayloadKind::Sync => include_str!("../schemas/payload-sync.json"),
             PayloadKind::Doctor => include_str!("../schemas/payload-doctor.json"),
+            PayloadKind::Transition => include_str!("../schemas/payload-transition.json"),
         }
     }
 
@@ -193,11 +195,12 @@ impl PayloadKind {
             PayloadKind::List => "list",
             PayloadKind::Sync => "sync",
             PayloadKind::Doctor => "doctor",
+            PayloadKind::Transition => "transition",
         }
     }
 
     /// Returns an array of all currently-supported payload kinds.
-    pub const fn all() -> &'static [PayloadKind; 7] {
+    pub const fn all() -> &'static [PayloadKind; 8] {
         &[
             PayloadKind::Story,
             PayloadKind::Error,
@@ -206,6 +209,7 @@ impl PayloadKind {
             PayloadKind::List,
             PayloadKind::Sync,
             PayloadKind::Doctor,
+            PayloadKind::Transition,
         ]
     }
 
@@ -231,6 +235,7 @@ impl PayloadKind {
             "list" => Ok(PayloadKind::List),
             "sync" => Ok(PayloadKind::Sync),
             "doctor" => Ok(PayloadKind::Doctor),
+            "transition" | "transitions" => Ok(PayloadKind::Transition),
             _ => Err(QdevError::usage_error(format!(
                 "Unknown payload name '{}'. Valid payload names: {}",
                 s,

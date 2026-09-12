@@ -53,8 +53,16 @@ pub fn scan_duplicate_planning_ids(
 ) -> Result<DuplicateIdScan, QdevError> {
     let mut files = Vec::new();
     let mut unreadable_dirs = Vec::new();
-    collect_markdown_files(&workspace_root.join(&storage.specs_dir), &mut files, &mut unreadable_dirs);
-    collect_markdown_files(&workspace_root.join(&storage.state_dir), &mut files, &mut unreadable_dirs);
+    collect_markdown_files(
+        &workspace_root.join(&storage.specs_dir),
+        &mut files,
+        &mut unreadable_dirs,
+    );
+    collect_markdown_files(
+        &workspace_root.join(&storage.state_dir),
+        &mut files,
+        &mut unreadable_dirs,
+    );
     // One directory configured inside the other would otherwise report every file in the
     // overlap as a duplicate of itself.
     files.sort();
@@ -532,8 +540,16 @@ pub(crate) fn off_convention_file_holding_id(
 
     let mut files = Vec::new();
     let mut unreadable_dirs = Vec::new();
-    collect_markdown_files(&workspace_root.join(&storage.specs_dir), &mut files, &mut unreadable_dirs);
-    collect_markdown_files(&workspace_root.join(&storage.state_dir), &mut files, &mut unreadable_dirs);
+    collect_markdown_files(
+        &workspace_root.join(&storage.specs_dir),
+        &mut files,
+        &mut unreadable_dirs,
+    );
+    collect_markdown_files(
+        &workspace_root.join(&storage.state_dir),
+        &mut files,
+        &mut unreadable_dirs,
+    );
     files.sort();
     files.dedup();
 

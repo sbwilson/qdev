@@ -39,6 +39,8 @@ pub enum Commands {
     Schema(SchemaArgs),
     /// Update planning and execution entities
     Update(UpdateArgs),
+    /// Transition a story across lifecycle states
+    Transition(TransitionArgs),
     /// Fetch a single entity's isolated projection
     Get(GetArgs),
     /// List and filter entities of one kind
@@ -222,6 +224,34 @@ pub struct UpdateArgs {
     /// Attribution developer/agent ID override
     #[arg(long = "author-id")]
     pub author_id: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct TransitionArgs {
+    /// Entity kind to transition (only "story" supported)
+    pub kind: String,
+
+    /// Story identifier (e.g. E12S4)
+    pub id: String,
+
+    /// Target status to transition to
+    pub target_status: String,
+
+    /// Justification for terminal (superseded/abandoned) or backward transitions
+    #[arg(long = "justification")]
+    pub justification: Option<String>,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
+
+    /// Optimistic concurrency control: expected existing entity version
+    #[arg(long = "if-version")]
+    pub if_version: Option<u64>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]

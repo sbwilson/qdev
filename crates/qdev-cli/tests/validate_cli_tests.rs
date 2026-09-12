@@ -2423,7 +2423,10 @@ fn test_doctor_reports_unreadable_directory_finding_in_validation_section() {
             .find(|s| s["name"] == "validation")
             .expect("a 'validation' section must be present");
         assert!(
-            validation["findings_by_code"]["read_error"].as_u64().unwrap_or(0) >= 1,
+            validation["findings_by_code"]["read_error"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1,
             "doctor must report read_error in findings_by_code under validation: {validation}"
         );
     }
@@ -2520,7 +2523,9 @@ fn test_update_on_entity_in_unreadable_directory_exits_4_infrastructure_failure(
         let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
         let combined = format!("{stderr}\n{stdout}");
         assert!(
-            combined.contains("io_error") || combined.contains("stories") || combined.contains("Permission denied"),
+            combined.contains("io_error")
+                || combined.contains("stories")
+                || combined.contains("Permission denied"),
             "error must identify directory read failure: {combined}"
         );
     }

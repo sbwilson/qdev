@@ -243,6 +243,13 @@ fn run(raw_args: &[String]) -> ExitCode {
         Some(Commands::Update(ref update_args)) => {
             handle_update(update_args, &annotated_config, &cli, &output, &current_dir)
         }
+        Some(Commands::Transition(ref transition_args)) => handle_transition(
+            transition_args,
+            &annotated_config,
+            &cli,
+            &output,
+            &current_dir,
+        ),
         Some(Commands::Get(ref get_args)) => {
             handle_get(get_args, &annotated_config, &cli, &output, &current_dir)
         }
@@ -345,6 +352,7 @@ fn requires_workspace(command: Option<&Commands>) -> bool {
             ConfigCommands::Show => false,
         },
         Some(Commands::Update(_))
+        | Some(Commands::Transition(_))
         | Some(Commands::Get(_))
         | Some(Commands::List(_))
         | Some(Commands::Relate(_))
@@ -1161,6 +1169,96 @@ fn handle_update(
             "Updated {} {} (version {}) at {}",
             res.kind, res.id, res.new_version, res.rel_path
         );
+    }
+
+    ExitCode::Success
+}
+
+fn handle_transition(
+    transition_args: &cli::TransitionArgs,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+) -> ExitCode {
+    let root = qdev_core::find_workspace_root(current_dir);
+
+    // Kind validation
+    if transition_args.kind != "story" {
+        let err = QdevError::usage_error(format!(
+            "Transition command only supports 'story' entities, got '{}'",
+            transition_args.kind
+        ));
+        let _ = output.emit_error(&err);
+        return ExitCode::UsageError;
+    }
+
+    // Target status parsing
+    if let Err(e) = qdev_core::StoryState::parse(&transition_args.target_status) {
+        let _ = output.emit_error(&e);
+        return e.exit_code();
+    }
+
+    // Resolve active author attribution
+    let author = match resolve_author(
+        transition_args.author_type.as_deref(),
+        transition_args.author_id.as_deref(),
+        annotated_config,
+        &root,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let options = qdev_core::TransitionOptions {
+        workspace_root: root,
+        storage: Some(annotated_config.config.storage.clone()),
+        entity_kind: transition_args.kind.clone(),
+        story_id: transition_args.id.clone(),
+        target_status: transition_args.target_status.clone(),
+        justification: transition_args.justification.clone(),
+        author,
+        if_version: transition_args.if_version,
+    };
+
+    let engine = qdev_core::TransitionEngine::new();
+    let res = match engine.transition(&options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    if cli.json {
+        let envelope = JsonEnvelope::new(res);
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit transition envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else {
+        let mut msg = format!(
+            "Transitioned story {} {} -> {} (version {})\n",
+            res.id, res.from_status, res.to_status, res.version
+        );
+        if !res.closed_dw.is_empty() {
+            msg.push_str(&format!("Closed deferred work: {}\n", res.closed_dw.join(", ")));
+        }
+        if let Err(e) = output.emit_text(&msg) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit transition output: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
     }
 
     ExitCode::Success

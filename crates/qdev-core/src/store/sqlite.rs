@@ -434,12 +434,22 @@ impl SqliteStore {
         // Also collect scratchpad (.jsonl) and evidence (.json) files
         let scratch_dir = state_dir.join("scratch");
         let mut scratch_files = Vec::new();
-        collect_files_with_ext(&scratch_dir, "jsonl", &mut scratch_files, &mut unreadable_dirs);
+        collect_files_with_ext(
+            &scratch_dir,
+            "jsonl",
+            &mut scratch_files,
+            &mut unreadable_dirs,
+        );
         scratch_files.sort();
 
         let evidence_dir = state_dir.join("evidence");
         let mut evidence_files = Vec::new();
-        collect_files_with_ext(&evidence_dir, "json", &mut evidence_files, &mut unreadable_dirs);
+        collect_files_with_ext(
+            &evidence_dir,
+            "json",
+            &mut evidence_files,
+            &mut unreadable_dirs,
+        );
         evidence_files.sort();
 
         unreadable_dirs.sort_by(|a, b| a.0.cmp(&b.0));
@@ -3005,11 +3015,21 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
         entity_files.dedup();
 
         let mut scratch_files = Vec::new();
-        collect_files_with_ext(&scratch_dir, "jsonl", &mut scratch_files, &mut unreadable_dirs);
+        collect_files_with_ext(
+            &scratch_dir,
+            "jsonl",
+            &mut scratch_files,
+            &mut unreadable_dirs,
+        );
         scratch_files.sort();
 
         let mut evidence_files = Vec::new();
-        collect_files_with_ext(&evidence_dir, "json", &mut evidence_files, &mut unreadable_dirs);
+        collect_files_with_ext(
+            &evidence_dir,
+            "json",
+            &mut evidence_files,
+            &mut unreadable_dirs,
+        );
         evidence_files.sort();
 
         unreadable_dirs.sort_by(|a, b| a.0.cmp(&b.0));
@@ -3302,8 +3322,7 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                 let (stamp, size) = file_change_stamp(abs);
                 let size_i64 = size as i64;
                 let is_dirty = dirty_paths.contains(rel);
-                let restored_from_unreadable_dir =
-                    is_under_any_unreadable_dir(rel, &restored_dirs);
+                let restored_from_unreadable_dir = is_under_any_unreadable_dir(rel, &restored_dirs);
                 let stored = sync_map.get(rel);
 
                 // A file is a re-hash candidate only if its mtime or size differs, its

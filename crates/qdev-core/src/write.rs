@@ -563,7 +563,7 @@ pub fn patch_frontmatter(
 
 /// Parses a heading line into (level, title) if valid.
 /// Indented lines with >= 4 spaces or starting with a tab are code blocks in Markdown, not headings.
-fn parse_heading_line(line: &str) -> Option<(usize, &str)> {
+pub(crate) fn parse_heading_line(line: &str) -> Option<(usize, &str)> {
     if line.starts_with('\t') {
         return None;
     }
@@ -590,14 +590,14 @@ fn parse_heading_line(line: &str) -> Option<(usize, &str)> {
 
 /// Helper tracking Markdown fenced code blocks (``` or ~~~).
 #[derive(Default)]
-struct FenceTracker {
+pub(crate) struct FenceTracker {
     fence: Option<(char, usize)>,
 }
 
 impl FenceTracker {
     /// Processes a line and returns whether this line is part of a fenced code block
     /// (including opening or closing fence lines).
-    fn process_line(&mut self, line: &str) -> bool {
+    pub(crate) fn process_line(&mut self, line: &str) -> bool {
         if line.starts_with('\t') {
             return self.fence.is_some();
         }
@@ -631,6 +631,27 @@ impl FenceTracker {
             }
         }
     }
+}
+
+/// Returns whether the Markdown content contains a heading with the given title (case-insensitive),
+/// ignoring headings inside fenced code blocks or indented code blocks.
+pub(crate) fn has_markdown_heading(content: &str, expected_title: &str) -> bool {
+    let body = crate::schema::extract_frontmatter_str(content)
+        .map(|(_, b)| b)
+        .unwrap_or(content);
+    let mut tracker = FenceTracker::default();
+    for line in body.lines() {
+        let inside_fence = tracker.process_line(line);
+        if inside_fence {
+            continue;
+        }
+        if let Some((_level, title)) = parse_heading_line(line) {
+            if title.eq_ignore_ascii_case(expected_title) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Replaces exactly one matching Markdown section body in `markdown` with `new_section_body`.
@@ -1420,7 +1441,11 @@ fn find_file_in_dir(dir: &Path, id: &str) -> Result<Option<PathBuf>, QdevError> 
         let entry = entry.map_err(|e| {
             QdevError::infrastructure_failure(
                 "io_error",
-                format!("Failed to read directory entry in '{}': {}", dir.display(), e),
+                format!(
+                    "Failed to read directory entry in '{}': {}",
+                    dir.display(),
+                    e
+                ),
             )
         })?;
         let path = entry.path();

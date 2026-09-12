@@ -9,6 +9,7 @@ pub mod interactivity;
 pub mod query;
 pub mod schema;
 pub mod store;
+pub mod transition;
 pub mod validate;
 pub mod write;
 
@@ -65,6 +66,10 @@ pub use schema::{
     PayloadKind, SchemaError, ValidationError,
 };
 pub use serde_yaml;
+pub use transition::{
+    classify_transition, PostTransitionHook, PreTransitionHook, StoryState, TransitionContext,
+    TransitionEngine, TransitionKind, TransitionOptions, TransitionPayload,
+};
 pub use validate::{
     collect_workspace_files_matching, filter_by_changed, find_duplicate_planning_ids,
     find_dw_missing_rationale, find_off_convention_entity_files, find_orphan_deferred_work,

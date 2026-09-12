@@ -3647,7 +3647,10 @@ fn test_unreadable_subdirectory_retains_cached_entities_stale_and_records_findin
         }
 
         let summary = store.sweep_workspace(root, &storage).unwrap();
-        assert_eq!(summary.purged, 0, "entities under unreadable directory must not be purged");
+        assert_eq!(
+            summary.purged, 0,
+            "entities under unreadable directory must not be purged"
+        );
         assert!(
             entity_stale(&store, "E1S3"),
             "entity under unreadable directory must be retained flagged stale"
@@ -3657,7 +3660,9 @@ fn test_unreadable_subdirectory_retains_cached_entities_stale_and_records_findin
             "entity under readable directory must not be stale"
         );
 
-        let findings = store.get_findings_for_path("docs/specs/stories/sub").unwrap();
+        let findings = store
+            .get_findings_for_path("docs/specs/stories/sub")
+            .unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].code, "read_error");
         assert_eq!(findings[0].severity, "error");
@@ -3670,8 +3675,13 @@ fn test_unreadable_subdirectory_retains_cached_entities_stale_and_records_findin
             !entity_stale(&store, "E1S3"),
             "entity must be unstaled when directory is readable again"
         );
-        let findings2 = store.get_findings_for_path("docs/specs/stories/sub").unwrap();
-        assert!(findings2.is_empty(), "directory read_error finding must be cleared");
+        let findings2 = store
+            .get_findings_for_path("docs/specs/stories/sub")
+            .unwrap();
+        assert!(
+            findings2.is_empty(),
+            "directory read_error finding must be cleared"
+        );
     }
 }
 
@@ -3709,7 +3719,10 @@ fn test_unreadable_top_level_specs_dir_retains_all_stories_stale() {
         store.sweep_workspace(root, &storage).unwrap();
         assert!(!entity_stale(&store, "E1S1"));
         assert!(!entity_stale(&store, "E1S2"));
-        assert!(store.get_findings_for_path("docs/specs/stories").unwrap().is_empty());
+        assert!(store
+            .get_findings_for_path("docs/specs/stories")
+            .unwrap()
+            .is_empty());
     }
 }
 
@@ -3737,7 +3750,10 @@ fn test_unreadable_directory_deleted_clears_finding_and_purges_entities() {
         store.sweep_workspace(root, &storage).unwrap();
         assert!(entity_stale(&store, "E1S3"));
         assert_eq!(
-            store.get_findings_for_path("docs/specs/stories/sub").unwrap().len(),
+            store
+                .get_findings_for_path("docs/specs/stories/sub")
+                .unwrap()
+                .len(),
             1
         );
 
@@ -3746,10 +3762,16 @@ fn test_unreadable_directory_deleted_clears_finding_and_purges_entities() {
         fs::remove_dir_all(&sub).unwrap();
 
         let summary = store.sweep_workspace(root, &storage).unwrap();
-        assert_eq!(summary.purged, 1, "deleted directory's entities must be purged");
+        assert_eq!(
+            summary.purged, 1,
+            "deleted directory's entities must be purged"
+        );
         assert!(store.get_entity("E1S3").unwrap().is_none());
         assert!(
-            store.get_findings_for_path("docs/specs/stories/sub").unwrap().is_empty(),
+            store
+                .get_findings_for_path("docs/specs/stories/sub")
+                .unwrap()
+                .is_empty(),
             "deleted directory's read_error finding must be cleared"
         );
     }
@@ -3776,7 +3798,9 @@ fn test_unreadable_directory_during_reset_and_rebuild_records_finding() {
         }
 
         store.reset_and_rebuild(root, &storage).unwrap();
-        let findings = store.get_findings_for_path("docs/specs/stories/sub").unwrap();
+        let findings = store
+            .get_findings_for_path("docs/specs/stories/sub")
+            .unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].code, "read_error");
         assert_eq!(findings[0].severity, "error");
@@ -3811,7 +3835,10 @@ fn test_unreadable_scratch_and_evidence_dir_records_finding_and_preserves_entrie
 
     let storage = storage();
     let store = ensure_cache(root, &storage).unwrap();
-    assert_eq!(count_rows(root, "SELECT COUNT(*) FROM scratchpad_entries;"), 1);
+    assert_eq!(
+        count_rows(root, "SELECT COUNT(*) FROM scratchpad_entries;"),
+        1
+    );
     assert_eq!(count_rows(root, "SELECT COUNT(*) FROM gate_runs;"), 1);
 
     #[cfg(unix)]
@@ -3824,8 +3851,14 @@ fn test_unreadable_scratch_and_evidence_dir_records_finding_and_preserves_entrie
         }
 
         let summary = store.sweep_workspace(root, &storage).unwrap();
-        assert_eq!(summary.purged, 0, "entries under unreadable directories must not be purged");
-        assert_eq!(count_rows(root, "SELECT COUNT(*) FROM scratchpad_entries;"), 1);
+        assert_eq!(
+            summary.purged, 0,
+            "entries under unreadable directories must not be purged"
+        );
+        assert_eq!(
+            count_rows(root, "SELECT COUNT(*) FROM scratchpad_entries;"),
+            1
+        );
         assert_eq!(count_rows(root, "SELECT COUNT(*) FROM gate_runs;"), 1);
 
         let scratch_findings = store.get_findings_for_path("docs/state/scratch").unwrap();
@@ -3840,7 +3873,13 @@ fn test_unreadable_scratch_and_evidence_dir_records_finding_and_preserves_entrie
         drop(_guard2);
         let summary2 = store.sweep_workspace(root, &storage).unwrap();
         assert_eq!(summary2.purged, 0);
-        assert!(store.get_findings_for_path("docs/state/scratch").unwrap().is_empty());
-        assert!(store.get_findings_for_path("docs/state/evidence").unwrap().is_empty());
+        assert!(store
+            .get_findings_for_path("docs/state/scratch")
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .get_findings_for_path("docs/state/evidence")
+            .unwrap()
+            .is_empty());
     }
 }
