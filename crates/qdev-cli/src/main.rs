@@ -1260,7 +1260,10 @@ fn handle_transition(
             msg.push_str(&format!("Recorded decision: {}\n", dec_id));
         }
         if !res.closed_dw.is_empty() {
-            msg.push_str(&format!("Closed deferred work: {}\n", res.closed_dw.join(", ")));
+            msg.push_str(&format!(
+                "Closed deferred work: {}\n",
+                res.closed_dw.join(", ")
+            ));
         }
         if let Err(e) = output.emit_text(&msg) {
             let err = QdevError::infrastructure_failure(
@@ -3544,12 +3547,9 @@ fn handle_release(
                     return err.exit_code();
                 }
             }
-        } else if let Ok((k, _, _)) = qdev_core::resolve_entity_file(
-            &root,
-            None,
-            &id,
-            Some(&annotated_config.config.storage),
-        ) {
+        } else if let Ok((k, _, _)) =
+            qdev_core::resolve_entity_file(&root, None, &id, Some(&annotated_config.config.storage))
+        {
             if k != qdev_core::EntityKind::Story {
                 let err = QdevError::usage_error("Only story entities can be leased");
                 let _ = output.emit_error(&err);
@@ -3622,4 +3622,3 @@ fn handle_release(
         }
     }
 }
-

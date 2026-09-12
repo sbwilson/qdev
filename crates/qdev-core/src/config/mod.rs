@@ -8,8 +8,8 @@ use std::process::Command;
 pub use source::{AnnotatedConfig, AnnotatedValue, ConfigSource};
 pub use types::{
     CommitMessagesConfig, Config, EnvironmentConfig, GateConfig, GitConfig, HygieneConfig,
-    IdentityConfig, LeasesConfig, ModelsConfig, ModuleConfig, PreferencesConfig, ProjectConfig, RegulatoryConfig,
-    SoupConfig, StorageConfig, TeamsConfig, DEFAULT_CITATION_PATTERN,
+    IdentityConfig, LeasesConfig, ModelsConfig, ModuleConfig, PreferencesConfig, ProjectConfig,
+    RegulatoryConfig, SoupConfig, StorageConfig, TeamsConfig, DEFAULT_CITATION_PATTERN,
 };
 
 use crate::errors::QdevError;

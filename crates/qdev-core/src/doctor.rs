@@ -288,8 +288,8 @@ impl DoctorSection for LeasesDoctorSection {
 
                 let mut stale_leases = Vec::new();
                 for lease in &leases {
-                    let started_at_ts = crate::lease::parse_iso8601_to_timestamp(&lease.started_at)
-                        .unwrap_or(0);
+                    let started_at_ts =
+                        crate::lease::parse_iso8601_to_timestamp(&lease.started_at).unwrap_or(0);
                     let age_secs = (now - started_at_ts).max(0);
                     let age_days = age_secs / 86400;
                     if age_secs >= stale_threshold_secs {
@@ -303,9 +303,7 @@ impl DoctorSection for LeasesDoctorSection {
                     }
                 }
 
-                stale_leases.sort_by(|a, b| {
-                    a["story_id"].as_str().cmp(&b["story_id"].as_str())
-                });
+                stale_leases.sort_by(|a, b| a["story_id"].as_str().cmp(&b["story_id"].as_str()));
 
                 let active_count = leases.len();
                 let stale_count = stale_leases.len();
@@ -315,10 +313,22 @@ impl DoctorSection for LeasesDoctorSection {
                     fields: vec![
                         ("status".to_string(), serde_json::Value::from("ok")),
                         ("unavailable_reason".to_string(), serde_json::Value::Null),
-                        ("active_count".to_string(), serde_json::Value::from(active_count)),
-                        ("stale_count".to_string(), serde_json::Value::from(stale_count)),
-                        ("stale_age_days".to_string(), serde_json::Value::from(self.config.stale_age_days)),
-                        ("stale_leases".to_string(), serde_json::Value::from(stale_leases)),
+                        (
+                            "active_count".to_string(),
+                            serde_json::Value::from(active_count),
+                        ),
+                        (
+                            "stale_count".to_string(),
+                            serde_json::Value::from(stale_count),
+                        ),
+                        (
+                            "stale_age_days".to_string(),
+                            serde_json::Value::from(self.config.stale_age_days),
+                        ),
+                        (
+                            "stale_leases".to_string(),
+                            serde_json::Value::from(stale_leases),
+                        ),
                     ],
                 })
             }
@@ -326,10 +336,16 @@ impl DoctorSection for LeasesDoctorSection {
                 name: self.name().to_string(),
                 fields: vec![
                     ("status".to_string(), serde_json::Value::from("unavailable")),
-                    ("unavailable_reason".to_string(), serde_json::Value::from(e.code())),
+                    (
+                        "unavailable_reason".to_string(),
+                        serde_json::Value::from(e.code()),
+                    ),
                     ("active_count".to_string(), serde_json::Value::Null),
                     ("stale_count".to_string(), serde_json::Value::Null),
-                    ("stale_age_days".to_string(), serde_json::Value::from(self.config.stale_age_days)),
+                    (
+                        "stale_age_days".to_string(),
+                        serde_json::Value::from(self.config.stale_age_days),
+                    ),
                     ("stale_leases".to_string(), serde_json::Value::Null),
                 ],
             }),

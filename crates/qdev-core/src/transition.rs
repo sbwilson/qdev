@@ -774,19 +774,16 @@ pub fn append_scratchpad_entry(
                     ),
                 )
             })?;
-            let seq_u64 = val
-                .get("seq")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| {
-                    QdevError::logical_failure(
-                        "parse_error",
-                        format!(
-                            "Malformed scratchpad entry in '{}' at line {}: missing or invalid 'seq'",
-                            scratch_file_path.display(),
-                            line_idx + 1
-                        ),
-                    )
-                })?;
+            let seq_u64 = val.get("seq").and_then(|v| v.as_u64()).ok_or_else(|| {
+                QdevError::logical_failure(
+                    "parse_error",
+                    format!(
+                        "Malformed scratchpad entry in '{}' at line {}: missing or invalid 'seq'",
+                        scratch_file_path.display(),
+                        line_idx + 1
+                    ),
+                )
+            })?;
             let seq_u32 = u32::try_from(seq_u64).map_err(|_| {
                 QdevError::logical_failure(
                     "parse_error",
@@ -922,15 +919,20 @@ pub fn create_backward_transition_decision(
         "created_at": timestamp,
     });
 
-    crate::schema::validate_value_detailed(EntityKind::Decision, &frontmatter_json).map_err(|errs| {
-        QdevError::logical_failure(
-            "schema_violation",
-            format!(
-                "Decision frontmatter schema validation failed: {}",
-                errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")
-            ),
-        )
-    })?;
+    crate::schema::validate_value_detailed(EntityKind::Decision, &frontmatter_json).map_err(
+        |errs| {
+            QdevError::logical_failure(
+                "schema_violation",
+                format!(
+                    "Decision frontmatter schema validation failed: {}",
+                    errs.iter()
+                        .map(|e| e.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            )
+        },
+    )?;
 
     let frontmatter_yaml = serde_yaml::to_string(&frontmatter_json).map_err(|e| {
         QdevError::infrastructure_failure(

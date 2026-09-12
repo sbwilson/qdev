@@ -68,16 +68,28 @@ fn test_cli_claim_unleased_story_text_mode() {
 
     let output = assert.get_output();
     let text = std::str::from_utf8(&output.stdout).unwrap();
-    assert!(text.contains("Claimed lease on story E12S4"), "text: {}", text);
-    assert!(text.contains("export QDEV_SESSION=qs_E12S4_"), "text: {}", text);
+    assert!(
+        text.contains("Claimed lease on story E12S4"),
+        "text: {}",
+        text
+    );
+    assert!(
+        text.contains("export QDEV_SESSION=qs_E12S4_"),
+        "text: {}",
+        text
+    );
 
     // Verify local lease record exists
     let local_lease = root.join(".qdev/leases/E12S4.json");
     assert!(local_lease.is_file());
-    let lease_json: Value = serde_json::from_str(&fs::read_to_string(&local_lease).unwrap()).unwrap();
+    let lease_json: Value =
+        serde_json::from_str(&fs::read_to_string(&local_lease).unwrap()).unwrap();
     assert_eq!(lease_json["story_id"], "E12S4");
     assert_eq!(lease_json["holder"], "simon");
-    assert!(lease_json["session_token"].as_str().unwrap().starts_with("qs_E12S4_"));
+    assert!(lease_json["session_token"]
+        .as_str()
+        .unwrap()
+        .starts_with("qs_E12S4_"));
 }
 
 #[test]
@@ -100,7 +112,10 @@ fn test_cli_claim_unleased_story_json_mode() {
     assert_eq!(val["story_id"], "E12S4");
     assert_eq!(val["holder"], "simon");
     assert_eq!(val["author_type"], "human");
-    assert!(val["session_token"].as_str().unwrap().starts_with("qs_E12S4_"));
+    assert!(val["session_token"]
+        .as_str()
+        .unwrap()
+        .starts_with("qs_E12S4_"));
 }
 
 #[test]
@@ -189,7 +204,11 @@ fn test_cli_release_own_lease() {
         .code(0);
 
     let text = std::str::from_utf8(&assert2.get_output().stdout).unwrap();
-    assert!(text.contains("Released lease on story E12S4"), "text: {}", text);
+    assert!(
+        text.contains("Released lease on story E12S4"),
+        "text: {}",
+        text
+    );
     assert!(!root.join(".qdev/leases/E12S4.json").exists());
 }
 
@@ -280,12 +299,23 @@ fn test_cli_release_other_holder_requires_force() {
 
     let stderr = std::str::from_utf8(&assert2.get_output().stderr).unwrap();
     assert!(stderr.contains("policy_refusal"), "stderr: {}", stderr);
-    assert!(stderr.contains("--force --justification"), "stderr: {}", stderr);
+    assert!(
+        stderr.contains("--force --justification"),
+        "stderr: {}",
+        stderr
+    );
 
     // Force without justification: exit 3 needs_justification
     let mut cmd3 = Command::cargo_bin("qdev").unwrap();
     cmd3.current_dir(root)
-        .args(["release", "E12S4", "--force", "--author-id", "alice", "--json"])
+        .args([
+            "release",
+            "E12S4",
+            "--force",
+            "--author-id",
+            "alice",
+            "--json",
+        ])
         .assert()
         .failure()
         .code(3);
@@ -314,7 +344,9 @@ fn test_cli_release_other_holder_requires_force() {
     assert!(dec_id.starts_with("DEC-"));
 
     // Verify decision file exists in docs/state/decisions
-    let dec_file = root.join("docs/state/decisions").join(format!("{}.md", dec_id));
+    let dec_file = root
+        .join("docs/state/decisions")
+        .join(format!("{}.md", dec_id));
     assert!(dec_file.is_file());
     let dec_content = fs::read_to_string(&dec_file).unwrap();
     assert!(dec_content.contains("decision_type: lease_override"));
@@ -470,7 +502,9 @@ fn test_cli_forced_release_creates_queryable_decision() {
         .success();
 
     let rel_val: Value = serde_json::from_slice(&rel_assert.get_output().stdout).unwrap();
-    let dec_id = rel_val["decision_id"].as_str().expect("must have decision_id");
+    let dec_id = rel_val["decision_id"]
+        .as_str()
+        .expect("must have decision_id");
     assert!(dec_id.starts_with("DEC-"), "dec_id: {}", dec_id);
 
     // Query the decision entity via qdev get <dec_id> --json
@@ -529,7 +563,11 @@ updated_by:
         .failure()
         .code(2);
     let err1 = std::str::from_utf8(&assert1.get_output().stderr).unwrap();
-    assert!(err1.contains("Only story entities can be leased"), "err1: {}", err1);
+    assert!(
+        err1.contains("Only story entities can be leased"),
+        "err1: {}",
+        err1
+    );
 
     // 2. qdev claim E12 (bare entity ID) -> usage error (exit 2)
     let mut cmd2 = Command::cargo_bin("qdev").unwrap();
@@ -540,7 +578,11 @@ updated_by:
         .failure()
         .code(2);
     let err2 = std::str::from_utf8(&assert2.get_output().stderr).unwrap();
-    assert!(err2.contains("Only story entities can be leased"), "err2: {}", err2);
+    assert!(
+        err2.contains("Only story entities can be leased"),
+        "err2: {}",
+        err2
+    );
 
     // 3. qdev release epic E12 -> usage error (exit 2)
     let mut cmd3 = Command::cargo_bin("qdev").unwrap();
@@ -551,7 +593,11 @@ updated_by:
         .failure()
         .code(2);
     let err3 = std::str::from_utf8(&assert3.get_output().stderr).unwrap();
-    assert!(err3.contains("Only story entities can be leased"), "err3: {}", err3);
+    assert!(
+        err3.contains("Only story entities can be leased"),
+        "err3: {}",
+        err3
+    );
 
     // 4. qdev release E12 (bare entity ID) -> usage error (exit 2)
     let mut cmd4 = Command::cargo_bin("qdev").unwrap();
@@ -562,6 +608,9 @@ updated_by:
         .failure()
         .code(2);
     let err4 = std::str::from_utf8(&assert4.get_output().stderr).unwrap();
-    assert!(err4.contains("Only story entities can be leased"), "err4: {}", err4);
+    assert!(
+        err4.contains("Only story entities can be leased"),
+        "err4: {}",
+        err4
+    );
 }
-

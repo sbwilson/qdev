@@ -224,12 +224,18 @@ pub fn parse_iso8601_to_timestamp(s: &str) -> Option<i64> {
 /// Resolves an active lease for a story if one exists in shared or local storage.
 pub fn get_lease(workspace_root: &Path, story_id: &str) -> Option<StoryLease> {
     let trimmed_id = story_id.trim();
-    if trimmed_id.is_empty() || trimmed_id.contains('/') || trimmed_id.contains('\\') || trimmed_id.contains("..") {
+    if trimmed_id.is_empty()
+        || trimmed_id.contains('/')
+        || trimmed_id.contains('\\')
+        || trimmed_id.contains("..")
+    {
         return None;
     }
 
     let git_common = discover_git_common_dir(workspace_root);
-    let shared_file = git_common.join("qdev/leases").join(format!("{}.json", trimmed_id));
+    let shared_file = git_common
+        .join("qdev/leases")
+        .join(format!("{}.json", trimmed_id));
     if shared_file.is_file() {
         if let Ok(content) = fs::read_to_string(&shared_file) {
             if let Ok(lease) = serde_json::from_str::<StoryLease>(&content) {
@@ -238,7 +244,9 @@ pub fn get_lease(workspace_root: &Path, story_id: &str) -> Option<StoryLease> {
         }
     }
 
-    let local_file = workspace_root.join(".qdev/leases").join(format!("{}.json", story_id));
+    let local_file = workspace_root
+        .join(".qdev/leases")
+        .join(format!("{}.json", story_id));
     if local_file.is_file() {
         if let Ok(content) = fs::read_to_string(&local_file) {
             if let Ok(lease) = serde_json::from_str::<StoryLease>(&content) {
@@ -298,7 +306,11 @@ pub fn find_workspace_leases(workspace_root: &Path) -> Result<Vec<StoryLease>, Q
         let entries = fs::read_dir(&local_dir).map_err(|e| {
             QdevError::infrastructure_failure(
                 "io_error",
-                format!("Failed to read leases directory '{}': {}", local_dir.display(), e),
+                format!(
+                    "Failed to read leases directory '{}': {}",
+                    local_dir.display(),
+                    e
+                ),
             )
         })?;
         for entry in entries.flatten() {
@@ -428,12 +440,16 @@ pub fn claim_story(
     })?;
 
     // 5. Write local lease
-    let local_file = workspace_root.join(".qdev/leases").join(format!("{}.json", trimmed_id));
+    let local_file = workspace_root
+        .join(".qdev/leases")
+        .join(format!("{}.json", trimmed_id));
     write_file_atomic(&local_file, &lease_json)?;
 
     // 6. Mirror to shared Git directory
     let git_common = discover_git_common_dir(workspace_root);
-    let shared_file = git_common.join("qdev/leases").join(format!("{}.json", trimmed_id));
+    let shared_file = git_common
+        .join("qdev/leases")
+        .join(format!("{}.json", trimmed_id));
     if shared_file != local_file && git_common.exists() {
         write_file_atomic(&shared_file, &lease_json)?;
     }
@@ -523,23 +539,33 @@ pub fn release_story(
     }
 
     // Remove local and shared lease files
-    let local_file = workspace_root.join(".qdev/leases").join(format!("{}.json", trimmed_id));
+    let local_file = workspace_root
+        .join(".qdev/leases")
+        .join(format!("{}.json", trimmed_id));
     if local_file.exists() {
         fs::remove_file(&local_file).map_err(|e| {
             QdevError::infrastructure_failure(
                 "io_error",
-                format!("Failed to remove local lease file '{}': {}", local_file.display(), e),
+                format!(
+                    "Failed to remove local lease file '{}': {}",
+                    local_file.display(),
+                    e
+                ),
             )
         })?;
     }
 
     let git_common = discover_git_common_dir(workspace_root);
-    let shared_file = git_common.join("qdev/leases").join(format!("{}.json", trimmed_id));
+    let shared_file = git_common
+        .join("qdev/leases")
+        .join(format!("{}.json", trimmed_id));
     if shared_file.exists() {
         let _ = fs::remove_file(&shared_file);
     }
 
-    let other_local = Path::new(&existing.worktree_path).join(".qdev/leases").join(format!("{}.json", trimmed_id));
+    let other_local = Path::new(&existing.worktree_path)
+        .join(".qdev/leases")
+        .join(format!("{}.json", trimmed_id));
     if other_local.exists() && other_local != local_file {
         let _ = fs::remove_file(&other_local);
     }
@@ -554,23 +580,33 @@ pub fn release_story(
 /// Automatically releases an active lease for a story if present (e.g. upon transition to terminal state).
 pub fn auto_release_lease(workspace_root: &Path, story_id: &str) -> Result<(), QdevError> {
     let trimmed_id = story_id.trim();
-    if trimmed_id.is_empty() || trimmed_id.contains('/') || trimmed_id.contains('\\') || trimmed_id.contains("..") {
+    if trimmed_id.is_empty()
+        || trimmed_id.contains('/')
+        || trimmed_id.contains('\\')
+        || trimmed_id.contains("..")
+    {
         return Ok(());
     }
 
     if let Some(existing) = get_lease(workspace_root, trimmed_id) {
-        let local_file = workspace_root.join(".qdev/leases").join(format!("{}.json", trimmed_id));
+        let local_file = workspace_root
+            .join(".qdev/leases")
+            .join(format!("{}.json", trimmed_id));
         if local_file.exists() {
             let _ = fs::remove_file(&local_file);
         }
 
         let git_common = discover_git_common_dir(workspace_root);
-        let shared_file = git_common.join("qdev/leases").join(format!("{}.json", trimmed_id));
+        let shared_file = git_common
+            .join("qdev/leases")
+            .join(format!("{}.json", trimmed_id));
         if shared_file.exists() {
             let _ = fs::remove_file(&shared_file);
         }
 
-        let other_local = Path::new(&existing.worktree_path).join(".qdev/leases").join(format!("{}.json", trimmed_id));
+        let other_local = Path::new(&existing.worktree_path)
+            .join(".qdev/leases")
+            .join(format!("{}.json", trimmed_id));
         if other_local.exists() && other_local != local_file {
             let _ = fs::remove_file(&other_local);
         }
@@ -635,15 +671,20 @@ pub fn create_lease_override_decision(
         "created_at": timestamp,
     });
 
-    crate::schema::validate_value_detailed(EntityKind::Decision, &frontmatter_json).map_err(|errs| {
-        QdevError::logical_failure(
-            "schema_violation",
-            format!(
-                "Decision frontmatter schema validation failed: {}",
-                errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")
-            ),
-        )
-    })?;
+    crate::schema::validate_value_detailed(EntityKind::Decision, &frontmatter_json).map_err(
+        |errs| {
+            QdevError::logical_failure(
+                "schema_violation",
+                format!(
+                    "Decision frontmatter schema validation failed: {}",
+                    errs.iter()
+                        .map(|e| e.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            )
+        },
+    )?;
 
     let frontmatter_yaml = serde_yaml::to_string(&frontmatter_json).map_err(|e| {
         QdevError::infrastructure_failure(

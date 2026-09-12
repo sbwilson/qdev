@@ -826,10 +826,7 @@ updated_by:
         .lines()
         .find(|l| l.starts_with("Recorded decision: "))
         .expect("Recorded decision line must be present");
-    let dec_id = dec_line
-        .strip_prefix("Recorded decision: ")
-        .unwrap()
-        .trim();
+    let dec_id = dec_line.strip_prefix("Recorded decision: ").unwrap().trim();
     assert!(dec_id.starts_with("DEC-"));
 
     // Verify scratchpad file
@@ -847,7 +844,9 @@ updated_by:
     assert_eq!(entry_val["text"], "Failed AC-3");
 
     // Verify DEC- file
-    let dec_path = tmp.path().join(format!("docs/state/decisions/{}.md", dec_id));
+    let dec_path = tmp
+        .path()
+        .join(format!("docs/state/decisions/{}.md", dec_id));
     assert!(dec_path.exists());
     let dec_content = fs::read_to_string(&dec_path).unwrap();
     let dec_fm = qdev_core::extract_frontmatter(&dec_content).unwrap();
@@ -1076,13 +1075,7 @@ updated_by:
     let mut cmd_json = Command::cargo_bin("qdev").unwrap();
     let assert_json = cmd_json
         .current_dir(tmp.path())
-        .args([
-            "transition",
-            "story",
-            "E12S4",
-            "in-progress",
-            "--json",
-        ])
+        .args(["transition", "story", "E12S4", "in-progress", "--json"])
         .assert()
         .code(3);
 
@@ -1090,7 +1083,10 @@ updated_by:
         serde_json::from_slice(&assert_json.get_output().stdout).expect("Error JSON envelope");
     assert_eq!(err_val["schema_version"], "1");
     assert_eq!(err_val["error"]["code"], "needs_justification");
-    assert!(err_val["error"]["message"].as_str().unwrap().contains("justification"));
+    assert!(err_val["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("justification"));
 
     // Ensure story file remains unchanged
     let content = fs::read_to_string(tmp.path().join("docs/specs/stories/E12S4.md")).unwrap();
@@ -1160,7 +1156,9 @@ updated_by:
     let draft_dec_id = draft_json["decision_id"].as_str().unwrap();
     assert!(draft_dec_id.starts_with("DEC-"));
 
-    let dec_file = tmp.path().join(format!("docs/state/decisions/{}.md", draft_dec_id));
+    let dec_file = tmp
+        .path()
+        .join(format!("docs/state/decisions/{}.md", draft_dec_id));
     let dec_content = fs::read_to_string(&dec_file).unwrap();
     let dec_fm = qdev_core::extract_frontmatter(&dec_content).unwrap();
     assert_eq!(dec_fm["decision_type"], "pivot");
@@ -1187,7 +1185,11 @@ updated_by:
 ## Acceptance Criteria
 - AC.
 "#;
-    fs::write(tmp.path().join("docs/specs/stories/E12S4.md"), updated_story).unwrap();
+    fs::write(
+        tmp.path().join("docs/specs/stories/E12S4.md"),
+        updated_story,
+    )
+    .unwrap();
 
     // 2. Multistep backward transition: review -> ready in text mode
     let mut cmd_multistep = Command::cargo_bin("qdev").unwrap();
@@ -1215,13 +1217,16 @@ updated_by:
         .expect("Recorded decision line must be present");
     let multi_dec_id = dec_line.strip_prefix("Recorded decision: ").unwrap().trim();
 
-    let multi_dec_file = tmp.path().join(format!("docs/state/decisions/{}.md", multi_dec_id));
+    let multi_dec_file = tmp
+        .path()
+        .join(format!("docs/state/decisions/{}.md", multi_dec_id));
     let multi_dec_content = fs::read_to_string(&multi_dec_file).unwrap();
     let multi_dec_fm = qdev_core::extract_frontmatter(&multi_dec_content).unwrap();
     assert_eq!(multi_dec_fm["decision_type"], "review_rejection");
-    assert_eq!(multi_dec_fm["ruling"], "Failed review completely; re-triaging scope");
+    assert_eq!(
+        multi_dec_fm["ruling"],
+        "Failed review completely; re-triaging scope"
+    );
     assert_eq!(multi_dec_fm["context"], "review -> ready");
     assert!(multi_dec_content.contains("Transition: review -> ready"));
 }
-
-

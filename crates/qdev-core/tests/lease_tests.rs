@@ -216,7 +216,8 @@ fn test_release_with_force_missing_justification() {
     assert_eq!(err.exit_code(), ExitCode::PolicyRefusal);
     assert_eq!(err.code(), "needs_justification");
 
-    let err2 = release_story(root, "E12S4", &author_alice, true, Some("   "), None, None).unwrap_err();
+    let err2 =
+        release_story(root, "E12S4", &author_alice, true, Some("   "), None, None).unwrap_err();
     assert_eq!(err2.exit_code(), ExitCode::PolicyRefusal);
     assert_eq!(err2.code(), "needs_justification");
 }
@@ -251,7 +252,11 @@ fn test_release_with_force_and_justification_creates_decision() {
     // Verify DEC- file was created in docs/state/decisions
     let dec_dir = root.join("docs/state/decisions");
     let dec_file = dec_dir.join(format!("{}.md", dec_id));
-    assert!(dec_file.is_file(), "Decision file must exist: {}", dec_file.display());
+    assert!(
+        dec_file.is_file(),
+        "Decision file must exist: {}",
+        dec_file.display()
+    );
     let dec_content = fs::read_to_string(&dec_file).unwrap();
     assert!(dec_content.contains("decision_type: lease_override"));
     assert!(dec_content.contains("Agent crashed and left orphan lease"));
@@ -286,7 +291,10 @@ fn test_transition_done_auto_releases_lease() {
         .unwrap();
 
     assert_eq!(res.to_status, "done");
-    assert!(get_lease(root, "E12S4").is_none(), "Transition to done must auto-release lease");
+    assert!(
+        get_lease(root, "E12S4").is_none(),
+        "Transition to done must auto-release lease"
+    );
 }
 
 #[test]
@@ -322,7 +330,8 @@ fn test_linked_worktree_lease_discovery() {
     claim_story(&main_repo, "E12S4", &author_simon, None, None).unwrap();
 
     // From worktree, lease must be discoverable immediately via shared Git dir!
-    let discovered = get_lease(&worktree, "E12S4").expect("Worktree must discover lease from main repo");
+    let discovered =
+        get_lease(&worktree, "E12S4").expect("Worktree must discover lease from main repo");
     assert_eq!(discovered.story_id, "E12S4");
     assert_eq!(discovered.holder, "simon");
 

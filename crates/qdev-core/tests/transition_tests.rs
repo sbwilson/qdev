@@ -1119,7 +1119,9 @@ updated_by:
     let err = engine.transition(&opts).unwrap_err();
     assert_eq!(err.exit_code(), ExitCode::UsageError);
     assert_eq!(err.code(), "usage_error");
-    assert!(err.message().contains("Entity file not found for 'DW-nonexistent'"));
+    assert!(err
+        .message()
+        .contains("Entity file not found for 'DW-nonexistent'"));
 
     // Story file must remain untouched in review status at version 2
     let content = fs::read_to_string(tmp.path().join("docs/specs/stories/E12S4.md")).unwrap();
@@ -1172,7 +1174,8 @@ updated_by:
 }
 
 #[test]
-fn test_backward_transition_review_to_in_progress_creates_scratchpad_and_review_rejection_decision() {
+fn test_backward_transition_review_to_in_progress_creates_scratchpad_and_review_rejection_decision()
+{
     let tmp = TempDir::new().unwrap();
     setup_story_workspace(tmp.path());
     populate_cache_for_story(tmp.path(), "E12S4", "review");
@@ -1235,7 +1238,9 @@ updated_by:
     assert_eq!(scratch_val["author"]["id"], "simon");
 
     // 2. Verify decision record on disk
-    let dec_file = tmp.path().join(format!("docs/state/decisions/{}.md", dec_id));
+    let dec_file = tmp
+        .path()
+        .join(format!("docs/state/decisions/{}.md", dec_id));
     assert!(dec_file.exists());
     let dec_content = fs::read_to_string(&dec_file).unwrap();
     let dec_frontmatter = qdev_core::extract_frontmatter(&dec_content).unwrap();
@@ -1265,13 +1270,19 @@ updated_by:
     assert_eq!(scratch_entries[0].kind.as_deref(), Some("transition"));
     assert_eq!(scratch_entries[0].text.as_deref(), Some("Failed AC-3"));
 
-    let dec_rec = store.get_decision(&dec_id).unwrap().expect("Decision record must exist in cache");
+    let dec_rec = store
+        .get_decision(&dec_id)
+        .unwrap()
+        .expect("Decision record must exist in cache");
     assert_eq!(dec_rec.id, dec_id);
     assert_eq!(dec_rec.subject_id, "E12S4");
     assert_eq!(dec_rec.decision_type.as_deref(), Some("review_rejection"));
     assert_eq!(dec_rec.ruling.as_deref(), Some("Failed AC-3"));
 
-    let entity_rec = store.get_entity(&dec_id).unwrap().expect("Entity record must exist in cache");
+    let entity_rec = store
+        .get_entity(&dec_id)
+        .unwrap()
+        .expect("Entity record must exist in cache");
     assert_eq!(entity_rec.kind, EntityKind::Decision);
     assert_eq!(entity_rec.status.as_deref(), Some("active"));
 }
@@ -1325,7 +1336,9 @@ updated_by:
     let dec_id = payload.decision_id.expect("decision_id must be present");
     assert!(dec_id.starts_with("DEC-"));
 
-    let dec_file = tmp.path().join(format!("docs/state/decisions/{}.md", dec_id));
+    let dec_file = tmp
+        .path()
+        .join(format!("docs/state/decisions/{}.md", dec_id));
     let dec_content = fs::read_to_string(&dec_file).unwrap();
     let dec_frontmatter = qdev_core::extract_frontmatter(&dec_content).unwrap();
     assert_eq!(dec_frontmatter["decision_type"], "pivot");
@@ -1387,7 +1400,9 @@ updated_by:
     assert!(dec_id.starts_with("DEC-"));
 
     // Verify decision record
-    let dec_file = tmp.path().join(format!("docs/state/decisions/{}.md", dec_id));
+    let dec_file = tmp
+        .path()
+        .join(format!("docs/state/decisions/{}.md", dec_id));
     assert!(dec_file.exists());
     let dec_content = fs::read_to_string(&dec_file).unwrap();
     let dec_frontmatter = qdev_core::extract_frontmatter(&dec_content).unwrap();
@@ -1413,10 +1428,16 @@ updated_by:
     // Verify SQLite cache
     let cache_db = tmp.path().join(".qdev/cache/cache.sqlite");
     let store = SqliteStore::open(&cache_db).unwrap();
-    let dec_rec = store.get_decision(&dec_id).unwrap().expect("decision must exist in cache");
+    let dec_rec = store
+        .get_decision(&dec_id)
+        .unwrap()
+        .expect("decision must exist in cache");
     assert_eq!(dec_rec.decision_type.as_deref(), Some("pivot"));
     assert_eq!(dec_rec.ruling.as_deref(), Some("Needs scope refinement"));
-    let story_rec = store.get_entity("E12S4").unwrap().expect("story must exist");
+    let story_rec = store
+        .get_entity("E12S4")
+        .unwrap()
+        .expect("story must exist");
     assert_eq!(story_rec.status.as_deref(), Some("draft"));
     assert_eq!(story_rec.version, 3);
 }
@@ -1457,7 +1478,9 @@ updated_by:
         entity_kind: "story".to_string(),
         story_id: "E12S4".to_string(),
         target_status: "ready".to_string(),
-        justification: Some("Fundamental flaws identified in review; re-evaluating readiness".to_string()),
+        justification: Some(
+            "Fundamental flaws identified in review; re-evaluating readiness".to_string(),
+        ),
         author: Author::new("human", "simon"),
         if_version: None,
     };
@@ -1472,13 +1495,18 @@ updated_by:
     assert!(dec_id.starts_with("DEC-"));
 
     // Verify decision record
-    let dec_file = tmp.path().join(format!("docs/state/decisions/{}.md", dec_id));
+    let dec_file = tmp
+        .path()
+        .join(format!("docs/state/decisions/{}.md", dec_id));
     assert!(dec_file.exists());
     let dec_content = fs::read_to_string(&dec_file).unwrap();
     let dec_frontmatter = qdev_core::extract_frontmatter(&dec_content).unwrap();
     assert_eq!(dec_frontmatter["id"], dec_id);
     assert_eq!(dec_frontmatter["decision_type"], "review_rejection");
-    assert_eq!(dec_frontmatter["ruling"], "Fundamental flaws identified in review; re-evaluating readiness");
+    assert_eq!(
+        dec_frontmatter["ruling"],
+        "Fundamental flaws identified in review; re-evaluating readiness"
+    );
     assert_eq!(dec_frontmatter["subject_id"], "E12S4");
     assert_eq!(dec_frontmatter["context"], "review -> ready");
     assert!(dec_content.contains("Transition: review -> ready"));
@@ -1493,21 +1521,34 @@ updated_by:
     let scratch_val: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(scratch_val["seq"], 1);
     assert_eq!(scratch_val["kind"], "transition");
-    assert_eq!(scratch_val["text"], "Fundamental flaws identified in review; re-evaluating readiness");
+    assert_eq!(
+        scratch_val["text"],
+        "Fundamental flaws identified in review; re-evaluating readiness"
+    );
 
     // Verify SQLite cache
     let cache_db = tmp.path().join(".qdev/cache/cache.sqlite");
     let store = SqliteStore::open(&cache_db).unwrap();
-    let dec_rec = store.get_decision(&dec_id).unwrap().expect("decision must exist in cache");
+    let dec_rec = store
+        .get_decision(&dec_id)
+        .unwrap()
+        .expect("decision must exist in cache");
     assert_eq!(dec_rec.decision_type.as_deref(), Some("review_rejection"));
-    assert_eq!(dec_rec.ruling.as_deref(), Some("Fundamental flaws identified in review; re-evaluating readiness"));
-    let story_rec = store.get_entity("E12S4").unwrap().expect("story must exist");
+    assert_eq!(
+        dec_rec.ruling.as_deref(),
+        Some("Fundamental flaws identified in review; re-evaluating readiness")
+    );
+    let story_rec = store
+        .get_entity("E12S4")
+        .unwrap()
+        .expect("story must exist");
     assert_eq!(story_rec.status.as_deref(), Some("ready"));
     assert_eq!(story_rec.version, 4);
 }
 
 #[test]
-fn test_multiple_backward_transitions_sequentially_increment_scratchpad_and_create_distinct_decisions() {
+fn test_multiple_backward_transitions_sequentially_increment_scratchpad_and_create_distinct_decisions(
+) {
     let tmp = TempDir::new().unwrap();
     setup_story_workspace(tmp.path());
     populate_cache_for_story(tmp.path(), "E12S4", "review");
@@ -1583,7 +1624,10 @@ updated_by:
         .unwrap();
 
     let dec2 = payload2.decision_id.unwrap();
-    assert_ne!(dec1, dec2, "Each backward transition must allocate a unique decision id");
+    assert_ne!(
+        dec1, dec2,
+        "Each backward transition must allocate a unique decision id"
+    );
 
     // 3rd backward move: in-progress -> ready
     let payload3 = engine
@@ -1629,14 +1673,16 @@ fn test_backward_transition_preserves_active_leases_and_evidence() {
     let lease_dir = tmp.path().join(".qdev/leases");
     fs::create_dir_all(&lease_dir).unwrap();
     let lease_file = lease_dir.join("E12S4.json");
-    let initial_lease_content = r#"{"story_id": "E12S4", "holder": "simon", "expires_at": "2026-09-12T23:59:59Z"}"#;
+    let initial_lease_content =
+        r#"{"story_id": "E12S4", "holder": "simon", "expires_at": "2026-09-12T23:59:59Z"}"#;
     fs::write(&lease_file, initial_lease_content).unwrap();
 
     // Create evidence record in docs/state/evidence/
     let evidence_dir = tmp.path().join("docs/state/evidence");
     fs::create_dir_all(&evidence_dir).unwrap();
     let evidence_file = evidence_dir.join("ev_E12S4.json");
-    let initial_evidence_content = r#"{"story_id": "E12S4", "test": "test_buffer_roundtrip", "result": "passed"}"#;
+    let initial_evidence_content =
+        r#"{"story_id": "E12S4", "test": "test_buffer_roundtrip", "result": "passed"}"#;
     fs::write(&evidence_file, initial_evidence_content).unwrap();
 
     write_story_file(
@@ -1679,12 +1725,18 @@ updated_by:
     assert_eq!(payload.to_status, "in-progress");
 
     // Assert lease file still exists with intact content
-    assert!(lease_file.exists(), "Active lease file must be preserved across backward transition");
+    assert!(
+        lease_file.exists(),
+        "Active lease file must be preserved across backward transition"
+    );
     let current_lease_content = fs::read_to_string(&lease_file).unwrap();
     assert_eq!(current_lease_content, initial_lease_content);
 
     // Assert evidence file still exists with intact content
-    assert!(evidence_file.exists(), "Evidence file must be preserved across backward transition");
+    assert!(
+        evidence_file.exists(),
+        "Evidence file must be preserved across backward transition"
+    );
     let current_evidence_content = fs::read_to_string(&evidence_file).unwrap();
     assert_eq!(current_evidence_content, initial_evidence_content);
 }
@@ -1775,5 +1827,3 @@ updated_by:
         assert_eq!(fs::read_dir(decisions_dir).unwrap().count(), 0);
     }
 }
-
-
