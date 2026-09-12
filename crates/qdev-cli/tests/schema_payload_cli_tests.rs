@@ -25,6 +25,13 @@ fn setup_workspace(root: &Path) {
         ])
         .assert()
         .success();
+
+    let toml_path = root.join("qdev.toml");
+    let mut toml = fs::read_to_string(&toml_path).unwrap();
+    toml.push_str(
+        "\n[[modules]]\nid = \"bridge\"\npaths = [\"crates/bridge/**\"]\n\n[[modules]]\nid = \"foundation\"\npaths = [\"crates/foundation/**\"]\n",
+    );
+    fs::write(toml_path, toml).unwrap();
 }
 
 fn write_file(root: &Path, rel_path: &str, content: &str) {
@@ -405,6 +412,138 @@ fn test_round_trip_fix_ids_payload_against_fix_ids_output() {
     assert!(
         !instance["renumbered"].as_array().unwrap().is_empty(),
         "the fixture must actually renumber something, or the items subschema is vacuous"
+    );
+    assert!(
+        instance.get("findings").is_none(),
+        "clean runs must omit findings: {instance}"
+    );
+    validate_against_schema(&schema, &instance);
+}
+
+#[test]
+fn test_round_trip_fix_ids_payload_with_surviving_findings_against_schema() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    write_story_fixture(root);
+
+    // Duplicate E12S4 so renumber runs.
+    let stories_dir = root.join("docs/specs/stories");
+    fs::write(
+        stories_dir.join("E12S4-dup.md"),
+        fs::read_to_string(stories_dir.join("E12S4.md")).unwrap(),
+    )
+    .unwrap();
+
+    // Add a file with an unregistered target module so an error finding survives.
+    write_file(
+        root,
+        "docs/specs/stories/E12S9.md",
+        r#"---
+id: E12S9
+title: "Unregistered Module Story"
+status: draft
+version: 1
+target_modules: ["unregistered_mod"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#,
+    );
+
+    let schema_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "fix_ids", "--json"])
+        .assert()
+        .success();
+    let schema: Value = serde_json::from_slice(&schema_assert.get_output().stdout).unwrap();
+
+    let fix_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args([
+            "validate",
+            "--fix-ids",
+            "--non-interactive",
+            "--yes",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .code(1);
+    let instance: Value = serde_json::from_slice(&fix_assert.get_output().stdout).unwrap();
+
+    assert!(
+        !instance["findings"].as_array().unwrap().is_empty(),
+        "the payload must include surviving findings: {instance}"
+    );
+    validate_against_schema(&schema, &instance);
+}
+
+#[test]
+fn test_round_trip_fix_ids_payload_with_error_against_schema() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    write_file(
+        root,
+        "docs/specs/stories/E1S1.md",
+        r#"---
+id: E1S1
+title: "Story E1S1"
+status: draft
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#,
+    );
+    let story_content = fs::read_to_string(stories_dir.join("E1S1.md")).unwrap();
+    write_file(root, "docs/specs/stories/E1S1-dup.md", &story_content);
+    // Occupy the rename target E1S2.md as a directory so renumber fails with rename_target_exists.
+    fs::create_dir_all(stories_dir.join("E1S2.md")).unwrap();
+
+    let schema_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "fix_ids", "--json"])
+        .assert()
+        .success();
+    let schema: Value = serde_json::from_slice(&schema_assert.get_output().stdout).unwrap();
+
+    let fix_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args([
+            "validate",
+            "--fix-ids",
+            "--non-interactive",
+            "--yes",
+            "--json",
+        ])
+        .assert()
+        .failure();
+    let instance: Value = serde_json::from_slice(&fix_assert.get_output().stdout).unwrap();
+
+    assert!(
+        instance["error"].is_object(),
+        "the payload must include error when aborted: {instance}"
     );
     validate_against_schema(&schema, &instance);
 }

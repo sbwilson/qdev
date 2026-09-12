@@ -1266,7 +1266,7 @@ pub fn directory_for_kind(storage: Option<&StorageConfig>, kind: EntityKind) -> 
 /// rule said it carried nothing, and Linux disagreed with both. Extension case was never the
 /// part of a name that made it unresolvable, so it is now legal rather than a repairable defect
 /// — `<id>.md` is still the only spelling any writer *creates*.
-pub(crate) fn filename_carries_id(file_name: &str, id: &str) -> bool {
+pub fn filename_carries_id(file_name: &str, id: &str) -> bool {
     let Some((stem, ext)) = file_name.rsplit_once('.') else {
         return false;
     };

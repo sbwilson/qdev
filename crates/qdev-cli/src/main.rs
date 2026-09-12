@@ -2200,17 +2200,61 @@ fn handle_fix_ids(
     };
 
     if scan.groups.is_empty() {
+        let store = match open_query_store(root, annotated_config) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = output.emit_error(&e);
+                return e.exit_code();
+            }
+        };
+        let mut findings = match qdev_core::run_validation(&store, root, &annotated_config.config) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = output.emit_error(&e);
+                return e.exit_code();
+            }
+        };
+        qdev_core::sort_findings(&mut findings);
+
         if cli.json {
-            let envelope = JsonEnvelope::new(FixIdsPayload::default());
-            let _ = output.emit_envelope(&envelope);
+            let envelope = JsonEnvelope::new(FixIdsPayload {
+                renumbered: Vec::new(),
+                skipped: Vec::new(),
+                error: None,
+                findings: findings.clone(),
+            });
+            if let Err(e) = output.emit_envelope(&envelope) {
+                let err = QdevError::infrastructure_failure(
+                    "io_error",
+                    format!("Failed to emit fix-ids envelope: {}", e),
+                );
+                let _ = output.emit_error(&err);
+                return ExitCode::InfrastructureFailure;
+            }
         } else {
-            println!("No duplicate planning ids found.");
+            let _ = output.emit_text("No duplicate planning ids found.\n");
+            if !findings.is_empty() {
+                let _ = output.emit_text(&render_validate_text(&findings));
+            }
         }
-        return ExitCode::Success;
+
+        return if qdev_core::has_error_finding(&findings) {
+            ExitCode::LogicalFailure
+        } else {
+            ExitCode::Success
+        };
     }
 
     let author = match resolve_author(None, None, annotated_config, root) {
         Ok(a) => a,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let store = match open_query_store(root, annotated_config) {
+        Ok(s) => s,
         Err(e) => {
             let _ = output.emit_error(&e);
             return e.exit_code();
@@ -2222,10 +2266,16 @@ fn handle_fix_ids(
     // here. Allocating from the on-disk scan alone can still hand out an id that belongs to a
     // hydrated entity whose file has become unreadable, minting a fresh duplicate while fixing
     // one; the two allocators having their own recipes is what let them diverge.
-    let mut used_ids = match open_query_store(root, annotated_config)
-        .and_then(|store| qdev_core::ids_in_use_from_scan(&scan, Some(&store)))
-    {
+    let mut used_ids = match qdev_core::ids_in_use_from_scan(&scan, Some(&store)) {
         Ok(ids) => ids,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let all_relations = match store.list_relations() {
+        Ok(r) => r,
         Err(e) => {
             let _ = output.emit_error(&e);
             return e.exit_code();
@@ -2272,9 +2322,30 @@ fn handle_fix_ids(
                     if !cli.json {
                         eprintln!("Skipping {}: {}", keeper, e);
                     }
+                    for path in paths.iter().skip(1) {
+                        skipped.push(path.clone());
+                    }
                     skipped.push(keeper.clone());
                     continue;
                 }
+            }
+
+            let keeper_filename = match keeper.replace('\\', "/").rsplit_once('/') {
+                Some((_, name)) => name.to_string(),
+                None => keeper.clone(),
+            };
+            if !qdev_core::filename_carries_id(&keeper_filename, old_id) {
+                eprintln!(
+                    "Skipping the '{}' group: its keeper '{}' does not carry that id in its filename, \
+                     so renumbering the others would leave '{}' owned by a file no writer \
+                     can resolve. Rename it first.",
+                    old_id, keeper, old_id
+                );
+                for path in paths.iter().skip(1) {
+                    skipped.push(path.clone());
+                }
+                skipped.push(keeper.clone());
+                continue;
             }
         }
 
@@ -2344,6 +2415,30 @@ fn handle_fix_ids(
                     skipped.push(path.clone());
                     continue;
                 }
+            }
+
+            // Pre-flight relation sources targeting `old_id`: do not rewrite an entity's id
+            // on disk if redirecting incoming edges targeting that id will fail. An unresolvable
+            // relation source causes the candidate renumber to be refused and skipped before
+            // touching disk.
+            let incoming_relations = all_relations.iter().filter(|r| r.target_id == *old_id);
+            let mut unresolvable_source: Option<(String, QdevError)> = None;
+            for rel in incoming_relations {
+                if let Err(e) =
+                    qdev_core::resolve_entity_file(root, None, &rel.source_id, Some(storage))
+                {
+                    unresolvable_source = Some((rel.source_id.clone(), e));
+                    break;
+                }
+            }
+            if let Some((source_id, err)) = unresolvable_source {
+                eprintln!(
+                    "Skipping {}: incoming relation source '{}' cannot be resolved ({}); \
+                     resolve this duplicate by hand",
+                    path, source_id, err
+                );
+                skipped.push(path.clone());
+                continue;
             }
 
             if interactivity.is_interactive() && !yes {
@@ -2528,6 +2623,24 @@ fn handle_fix_ids(
         }
     }
 
+    // Re-check the full validation surface (not just remaining duplicates), per the shared
+    // exit-code rule: exit 1 iff any error-severity finding survives anywhere.
+    let (mut findings, validation_err) = if aborted.is_none() {
+        match open_query_store(root, annotated_config) {
+            Ok(store) => match qdev_core::run_validation(&store, root, &annotated_config.config) {
+                Ok(f) => (f, None),
+                Err(e) => (Vec::new(), Some(e)),
+            },
+            Err(e) => (Vec::new(), Some(e)),
+        }
+    } else {
+        (Vec::new(), None)
+    };
+    qdev_core::sort_findings(&mut findings);
+    if aborted.is_none() {
+        aborted = validation_err;
+    }
+
     // Exactly one document on stdout in JSON mode: an abort is carried *inside* the payload, so
     // the report of what was already written stays parseable by the consumer that needs it most.
     if cli.json {
@@ -2535,6 +2648,7 @@ fn handle_fix_ids(
             renumbered,
             skipped,
             error: aborted.as_ref().map(FixIdsError::from),
+            findings: findings.clone(),
         });
         if let Err(e) = output.emit_envelope(&envelope) {
             let err = QdevError::infrastructure_failure(
@@ -2565,6 +2679,9 @@ fn handle_fix_ids(
         for path in &skipped {
             println!("Skipped {}", path);
         }
+        if !findings.is_empty() {
+            let _ = output.emit_text(&render_validate_text(&findings));
+        }
         // Text mode writes errors to stderr, so this cannot corrupt the report above.
         if let Some(e) = &aborted {
             let _ = output.emit_error(e);
@@ -2575,22 +2692,10 @@ fn handle_fix_ids(
         return e.exit_code();
     }
 
-    // Re-check the full validation surface (not just remaining duplicates), per the shared
-    // exit-code rule: exit 1 iff any error-severity finding survives anywhere.
-    let store = match open_query_store(root, annotated_config) {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = output.emit_error(&e);
-            return e.exit_code();
-        }
-    };
-    match qdev_core::run_validation(&store, root, &annotated_config.config) {
-        Ok(findings) if !qdev_core::has_error_finding(&findings) => ExitCode::Success,
-        Ok(_) => ExitCode::LogicalFailure,
-        Err(e) => {
-            let _ = output.emit_error(&e);
-            e.exit_code()
-        }
+    if qdev_core::has_error_finding(&findings) {
+        ExitCode::LogicalFailure
+    } else {
+        ExitCode::Success
     }
 }
 
@@ -2637,6 +2742,9 @@ struct FixIdsPayload {
     /// written before it stopped.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<FixIdsError>,
+    /// Present only when surviving validation findings exist. Clean runs omit the field.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    findings: Vec<qdev_core::FindingRecord>,
 }
 
 /// Where a refused renumber's file would have landed, and where it belongs instead.

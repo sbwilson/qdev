@@ -467,6 +467,45 @@ fn test_fix_ids_no_duplicates_is_a_clean_noop() {
         .code(0);
 }
 
+#[test]
+fn test_fix_ids_clean_workspace_json_omits_findings_and_exits_0() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    write_story(&stories_dir, "E1S1");
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "validate",
+            "--fix-ids",
+            "--non-interactive",
+            "--yes",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .code(0);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(
+        val["renumbered"].as_array().unwrap().len(),
+        0,
+        "renumbered must be empty on clean workspace: {val}"
+    );
+    assert_eq!(
+        val["skipped"].as_array().unwrap().len(),
+        0,
+        "skipped must be empty on clean workspace: {val}"
+    );
+    assert!(
+        val.get("findings").is_none(),
+        "findings must be omitted on clean workspace: {val}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The interactive --fix-ids confirmation
 // ---------------------------------------------------------------------------
@@ -967,12 +1006,11 @@ fn test_renumbered_entity_accepts_update_and_relate_with_no_manual_step() {
         .success();
 }
 
-/// H3: the reconcile is gated on "did we write anything", not on an entry surviving the two
-/// fallible steps after the write. When the relation step aborts, the keeper's id must still be
-/// in the cache — asserted through `qdev get`, not by reading the cache, so it survives a change
-/// of resolution rule.
+/// An unresolvable incoming relation source causes the candidate renumber to be refused and
+/// skipped before touching disk: no file is rewritten or renamed, relations are not corrupted,
+/// and the unrepaired duplicate is reported per validation.
 #[test]
-fn test_fix_ids_abort_in_the_relation_step_still_reports_and_reconciles() {
+fn test_fix_ids_refuses_renumber_when_incoming_relation_source_is_unresolvable() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     setup_workspace(root);
@@ -986,8 +1024,8 @@ fn test_fix_ids_abort_in_the_relation_step_still_reports_and_reconciles() {
     .unwrap();
 
     // A referencing story in a file whose name does not carry its id: readable by hydration,
-    // unresolvable by the write path, so redirecting its `depends_on` edge fails. That is
-    // exactly the abort the old code turned into "renumbered: []" plus a lost keeper.
+    // unresolvable by the write path. Pre-flight detects that redirecting its `depends_on` edge
+    // would fail, and refuses the renumber before touching disk.
     fs::write(
         stories_dir.join("misnamed.md"),
         r#"---
@@ -1022,32 +1060,46 @@ updated_by:
             "--json",
         ])
         .assert()
-        .failure();
-    let val: Value = serde_json::from_slice(&assert.get_output().stdout)
-        .expect("the abort report must stay a single parseable JSON document");
+        .failure()
+        .code(1);
+    let out = assert.get_output();
+    let val: Value = serde_json::from_slice(&out.stdout)
+        .expect("the fix-ids output must stay a single parseable JSON document");
 
-    // The write that happened before the abort is reported, with its move.
-    let renumbered = val["renumbered"].as_array().unwrap();
-    assert_eq!(renumbered.len(), 1, "{val}");
-    let new_id = renumbered[0]["new_id"].as_str().unwrap().to_string();
-    assert_ne!(renumbered[0]["new_path"], renumbered[0]["old_path"]);
-    assert!(val["error"].is_object(), "{val}");
+    // No file was renumbered or touched on disk.
+    assert!(
+        val["renumbered"].as_array().unwrap().is_empty(),
+        "no file should be renumbered when relation redirect would fail: {val}"
+    );
+    assert_eq!(
+        val["skipped"].as_array().unwrap(),
+        &vec![Value::from("docs/specs/stories/E1S2.md")],
+        "the duplicate candidate must be reported as skipped: {val}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("E1S8") && stderr.contains("cannot be resolved"),
+        "stderr should explain that incoming relation source E1S8 cannot be resolved: {stderr}"
+    );
 
-    // The keeper's id is present in the cache afterwards: the reconcile ran despite the abort.
-    let mut keeper_get = Command::cargo_bin("qdev").unwrap();
-    keeper_get
-        .current_dir(root)
-        .args(["get", "E1S2", "--json"])
-        .assert()
-        .success();
+    // Files on disk are byte-for-byte intact.
+    assert!(stories_dir.join("E1S2.md").is_file());
+    assert!(stories_dir.join("E1S2-dup.md").is_file());
+    assert!(read_story(&stories_dir, "E1S2").contains("id: E1S2\n"));
+    let misnamed_content = fs::read_to_string(stories_dir.join("misnamed.md")).unwrap();
+    assert!(misnamed_content.contains("depends_on: [\"E1S2\"]"));
 
-    // And so is the renumbered entity, under its new id.
-    let mut new_get = Command::cargo_bin("qdev").unwrap();
-    new_get
-        .current_dir(root)
-        .args(["get", &new_id, "--json"])
-        .assert()
-        .success();
+    // Validation findings survive and are reported in payload findings.
+    let codes: Vec<&str> = val["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert!(
+        codes.contains(&"duplicate_planning_id"),
+        "the unrepaired duplicate must be reported in findings: {codes:?}"
+    );
 }
 
 /// An occupied rename target is refused rather than clobbered: the entry is reported as skipped
@@ -2024,4 +2076,225 @@ fn test_fix_ids_refuses_a_group_whose_keeper_is_outside_its_kind_directory() {
         codes.contains(&"duplicate_planning_id"),
         "the unrepaired duplicate must still be reported: {codes:?}"
     );
+}
+
+/// P3-4: A duplicate group whose early-sorting file does not carry the id in its filename is
+/// refused whole (Option A for keeper selection): both paths are placed in skipped, no file
+/// is renamed or renumbered, the id is not left owned by an unresolvable file, and validate
+/// exits 1 LogicalFailure reporting the surviving findings.
+#[test]
+fn test_fix_ids_refuses_group_whose_keeper_filename_is_off_convention() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    // A-copy.md sorts before E1S1.md ('A' < 'E'), but its filename does not carry E1S1.
+    let story_content = r#"---
+id: E1S1
+title: "Story E1S1"
+status: draft
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#;
+    fs::write(stories_dir.join("A-copy.md"), story_content).unwrap();
+    fs::write(stories_dir.join("E1S1.md"), story_content).unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "validate",
+            "--fix-ids",
+            "--non-interactive",
+            "--yes",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .code(1);
+    let out = assert.get_output();
+    let val: Value = serde_json::from_slice(&out.stdout).unwrap();
+
+    assert!(
+        val["renumbered"].as_array().unwrap().is_empty(),
+        "a group whose keeper filename is off-convention must not be half-repaired: {val}"
+    );
+    assert_eq!(
+        val["skipped"].as_array().unwrap().len(),
+        2,
+        "both the keeper and the candidate belong in skipped: {val}"
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not carry that id in its filename"),
+        "stderr should explain keeper filename refusal: {stderr}"
+    );
+
+    // Neither file was renamed or renumbered.
+    assert!(stories_dir.join("A-copy.md").is_file());
+    assert!(stories_dir.join("E1S1.md").is_file());
+    assert!(read_story(&stories_dir, "E1S1").contains("id: E1S1\n"));
+    assert!(!stories_dir.join("E1S2.md").exists());
+
+    // Identity update still succeeds on E1S1 because E1S1.md was not renumbered away.
+    let mut update_cmd = Command::cargo_bin("qdev").unwrap();
+    update_cmd
+        .current_dir(root)
+        .args(["update", "E1S1", "--field", "status=ready", "--json"])
+        .assert()
+        .success();
+}
+
+/// A workspace with error findings but zero duplicates exits 1 LogicalFailure and reports the
+/// findings in both JSON mode (FixIdsPayload.findings) and text mode (rendered findings).
+#[test]
+fn test_fix_ids_empty_scan_with_error_findings_exits_1_and_reports_findings() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    // One story with an unregistered module: error-severity finding, but zero duplicate IDs.
+    let content = r#"---
+id: E1S1
+title: "Story E1S1"
+status: draft
+version: 1
+target_modules: ["nonexistent_mod"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#;
+    fs::write(stories_dir.join("E1S1.md"), content).unwrap();
+
+    // JSON mode: exits 1 LogicalFailure and payload includes findings
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "validate",
+            "--fix-ids",
+            "--non-interactive",
+            "--yes",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .code(1);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert!(val["renumbered"].as_array().unwrap().is_empty());
+    assert!(val["skipped"].as_array().unwrap().is_empty());
+    let findings = val["findings"].as_array().unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f["code"] == "target_module_not_registered"),
+        "payload must report the surviving error finding: {val}"
+    );
+
+    // Text mode: exits 1 LogicalFailure and output includes rendered finding
+    let mut cmd_text = Command::cargo_bin("qdev").unwrap();
+    let assert_text = cmd_text
+        .current_dir(root)
+        .args(["validate", "--fix-ids", "--non-interactive", "--yes"])
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&assert_text.get_output().stdout);
+    assert!(stdout.contains("No duplicate planning ids found."));
+    assert!(stdout.contains("[error] target_module_not_registered"));
+}
+
+/// When a duplicate is repaired but an error finding survives elsewhere, --fix-ids reports the
+/// renumber AND surfaces the surviving findings, exiting 1 LogicalFailure in both JSON and text mode.
+#[test]
+fn test_fix_ids_surviving_error_findings_after_fix_exits_1_and_reports_findings() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    // Duplicate group E1S1 that will be cleanly fixed.
+    write_story(&stories_dir, "E1S1");
+    fs::write(
+        stories_dir.join("E1S1-copy.md"),
+        fs::read_to_string(stories_dir.join("E1S1.md")).unwrap(),
+    )
+    .unwrap();
+
+    // Unrelated story with schema violation (missing title).
+    let schema_err = r#"---
+id: E2S1
+status: draft
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#;
+    fs::write(stories_dir.join("E2S1.md"), schema_err).unwrap();
+
+    // JSON mode: renumbers duplicate, but exits 1 LogicalFailure with surviving findings in payload
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args([
+            "validate",
+            "--fix-ids",
+            "--non-interactive",
+            "--yes",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .code(1);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["renumbered"].as_array().unwrap().len(), 1);
+    let findings = val["findings"].as_array().unwrap();
+    assert!(
+        findings.iter().any(|f| f["code"] == "schema_violation"),
+        "payload must include surviving findings: {val}"
+    );
+
+    // Now test text mode with another duplicate
+    write_story(&stories_dir, "E1S3");
+    fs::write(
+        stories_dir.join("E1S3-copy.md"),
+        fs::read_to_string(stories_dir.join("E1S3.md")).unwrap(),
+    )
+    .unwrap();
+    let mut cmd_text = Command::cargo_bin("qdev").unwrap();
+    let assert_text = cmd_text
+        .current_dir(root)
+        .args(["validate", "--fix-ids", "--non-interactive", "--yes"])
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&assert_text.get_output().stdout);
+    assert!(stdout.contains("Renumbered"));
+    assert!(stdout.contains("[error] schema_violation"));
 }
