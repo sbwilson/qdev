@@ -1248,6 +1248,9 @@ fn handle_transition(
             "Transitioned story {} {} -> {} (version {})\n",
             res.id, res.from_status, res.to_status, res.version
         );
+        if let Some(ref dec_id) = res.decision_id {
+            msg.push_str(&format!("Recorded decision: {}\n", dec_id));
+        }
         if !res.closed_dw.is_empty() {
             msg.push_str(&format!("Closed deferred work: {}\n", res.closed_dw.join(", ")));
         }

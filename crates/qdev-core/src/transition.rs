@@ -2,16 +2,19 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::StorageConfig;
 use crate::errors::QdevError;
+use crate::id::allocate_decision_id_in_with_rng;
 use crate::schema::EntityKind;
-use crate::store::{SqliteStore, Store};
+use crate::store::{DecisionRecord, EntityRecord, ScratchpadRecord, SqliteStore, Store};
 use crate::write::{
-    apply_entity_update, has_markdown_heading, resolve_entity_file, Author, EntityUpdateOptions,
-    EntityUpdateResult,
+    acquire_write_lock, apply_entity_update, current_iso8601, directory_for_kind,
+    has_markdown_heading, resolve_entity_file, sha256_digest, upsert_cache_and_mark_dirty,
+    write_file_atomic, Author, EntityUpdateOptions, EntityUpdateResult,
 };
 
 /// All valid lifecycle states for a story entity.
@@ -219,6 +222,8 @@ pub struct TransitionPayload {
     pub to_status: String,
     pub version: u64,
     pub closed_dw: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_id: Option<String>,
 }
 
 /// Validates that a story meets the prerequisites for transitioning from `draft` to `ready`.
@@ -646,6 +651,51 @@ impl TransitionEngine {
             Vec::new()
         };
 
+        // 10b. If transition is backward, record scratchpad entry and decision entity under write lock
+        let decision_id = if transition_kind == TransitionKind::Backward {
+            let justification = options.justification.as_deref().unwrap_or("").trim();
+            let timestamp = current_iso8601();
+
+            let cache_dir_rel = options
+                .storage
+                .as_ref()
+                .map(|s| s.cache_dir.as_str())
+                .unwrap_or(".qdev/cache");
+            let lock_path = options
+                .workspace_root
+                .join(cache_dir_rel)
+                .join("write.lock");
+            let _lock_guard = if lock_path.parent().map(|p| p.is_dir()).unwrap_or(false) {
+                Some(acquire_write_lock(&lock_path, Duration::from_millis(5000))?)
+            } else {
+                None
+            };
+
+            append_scratchpad_entry(
+                &options.workspace_root,
+                options.storage.as_ref(),
+                &id,
+                justification,
+                &options.author,
+                &timestamp,
+            )?;
+
+            let dec_id = create_backward_transition_decision(
+                &options.workspace_root,
+                options.storage.as_ref(),
+                &id,
+                from_state,
+                target_state,
+                justification,
+                &options.author,
+                &timestamp,
+            )?;
+
+            Some(dec_id)
+        } else {
+            None
+        };
+
         // 11. Execute post_transition hooks
         for hook in &self.post_hooks {
             hook.run(&ctx, &update_res)?;
@@ -657,6 +707,282 @@ impl TransitionEngine {
             to_status: target_state.as_str().to_string(),
             version: update_res.new_version,
             closed_dw,
+            decision_id,
         })
     }
+}
+
+/// Appends a transition entry to the story's dedicated scratchpad JSONL ledger at
+/// `docs/state/scratch/<story-id>.jsonl` and syncs the row to the SQLite cache if present.
+pub fn append_scratchpad_entry(
+    workspace_root: &Path,
+    storage: Option<&StorageConfig>,
+    story_id: &str,
+    justification: &str,
+    author: &Author,
+    timestamp: &str,
+) -> Result<u32, QdevError> {
+    let scratch_dir = workspace_root.join(directory_for_kind(storage, EntityKind::Scratchpad));
+    if !scratch_dir.exists() {
+        fs::create_dir_all(&scratch_dir).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "io_error",
+                format!(
+                    "Failed to create scratchpad directory '{}': {}",
+                    scratch_dir.display(),
+                    e
+                ),
+            )
+        })?;
+    }
+
+    let scratch_file_path = scratch_dir.join(format!("{}.jsonl", story_id));
+    let mut next_seq: u32 = 1;
+    let mut staged = String::new();
+
+    if scratch_file_path.exists() {
+        let existing_content = fs::read_to_string(&scratch_file_path).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "io_error",
+                format!(
+                    "Failed to read scratchpad file '{}': {}",
+                    scratch_file_path.display(),
+                    e
+                ),
+            )
+        })?;
+
+        let mut max_seq: u32 = 0;
+        for (line_idx, line) in existing_content.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let val = serde_json::from_str::<serde_json::Value>(trimmed).map_err(|e| {
+                QdevError::logical_failure(
+                    "parse_error",
+                    format!(
+                        "Malformed scratchpad entry in '{}' at line {}: {}",
+                        scratch_file_path.display(),
+                        line_idx + 1,
+                        e
+                    ),
+                )
+            })?;
+            let seq_u64 = val
+                .get("seq")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| {
+                    QdevError::logical_failure(
+                        "parse_error",
+                        format!(
+                            "Malformed scratchpad entry in '{}' at line {}: missing or invalid 'seq'",
+                            scratch_file_path.display(),
+                            line_idx + 1
+                        ),
+                    )
+                })?;
+            let seq_u32 = u32::try_from(seq_u64).map_err(|_| {
+                QdevError::logical_failure(
+                    "parse_error",
+                    format!(
+                        "Scratchpad sequence out of bounds in '{}' at line {}",
+                        scratch_file_path.display(),
+                        line_idx + 1
+                    ),
+                )
+            })?;
+            max_seq = max_seq.max(seq_u32);
+        }
+        next_seq = max_seq.checked_add(1).ok_or_else(|| {
+            QdevError::logical_failure(
+                "overflow",
+                format!(
+                    "Scratchpad sequence overflow in '{}'",
+                    scratch_file_path.display()
+                ),
+            )
+        })?;
+        staged = existing_content;
+    }
+
+    let entry = serde_json::json!({
+        "seq": next_seq,
+        "at": timestamp,
+        "author": {
+            "type": author.author_type,
+            "id": author.id,
+        },
+        "kind": "transition",
+        "text": justification,
+    });
+
+    let entry_str = serde_json::to_string(&entry).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "serialization_error",
+            format!("Failed to serialize scratchpad entry: {}", e),
+        )
+    })?;
+
+    if !staged.is_empty() && !staged.ends_with('\n') {
+        staged.push('\n');
+    }
+    staged.push_str(&entry_str);
+    staged.push('\n');
+
+    write_file_atomic(&scratch_file_path, &staged)?;
+
+    let cache_dir_rel = storage
+        .map(|s| s.cache_dir.as_str())
+        .unwrap_or(".qdev/cache");
+    let cache_db_path = workspace_root.join(cache_dir_rel).join("cache.sqlite");
+    if cache_db_path.is_file() {
+        let store = SqliteStore::open(&cache_db_path)?;
+        let record = ScratchpadRecord {
+            story_id: story_id.to_string(),
+            seq: next_seq,
+            at: timestamp.to_string(),
+            author_type: Some(author.author_type.clone()),
+            author_id: Some(author.id.clone()),
+            kind: Some("transition".to_string()),
+            text: Some(justification.to_string()),
+        };
+        store.upsert_scratchpad_entry(&record)?;
+    }
+
+    Ok(next_seq)
+}
+
+/// Creates a committed DEC- record in `docs/state/decisions/` recording the rationale for a
+/// backward story transition, validated against `decision.json` schema, and synced to SQLite cache if present.
+pub fn create_backward_transition_decision(
+    workspace_root: &Path,
+    storage: Option<&StorageConfig>,
+    story_id: &str,
+    from_state: StoryState,
+    to_state: StoryState,
+    justification: &str,
+    author: &Author,
+    timestamp: &str,
+) -> Result<String, QdevError> {
+    let decision_type = if from_state == StoryState::Review {
+        "review_rejection"
+    } else {
+        "pivot"
+    };
+
+    let default_storage = StorageConfig::default();
+    let st = storage.unwrap_or(&default_storage);
+    let cache_dir_rel = st.cache_dir.as_str();
+    let cache_db_path = workspace_root.join(cache_dir_rel).join("cache.sqlite");
+    let opt_store = if cache_db_path.is_file() {
+        Some(SqliteStore::open(&cache_db_path)?)
+    } else {
+        None
+    };
+
+    let mut rng = rand::rng();
+    let dec_ident = allocate_decision_id_in_with_rng(
+        workspace_root,
+        st,
+        &mut rng,
+        opt_store.as_ref().map(|s| s as &dyn crate::store::Store),
+    )?;
+    let dec_id = dec_ident.to_string();
+
+    let title = match decision_type {
+        "review_rejection" => format!("Review rejection on story {}", story_id),
+        _ => format!("Pivot on story {}", story_id),
+    };
+
+    let trajectory = format!("{} -> {}", from_state.as_str(), to_state.as_str());
+
+    let frontmatter_json = serde_json::json!({
+        "id": dec_id,
+        "title": title,
+        "status": "active",
+        "version": 1,
+        "created_by": {
+            "type": author.author_type,
+            "id": author.id,
+        },
+        "updated_by": {
+            "type": author.author_type,
+            "id": author.id,
+        },
+        "subject_id": story_id,
+        "decision_type": decision_type,
+        "context": trajectory,
+        "ruling": justification,
+        "created_at": timestamp,
+    });
+
+    crate::schema::validate_value_detailed(EntityKind::Decision, &frontmatter_json).map_err(|errs| {
+        QdevError::logical_failure(
+            "schema_violation",
+            format!(
+                "Decision frontmatter schema validation failed: {}",
+                errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")
+            ),
+        )
+    })?;
+
+    let frontmatter_yaml = serde_yaml::to_string(&frontmatter_json).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "serialization_error",
+            format!("Failed to serialize decision frontmatter: {}", e),
+        )
+    })?;
+
+    let dec_content = format!(
+        "---\n{}---\n\n# {}\n\nTransition: {}\n\n{}\n",
+        frontmatter_yaml, title, trajectory, justification
+    );
+
+    let rel_dir = directory_for_kind(storage, EntityKind::Decision);
+    let file_name = crate::write::canonical_file_name(&dec_id);
+    let dec_file_path = workspace_root.join(&rel_dir).join(&file_name);
+
+    write_file_atomic(&dec_file_path, &dec_content)?;
+
+    if let Some(ref store) = opt_store {
+        let rel_source_path = crate::write::workspace_rel_path(&dec_file_path, workspace_root);
+        let content_hash = sha256_digest(dec_content.as_bytes());
+
+        let decision_entity_record = EntityRecord {
+            id: dec_id.clone(),
+            kind: EntityKind::Decision,
+            title: Some(title),
+            status: Some("active".to_string()),
+            owners: None,
+            source_path: rel_source_path,
+            content_hash,
+            version: 1,
+            created_by: Some(author.clone()),
+            updated_by: Some(author.clone()),
+            updated_at: timestamp.to_string(),
+            stale: false,
+            epic_id: None,
+            seq: None,
+            appetite: None,
+            safety_class: None,
+            target_modules: None,
+        };
+        upsert_cache_and_mark_dirty(&cache_db_path, &decision_entity_record)?;
+
+        let decision_record = DecisionRecord {
+            id: dec_id.clone(),
+            subject_id: story_id.to_string(),
+            decision_type: Some(decision_type.to_string()),
+            topic: None,
+            context: Some(trajectory),
+            ruling: Some(justification.to_string()),
+            author_type: Some(author.author_type.clone()),
+            author_id: Some(author.id.clone()),
+            created_at: Some(timestamp.to_string()),
+        };
+        store.upsert_decision(&decision_record)?;
+    }
+
+    Ok(dec_id)
 }

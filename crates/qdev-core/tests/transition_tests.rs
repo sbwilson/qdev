@@ -1171,3 +1171,609 @@ updated_by:
     assert_eq!(err.code(), "invalid_status");
 }
 
+#[test]
+fn test_backward_transition_review_to_in_progress_creates_scratchpad_and_review_rejection_decision() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+    populate_cache_for_story(tmp.path(), "E12S4", "review");
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: CoreResponse Buffer Layout
+status: review
+version: 3
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- Buffers round-trip.
+"#,
+    );
+
+    let engine = TransitionEngine::new();
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "in-progress".to_string(),
+        justification: Some("Failed AC-3".to_string()),
+        author: Author::new("human", "simon"),
+        if_version: None,
+    };
+
+    let payload = engine.transition(&opts).unwrap();
+    assert_eq!(payload.id, "E12S4");
+    assert_eq!(payload.from_status, "review");
+    assert_eq!(payload.to_status, "in-progress");
+    assert_eq!(payload.version, 4);
+
+    let dec_id = payload.decision_id.expect("decision_id must be present");
+    assert!(dec_id.starts_with("DEC-"));
+
+    // 1. Verify scratchpad file on disk
+    let scratch_file = tmp.path().join("docs/state/scratch/E12S4.jsonl");
+    assert!(scratch_file.exists());
+    let scratch_content = fs::read_to_string(&scratch_file).unwrap();
+    let lines: Vec<&str> = scratch_content.lines().collect();
+    assert_eq!(lines.len(), 1);
+    let scratch_val: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(scratch_val["seq"], 1);
+    assert_eq!(scratch_val["kind"], "transition");
+    assert_eq!(scratch_val["text"], "Failed AC-3");
+    assert_eq!(scratch_val["author"]["type"], "human");
+    assert_eq!(scratch_val["author"]["id"], "simon");
+
+    // 2. Verify decision record on disk
+    let dec_file = tmp.path().join(format!("docs/state/decisions/{}.md", dec_id));
+    assert!(dec_file.exists());
+    let dec_content = fs::read_to_string(&dec_file).unwrap();
+    let dec_frontmatter = qdev_core::extract_frontmatter(&dec_content).unwrap();
+    assert_eq!(dec_frontmatter["id"], dec_id);
+    assert_eq!(dec_frontmatter["status"], "active");
+    assert_eq!(dec_frontmatter["subject_id"], "E12S4");
+    assert_eq!(dec_frontmatter["decision_type"], "review_rejection");
+    assert_eq!(dec_frontmatter["ruling"], "Failed AC-3");
+    assert_eq!(dec_frontmatter["context"], "review -> in-progress");
+    assert_eq!(dec_frontmatter["version"], 1);
+    assert_eq!(dec_frontmatter["created_by"]["type"], "human");
+    assert_eq!(dec_frontmatter["created_by"]["id"], "simon");
+    assert!(dec_content.contains("Transition: review -> in-progress"));
+    assert!(dec_content.contains("Failed AC-3"));
+
+    // Validate frontmatter against decision schema
+    qdev_core::validate_value_detailed(EntityKind::Decision, &dec_frontmatter)
+        .expect("Decision frontmatter must satisfy decision schema");
+
+    // 3. Verify SQLite cache sync
+    let cache_db = tmp.path().join(".qdev/cache/cache.sqlite");
+    let store = SqliteStore::open(&cache_db).unwrap();
+
+    let scratch_entries = store.get_scratchpad_entries("E12S4").unwrap();
+    assert_eq!(scratch_entries.len(), 1);
+    assert_eq!(scratch_entries[0].seq, 1);
+    assert_eq!(scratch_entries[0].kind.as_deref(), Some("transition"));
+    assert_eq!(scratch_entries[0].text.as_deref(), Some("Failed AC-3"));
+
+    let dec_rec = store.get_decision(&dec_id).unwrap().expect("Decision record must exist in cache");
+    assert_eq!(dec_rec.id, dec_id);
+    assert_eq!(dec_rec.subject_id, "E12S4");
+    assert_eq!(dec_rec.decision_type.as_deref(), Some("review_rejection"));
+    assert_eq!(dec_rec.ruling.as_deref(), Some("Failed AC-3"));
+
+    let entity_rec = store.get_entity(&dec_id).unwrap().expect("Entity record must exist in cache");
+    assert_eq!(entity_rec.kind, EntityKind::Decision);
+    assert_eq!(entity_rec.status.as_deref(), Some("active"));
+}
+
+#[test]
+fn test_backward_transition_in_progress_to_ready_creates_pivot_decision() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+    populate_cache_for_story(tmp.path(), "E12S4", "in-progress");
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: CoreResponse Buffer Layout
+status: in-progress
+version: 2
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- Buffers round-trip.
+"#,
+    );
+
+    let engine = TransitionEngine::new();
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "ready".to_string(),
+        justification: Some("Re-scoping appetite".to_string()),
+        author: Author::new("human", "simon"),
+        if_version: None,
+    };
+
+    let payload = engine.transition(&opts).unwrap();
+    assert_eq!(payload.from_status, "in-progress");
+    assert_eq!(payload.to_status, "ready");
+    assert_eq!(payload.version, 3);
+
+    let dec_id = payload.decision_id.expect("decision_id must be present");
+    assert!(dec_id.starts_with("DEC-"));
+
+    let dec_file = tmp.path().join(format!("docs/state/decisions/{}.md", dec_id));
+    let dec_content = fs::read_to_string(&dec_file).unwrap();
+    let dec_frontmatter = qdev_core::extract_frontmatter(&dec_content).unwrap();
+    assert_eq!(dec_frontmatter["decision_type"], "pivot");
+    assert_eq!(dec_frontmatter["ruling"], "Re-scoping appetite");
+    assert_eq!(dec_frontmatter["subject_id"], "E12S4");
+    assert_eq!(dec_frontmatter["context"], "in-progress -> ready");
+    assert!(dec_content.contains("Transition: in-progress -> ready"));
+    assert!(dec_content.contains("Re-scoping appetite"));
+}
+
+#[test]
+fn test_backward_transition_ready_to_draft_creates_pivot_decision() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+    populate_cache_for_story(tmp.path(), "E12S4", "ready");
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: Story 4
+status: ready
+version: 2
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    let engine = TransitionEngine::new();
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "draft".to_string(),
+        justification: Some("Needs scope refinement".to_string()),
+        author: Author::new("human", "simon"),
+        if_version: None,
+    };
+
+    let payload = engine.transition(&opts).unwrap();
+    assert_eq!(payload.id, "E12S4");
+    assert_eq!(payload.from_status, "ready");
+    assert_eq!(payload.to_status, "draft");
+    assert_eq!(payload.version, 3);
+
+    let dec_id = payload.decision_id.expect("decision_id must be present");
+    assert!(dec_id.starts_with("DEC-"));
+
+    // Verify decision record
+    let dec_file = tmp.path().join(format!("docs/state/decisions/{}.md", dec_id));
+    assert!(dec_file.exists());
+    let dec_content = fs::read_to_string(&dec_file).unwrap();
+    let dec_frontmatter = qdev_core::extract_frontmatter(&dec_content).unwrap();
+    assert_eq!(dec_frontmatter["id"], dec_id);
+    assert_eq!(dec_frontmatter["decision_type"], "pivot");
+    assert_eq!(dec_frontmatter["ruling"], "Needs scope refinement");
+    assert_eq!(dec_frontmatter["subject_id"], "E12S4");
+    assert_eq!(dec_frontmatter["context"], "ready -> draft");
+    assert!(dec_content.contains("Transition: ready -> draft"));
+    assert!(dec_content.contains("Needs scope refinement"));
+
+    // Verify scratchpad file
+    let scratch_file = tmp.path().join("docs/state/scratch/E12S4.jsonl");
+    assert!(scratch_file.exists());
+    let scratch_content = fs::read_to_string(&scratch_file).unwrap();
+    let lines: Vec<&str> = scratch_content.lines().collect();
+    assert_eq!(lines.len(), 1);
+    let scratch_val: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(scratch_val["seq"], 1);
+    assert_eq!(scratch_val["kind"], "transition");
+    assert_eq!(scratch_val["text"], "Needs scope refinement");
+
+    // Verify SQLite cache
+    let cache_db = tmp.path().join(".qdev/cache/cache.sqlite");
+    let store = SqliteStore::open(&cache_db).unwrap();
+    let dec_rec = store.get_decision(&dec_id).unwrap().expect("decision must exist in cache");
+    assert_eq!(dec_rec.decision_type.as_deref(), Some("pivot"));
+    assert_eq!(dec_rec.ruling.as_deref(), Some("Needs scope refinement"));
+    let story_rec = store.get_entity("E12S4").unwrap().expect("story must exist");
+    assert_eq!(story_rec.status.as_deref(), Some("draft"));
+    assert_eq!(story_rec.version, 3);
+}
+
+#[test]
+fn test_backward_transition_review_to_ready_multistep_creates_review_rejection_decision() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+    populate_cache_for_story(tmp.path(), "E12S4", "review");
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: Story 4
+status: review
+version: 3
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    let engine = TransitionEngine::new();
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "ready".to_string(),
+        justification: Some("Fundamental flaws identified in review; re-evaluating readiness".to_string()),
+        author: Author::new("human", "simon"),
+        if_version: None,
+    };
+
+    let payload = engine.transition(&opts).unwrap();
+    assert_eq!(payload.id, "E12S4");
+    assert_eq!(payload.from_status, "review");
+    assert_eq!(payload.to_status, "ready");
+    assert_eq!(payload.version, 4);
+
+    let dec_id = payload.decision_id.expect("decision_id must be present");
+    assert!(dec_id.starts_with("DEC-"));
+
+    // Verify decision record
+    let dec_file = tmp.path().join(format!("docs/state/decisions/{}.md", dec_id));
+    assert!(dec_file.exists());
+    let dec_content = fs::read_to_string(&dec_file).unwrap();
+    let dec_frontmatter = qdev_core::extract_frontmatter(&dec_content).unwrap();
+    assert_eq!(dec_frontmatter["id"], dec_id);
+    assert_eq!(dec_frontmatter["decision_type"], "review_rejection");
+    assert_eq!(dec_frontmatter["ruling"], "Fundamental flaws identified in review; re-evaluating readiness");
+    assert_eq!(dec_frontmatter["subject_id"], "E12S4");
+    assert_eq!(dec_frontmatter["context"], "review -> ready");
+    assert!(dec_content.contains("Transition: review -> ready"));
+    assert!(dec_content.contains("Fundamental flaws identified in review; re-evaluating readiness"));
+
+    // Verify scratchpad file
+    let scratch_file = tmp.path().join("docs/state/scratch/E12S4.jsonl");
+    assert!(scratch_file.exists());
+    let scratch_content = fs::read_to_string(&scratch_file).unwrap();
+    let lines: Vec<&str> = scratch_content.lines().collect();
+    assert_eq!(lines.len(), 1);
+    let scratch_val: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(scratch_val["seq"], 1);
+    assert_eq!(scratch_val["kind"], "transition");
+    assert_eq!(scratch_val["text"], "Fundamental flaws identified in review; re-evaluating readiness");
+
+    // Verify SQLite cache
+    let cache_db = tmp.path().join(".qdev/cache/cache.sqlite");
+    let store = SqliteStore::open(&cache_db).unwrap();
+    let dec_rec = store.get_decision(&dec_id).unwrap().expect("decision must exist in cache");
+    assert_eq!(dec_rec.decision_type.as_deref(), Some("review_rejection"));
+    assert_eq!(dec_rec.ruling.as_deref(), Some("Fundamental flaws identified in review; re-evaluating readiness"));
+    let story_rec = store.get_entity("E12S4").unwrap().expect("story must exist");
+    assert_eq!(story_rec.status.as_deref(), Some("ready"));
+    assert_eq!(story_rec.version, 4);
+}
+
+#[test]
+fn test_multiple_backward_transitions_sequentially_increment_scratchpad_and_create_distinct_decisions() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+    populate_cache_for_story(tmp.path(), "E12S4", "review");
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: CoreResponse Buffer Layout
+status: review
+version: 3
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- Buffers round-trip.
+"#,
+    );
+
+    let engine = TransitionEngine::new();
+
+    // 1st backward move: review -> in-progress
+    let payload1 = engine
+        .transition(&TransitionOptions {
+            workspace_root: tmp.path().to_path_buf(),
+            storage: None,
+            entity_kind: "story".to_string(),
+            story_id: "E12S4".to_string(),
+            target_status: "in-progress".to_string(),
+            justification: Some("First rejection".to_string()),
+            author: Author::new("human", "simon"),
+            if_version: None,
+        })
+        .unwrap();
+
+    let dec1 = payload1.decision_id.unwrap();
+
+    // Forward move: in-progress -> review
+    let payload_fwd = engine
+        .transition(&TransitionOptions {
+            workspace_root: tmp.path().to_path_buf(),
+            storage: None,
+            entity_kind: "story".to_string(),
+            story_id: "E12S4".to_string(),
+            target_status: "review".to_string(),
+            justification: None,
+            author: Author::new("human", "simon"),
+            if_version: None,
+        })
+        .unwrap();
+    assert!(payload_fwd.decision_id.is_none());
+
+    // 2nd backward move: review -> in-progress
+    let payload2 = engine
+        .transition(&TransitionOptions {
+            workspace_root: tmp.path().to_path_buf(),
+            storage: None,
+            entity_kind: "story".to_string(),
+            story_id: "E12S4".to_string(),
+            target_status: "in-progress".to_string(),
+            justification: Some("Second rejection".to_string()),
+            author: Author::new("human", "simon"),
+            if_version: None,
+        })
+        .unwrap();
+
+    let dec2 = payload2.decision_id.unwrap();
+    assert_ne!(dec1, dec2, "Each backward transition must allocate a unique decision id");
+
+    // 3rd backward move: in-progress -> ready
+    let payload3 = engine
+        .transition(&TransitionOptions {
+            workspace_root: tmp.path().to_path_buf(),
+            storage: None,
+            entity_kind: "story".to_string(),
+            story_id: "E12S4".to_string(),
+            target_status: "ready".to_string(),
+            justification: Some("Pivot to ready".to_string()),
+            author: Author::new("human", "simon"),
+            if_version: None,
+        })
+        .unwrap();
+
+    let dec3 = payload3.decision_id.unwrap();
+    assert_ne!(dec2, dec3);
+
+    // Verify scratchpad file has 3 sequential entries
+    let scratch_file = tmp.path().join("docs/state/scratch/E12S4.jsonl");
+    let scratch_content = fs::read_to_string(&scratch_file).unwrap();
+    let lines: Vec<&str> = scratch_content.lines().collect();
+    assert_eq!(lines.len(), 3);
+
+    let v1: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    let v2: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    let v3: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+
+    assert_eq!(v1["seq"], 1);
+    assert_eq!(v1["text"], "First rejection");
+    assert_eq!(v2["seq"], 2);
+    assert_eq!(v2["text"], "Second rejection");
+    assert_eq!(v3["seq"], 3);
+    assert_eq!(v3["text"], "Pivot to ready");
+}
+
+#[test]
+fn test_backward_transition_preserves_active_leases_and_evidence() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    // Create active lease file in .qdev/leases/
+    let lease_dir = tmp.path().join(".qdev/leases");
+    fs::create_dir_all(&lease_dir).unwrap();
+    let lease_file = lease_dir.join("E12S4.json");
+    let initial_lease_content = r#"{"story_id": "E12S4", "holder": "simon", "expires_at": "2026-09-12T23:59:59Z"}"#;
+    fs::write(&lease_file, initial_lease_content).unwrap();
+
+    // Create evidence record in docs/state/evidence/
+    let evidence_dir = tmp.path().join("docs/state/evidence");
+    fs::create_dir_all(&evidence_dir).unwrap();
+    let evidence_file = evidence_dir.join("ev_E12S4.json");
+    let initial_evidence_content = r#"{"story_id": "E12S4", "test": "test_buffer_roundtrip", "result": "passed"}"#;
+    fs::write(&evidence_file, initial_evidence_content).unwrap();
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: Story 4
+status: review
+version: 1
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    let engine = TransitionEngine::new();
+    let payload = engine
+        .transition(&TransitionOptions {
+            workspace_root: tmp.path().to_path_buf(),
+            storage: None,
+            entity_kind: "story".to_string(),
+            story_id: "E12S4".to_string(),
+            target_status: "in-progress".to_string(),
+            justification: Some("Failed manual review check".to_string()),
+            author: Author::new("human", "simon"),
+            if_version: None,
+        })
+        .unwrap();
+
+    assert_eq!(payload.to_status, "in-progress");
+
+    // Assert lease file still exists with intact content
+    assert!(lease_file.exists(), "Active lease file must be preserved across backward transition");
+    let current_lease_content = fs::read_to_string(&lease_file).unwrap();
+    assert_eq!(current_lease_content, initial_lease_content);
+
+    // Assert evidence file still exists with intact content
+    assert!(evidence_file.exists(), "Evidence file must be preserved across backward transition");
+    let current_evidence_content = fs::read_to_string(&evidence_file).unwrap();
+    assert_eq!(current_evidence_content, initial_evidence_content);
+}
+
+#[test]
+fn test_backward_transition_refuses_empty_or_whitespace_justification_exit_3() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: Story 4
+status: review
+version: 1
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    let engine = TransitionEngine::new();
+
+    // 1. None
+    let err1 = engine
+        .transition(&TransitionOptions {
+            workspace_root: tmp.path().to_path_buf(),
+            storage: None,
+            entity_kind: "story".to_string(),
+            story_id: "E12S4".to_string(),
+            target_status: "in-progress".to_string(),
+            justification: None,
+            author: Author::new("human", "simon"),
+            if_version: None,
+        })
+        .unwrap_err();
+    assert_eq!(err1.exit_code(), ExitCode::PolicyRefusal);
+    assert_eq!(err1.code(), "needs_justification");
+
+    // 2. Empty string
+    let err2 = engine
+        .transition(&TransitionOptions {
+            workspace_root: tmp.path().to_path_buf(),
+            storage: None,
+            entity_kind: "story".to_string(),
+            story_id: "E12S4".to_string(),
+            target_status: "in-progress".to_string(),
+            justification: Some("".to_string()),
+            author: Author::new("human", "simon"),
+            if_version: None,
+        })
+        .unwrap_err();
+    assert_eq!(err2.exit_code(), ExitCode::PolicyRefusal);
+    assert_eq!(err2.code(), "needs_justification");
+
+    // 3. Whitespace-only string
+    let err3 = engine
+        .transition(&TransitionOptions {
+            workspace_root: tmp.path().to_path_buf(),
+            storage: None,
+            entity_kind: "story".to_string(),
+            story_id: "E12S4".to_string(),
+            target_status: "in-progress".to_string(),
+            justification: Some("   \t\n  ".to_string()),
+            author: Author::new("human", "simon"),
+            if_version: None,
+        })
+        .unwrap_err();
+    assert_eq!(err3.exit_code(), ExitCode::PolicyRefusal);
+    assert_eq!(err3.code(), "needs_justification");
+
+    // Ensure no scratchpad or decision files were created
+    let scratch_file = tmp.path().join("docs/state/scratch/E12S4.jsonl");
+    assert!(!scratch_file.exists());
+    let decisions_dir = tmp.path().join("docs/state/decisions");
+    if decisions_dir.exists() {
+        assert_eq!(fs::read_dir(decisions_dir).unwrap().count(), 0);
+    }
+}
+
+

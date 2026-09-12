@@ -165,6 +165,12 @@ const IDENTITY_RULE_SITES: &[(&str, &str, &str)] = &[
         "`--fix-ids` asks whether the rename target is occupied — an occupancy question, not a \
          resolution one; which file holds the id is asked of `find_file_in_dir_for_id` beside it",
     ),
+    (
+        "qdev-core/src/transition.rs",
+        "let dec_file_path = workspace_root.join(&rel_dir).join(&file_name);",
+        "`create_backward_transition_decision` joins the directory the rule gives to the name \
+         `canonical_file_name` gives — the rule spelled once, not a second answer",
+    ),
 ];
 
 /// The rule's own helpers. A binding assigned from one of them holds an entity file name, so

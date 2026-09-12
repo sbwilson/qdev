@@ -67,8 +67,9 @@ pub use schema::{
 };
 pub use serde_yaml;
 pub use transition::{
-    classify_transition, PostTransitionHook, PreTransitionHook, StoryState, TransitionContext,
-    TransitionEngine, TransitionKind, TransitionOptions, TransitionPayload,
+    append_scratchpad_entry, classify_transition, create_backward_transition_decision,
+    PostTransitionHook, PreTransitionHook, StoryState, TransitionContext, TransitionEngine,
+    TransitionKind, TransitionOptions, TransitionPayload,
 };
 pub use validate::{
     collect_workspace_files_matching, filter_by_changed, find_duplicate_planning_ids,

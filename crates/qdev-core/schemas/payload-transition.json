@@ -36,6 +36,10 @@
       "items": {
         "type": "string"
       }
+    },
+    "decision_id": {
+      "type": "string",
+      "minLength": 1
     }
   },
   "additionalProperties": false

@@ -758,3 +758,470 @@ fn test_transition_outside_workspace_exits_2() {
         .code(2)
         .stderr(predicate::str::contains("Not a qdev workspace"));
 }
+
+#[test]
+fn test_backward_transition_acceptance_review_rejection_and_pivot_cli() {
+    let tmp = TempDir::new().unwrap();
+    setup_workspace(tmp.path());
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: "CoreResponse Buffer Layout"
+status: review
+version: 3
+owners: ["simon"]
+epic_id: E12
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- Buffers round-trip.
+"#,
+    );
+
+    // AC: Given a story in review, when running qdev transition story E12S4 in-progress without --justification,
+    // then the command exits 3 with error code needs_justification.
+    let mut cmd_missing_just = Command::cargo_bin("qdev").unwrap();
+    cmd_missing_just
+        .current_dir(tmp.path())
+        .args(["transition", "story", "E12S4", "in-progress"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("needs_justification"));
+
+    // AC: Given a story in review, when running qdev transition story E12S4 in-progress --justification "Failed AC-3",
+    // then the transition succeeds with exit 0, a scratchpad entry with kind: transition and seq: 1 is appended
+    // to docs/state/scratch/E12S4.jsonl, a DEC- record with decision_type: review_rejection is created in docs/state/decisions/,
+    // and both are synced to cache.
+    let mut cmd_review_rejection = Command::cargo_bin("qdev").unwrap();
+    let assert_rej = cmd_review_rejection
+        .current_dir(tmp.path())
+        .args([
+            "transition",
+            "story",
+            "E12S4",
+            "in-progress",
+            "--justification",
+            "Failed AC-3",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Transitioned story E12S4 review -> in-progress (version 4)",
+        ))
+        .stdout(predicate::str::contains("Recorded decision: DEC-"));
+
+    let stdout = String::from_utf8(assert_rej.get_output().stdout.clone()).unwrap();
+    let dec_line = stdout
+        .lines()
+        .find(|l| l.starts_with("Recorded decision: "))
+        .expect("Recorded decision line must be present");
+    let dec_id = dec_line
+        .strip_prefix("Recorded decision: ")
+        .unwrap()
+        .trim();
+    assert!(dec_id.starts_with("DEC-"));
+
+    // Verify scratchpad file
+    let scratch_path = tmp.path().join("docs/state/scratch/E12S4.jsonl");
+    assert!(scratch_path.exists());
+    let scratch_lines: Vec<String> = fs::read_to_string(&scratch_path)
+        .unwrap()
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(scratch_lines.len(), 1);
+    let entry_val: Value = serde_json::from_str(&scratch_lines[0]).unwrap();
+    assert_eq!(entry_val["seq"], 1);
+    assert_eq!(entry_val["kind"], "transition");
+    assert_eq!(entry_val["text"], "Failed AC-3");
+
+    // Verify DEC- file
+    let dec_path = tmp.path().join(format!("docs/state/decisions/{}.md", dec_id));
+    assert!(dec_path.exists());
+    let dec_content = fs::read_to_string(&dec_path).unwrap();
+    let dec_fm = qdev_core::extract_frontmatter(&dec_content).unwrap();
+    assert_eq!(dec_fm["id"], dec_id);
+    assert_eq!(dec_fm["subject_id"], "E12S4");
+    assert_eq!(dec_fm["decision_type"], "review_rejection");
+    assert_eq!(dec_fm["ruling"], "Failed AC-3");
+    assert_eq!(dec_fm["context"], "review -> in-progress");
+    assert!(dec_content.contains("Transition: review -> in-progress"));
+    assert!(dec_content.contains("Failed AC-3"));
+
+    // AC: Given a story in in-progress, when running qdev transition story E12S4 ready --justification "Re-scoping",
+    // then the transition succeeds with exit 0 and a DEC- record with decision_type: pivot is created.
+    let mut cmd_pivot = Command::cargo_bin("qdev").unwrap();
+    let assert_pivot = cmd_pivot
+        .current_dir(tmp.path())
+        .args([
+            "transition",
+            "story",
+            "E12S4",
+            "ready",
+            "--justification",
+            "Re-scoping",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let pivot_json: Value =
+        serde_json::from_slice(&assert_pivot.get_output().stdout).expect("Valid JSON envelope");
+    assert_eq!(pivot_json["schema_version"], "1");
+    assert_eq!(pivot_json["id"], "E12S4");
+    assert_eq!(pivot_json["from_status"], "in-progress");
+    assert_eq!(pivot_json["to_status"], "ready");
+    assert_eq!(pivot_json["version"], 5);
+    let pivot_dec_id = pivot_json["decision_id"]
+        .as_str()
+        .expect("decision_id must be in json");
+    assert!(pivot_dec_id.starts_with("DEC-"));
+
+    // Verify pivot decision file
+    let pivot_dec_path = tmp
+        .path()
+        .join(format!("docs/state/decisions/{}.md", pivot_dec_id));
+    assert!(pivot_dec_path.exists());
+    let pivot_dec_content = fs::read_to_string(&pivot_dec_path).unwrap();
+    let pivot_fm = qdev_core::extract_frontmatter(&pivot_dec_content).unwrap();
+    assert_eq!(pivot_fm["decision_type"], "pivot");
+    assert_eq!(pivot_fm["ruling"], "Re-scoping");
+    assert_eq!(pivot_fm["context"], "in-progress -> ready");
+    assert!(pivot_dec_content.contains("Transition: in-progress -> ready"));
+    assert!(pivot_dec_content.contains("Re-scoping"));
+
+    // Validate payload against schema
+    let schema_str = include_str!("../../../crates/qdev-core/schemas/payload-transition.json");
+    let schema_json: Value = serde_json::from_str(schema_str).unwrap();
+    let validator = jsonschema::validator_for(&schema_json).unwrap();
+    assert!(
+        validator.is_valid(&pivot_json),
+        "Transition JSON envelope must validate against payload-transition schema"
+    );
+}
+
+#[test]
+fn test_backward_transition_cli_whitespace_justification_refusal_exit_3() {
+    let tmp = TempDir::new().unwrap();
+    setup_workspace(tmp.path());
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: "Story"
+status: review
+version: 1
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#,
+    );
+
+    // Whitespace justification in text mode
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(tmp.path())
+        .args([
+            "transition",
+            "story",
+            "E12S4",
+            "in-progress",
+            "--justification",
+            "   \t\n ",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("needs_justification"));
+
+    // Whitespace justification in JSON mode
+    let mut cmd_json = Command::cargo_bin("qdev").unwrap();
+    let assert_json = cmd_json
+        .current_dir(tmp.path())
+        .args([
+            "transition",
+            "story",
+            "E12S4",
+            "in-progress",
+            "--justification",
+            "   ",
+            "--json",
+        ])
+        .assert()
+        .code(3);
+
+    let err_val: Value =
+        serde_json::from_slice(&assert_json.get_output().stdout).expect("Error JSON envelope");
+    assert_eq!(err_val["error"]["code"], "needs_justification");
+
+    // Ensure story file remains unchanged
+    let content = fs::read_to_string(tmp.path().join("docs/specs/stories/E12S4.md")).unwrap();
+    assert!(content.contains("status: review"));
+    assert!(content.contains("version: 1"));
+}
+
+#[test]
+fn test_backward_transition_cli_preserves_leases_and_evidence() {
+    let tmp = TempDir::new().unwrap();
+    setup_workspace(tmp.path());
+
+    // Write lease file in .qdev/leases
+    let lease_dir = tmp.path().join(".qdev/leases");
+    fs::create_dir_all(&lease_dir).unwrap();
+    let lease_path = lease_dir.join("E12S4.json");
+    let lease_data = r#"{"holder": "simon", "story": "E12S4", "active": true}"#;
+    fs::write(&lease_path, lease_data).unwrap();
+
+    // Write evidence file in docs/state/evidence
+    let evidence_dir = tmp.path().join("docs/state/evidence");
+    fs::create_dir_all(&evidence_dir).unwrap();
+    let evidence_path = evidence_dir.join("ev-test.json");
+    let evidence_data = r#"{"story": "E12S4", "gate": "unit-tests", "status": "pass"}"#;
+    fs::write(&evidence_path, evidence_data).unwrap();
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: "Story"
+status: review
+version: 1
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#,
+    );
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(tmp.path())
+        .args([
+            "transition",
+            "story",
+            "E12S4",
+            "in-progress",
+            "--justification",
+            "Failed review check",
+        ])
+        .assert()
+        .success();
+
+    // AC: Given a story with an active lease and existing evidence, when a backward transition occurs,
+    // then no lease is released and all evidence records remain untouched.
+    assert!(lease_path.exists());
+    assert_eq!(fs::read_to_string(&lease_path).unwrap(), lease_data);
+
+    assert!(evidence_path.exists());
+    assert_eq!(fs::read_to_string(&evidence_path).unwrap(), evidence_data);
+}
+
+#[test]
+fn test_backward_transition_cli_omitted_justification_json_refusal_exit_3() {
+    let tmp = TempDir::new().unwrap();
+    setup_workspace(tmp.path());
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: "Story"
+status: review
+version: 1
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#,
+    );
+
+    // Omitted justification in JSON mode
+    let mut cmd_json = Command::cargo_bin("qdev").unwrap();
+    let assert_json = cmd_json
+        .current_dir(tmp.path())
+        .args([
+            "transition",
+            "story",
+            "E12S4",
+            "in-progress",
+            "--json",
+        ])
+        .assert()
+        .code(3);
+
+    let err_val: Value =
+        serde_json::from_slice(&assert_json.get_output().stdout).expect("Error JSON envelope");
+    assert_eq!(err_val["schema_version"], "1");
+    assert_eq!(err_val["error"]["code"], "needs_justification");
+    assert!(err_val["error"]["message"].as_str().unwrap().contains("justification"));
+
+    // Ensure story file remains unchanged
+    let content = fs::read_to_string(tmp.path().join("docs/specs/stories/E12S4.md")).unwrap();
+    assert!(content.contains("status: review"));
+    assert!(content.contains("version: 1"));
+
+    // Ensure no scratchpad or decisions were created
+    let scratch = tmp.path().join("docs/state/scratch/E12S4.jsonl");
+    assert!(!scratch.exists());
+    let decisions = tmp.path().join("docs/state/decisions");
+    if decisions.exists() {
+        assert_eq!(fs::read_dir(decisions).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn test_backward_transition_cli_ready_to_draft_and_multistep_review_to_ready() {
+    let tmp = TempDir::new().unwrap();
+    setup_workspace(tmp.path());
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: "Story"
+status: ready
+version: 2
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#,
+    );
+
+    // 1. ready -> draft in JSON mode
+    let mut cmd_draft = Command::cargo_bin("qdev").unwrap();
+    let assert_draft = cmd_draft
+        .current_dir(tmp.path())
+        .args([
+            "transition",
+            "story",
+            "E12S4",
+            "draft",
+            "--justification",
+            "Revisiting requirements",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let draft_json: Value =
+        serde_json::from_slice(&assert_draft.get_output().stdout).expect("Valid JSON envelope");
+    assert_eq!(draft_json["schema_version"], "1");
+    assert_eq!(draft_json["id"], "E12S4");
+    assert_eq!(draft_json["from_status"], "ready");
+    assert_eq!(draft_json["to_status"], "draft");
+    assert_eq!(draft_json["version"], 3);
+    let draft_dec_id = draft_json["decision_id"].as_str().unwrap();
+    assert!(draft_dec_id.starts_with("DEC-"));
+
+    let dec_file = tmp.path().join(format!("docs/state/decisions/{}.md", draft_dec_id));
+    let dec_content = fs::read_to_string(&dec_file).unwrap();
+    let dec_fm = qdev_core::extract_frontmatter(&dec_content).unwrap();
+    assert_eq!(dec_fm["decision_type"], "pivot");
+    assert_eq!(dec_fm["ruling"], "Revisiting requirements");
+    assert_eq!(dec_fm["context"], "ready -> draft");
+    assert!(dec_content.contains("Transition: ready -> draft"));
+
+    // Advance story to review: simulate by updating file directly
+    let updated_story = r#"---
+id: E12S4
+title: "Story"
+status: review
+version: 5
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#;
+    fs::write(tmp.path().join("docs/specs/stories/E12S4.md"), updated_story).unwrap();
+
+    // 2. Multistep backward transition: review -> ready in text mode
+    let mut cmd_multistep = Command::cargo_bin("qdev").unwrap();
+    let assert_multi = cmd_multistep
+        .current_dir(tmp.path())
+        .args([
+            "transition",
+            "story",
+            "E12S4",
+            "ready",
+            "--justification",
+            "Failed review completely; re-triaging scope",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Transitioned story E12S4 review -> ready (version 6)",
+        ))
+        .stdout(predicate::str::contains("Recorded decision: DEC-"));
+
+    let stdout = String::from_utf8(assert_multi.get_output().stdout.clone()).unwrap();
+    let dec_line = stdout
+        .lines()
+        .find(|l| l.starts_with("Recorded decision: "))
+        .expect("Recorded decision line must be present");
+    let multi_dec_id = dec_line.strip_prefix("Recorded decision: ").unwrap().trim();
+
+    let multi_dec_file = tmp.path().join(format!("docs/state/decisions/{}.md", multi_dec_id));
+    let multi_dec_content = fs::read_to_string(&multi_dec_file).unwrap();
+    let multi_dec_fm = qdev_core::extract_frontmatter(&multi_dec_content).unwrap();
+    assert_eq!(multi_dec_fm["decision_type"], "review_rejection");
+    assert_eq!(multi_dec_fm["ruling"], "Failed review completely; re-triaging scope");
+    assert_eq!(multi_dec_fm["context"], "review -> ready");
+    assert!(multi_dec_content.contains("Transition: review -> ready"));
+}
+
+
