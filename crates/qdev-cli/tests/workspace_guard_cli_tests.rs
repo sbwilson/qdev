@@ -23,6 +23,8 @@ fn guarded_invocations() -> Vec<Vec<&'static str>> {
         vec!["validate"],
         vec!["sync"],
         vec!["doctor"],
+        vec!["claim", "story", "E1S1"],
+        vec!["release", "story", "E1S1"],
     ]
 }
 

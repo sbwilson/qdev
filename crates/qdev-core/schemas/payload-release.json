@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Story Release Payload Schema",
+  "description": "Output shape of `qdev release [id] --json`. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "story_id",
+    "released"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "story_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "released": {
+      "type": "boolean"
+    },
+    "decision_id": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false
+}

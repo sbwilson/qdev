@@ -157,6 +157,18 @@ pub fn acquire_write_lock(
     }
 }
 
+/// Acquires the workspace advisory write lock (`write.lock` in the cache directory).
+pub fn acquire_workspace_write_lock(
+    workspace_root: &Path,
+    storage: Option<&StorageConfig>,
+) -> Result<AdvisoryLockGuard, QdevError> {
+    let cache_dir_rel = storage
+        .map(|s| s.cache_dir.as_str())
+        .unwrap_or(".qdev/cache");
+    let lock_path = workspace_root.join(cache_dir_rel).join("write.lock");
+    acquire_write_lock(&lock_path, Duration::from_millis(5000))
+}
+
 /// Atomically writes content to `dest_path` by creating a temporary file in the target's
 /// parent directory and renaming it over the destination.
 pub fn write_file_atomic(dest_path: &Path, content: &str) -> Result<(), QdevError> {

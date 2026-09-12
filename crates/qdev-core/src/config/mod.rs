@@ -8,7 +8,7 @@ use std::process::Command;
 pub use source::{AnnotatedConfig, AnnotatedValue, ConfigSource};
 pub use types::{
     CommitMessagesConfig, Config, EnvironmentConfig, GateConfig, GitConfig, HygieneConfig,
-    IdentityConfig, ModelsConfig, ModuleConfig, PreferencesConfig, ProjectConfig, RegulatoryConfig,
+    IdentityConfig, LeasesConfig, ModelsConfig, ModuleConfig, PreferencesConfig, ProjectConfig, RegulatoryConfig,
     SoupConfig, StorageConfig, TeamsConfig, DEFAULT_CITATION_PATTERN,
 };
 
@@ -29,6 +29,7 @@ const ALLOWED_TOP_LEVEL_SECTIONS: &[&str] = &[
     "gates",
     "identity",
     "preferences",
+    "leases",
 ];
 
 /// The committed project configuration file.
@@ -71,6 +72,7 @@ pub fn validate_config_table(table: &toml::Table, filename: &str) -> Result<(), 
             "gates" => validate_gates_section(val, filename)?,
             "identity" => validate_identity_section(val, filename)?,
             "preferences" => validate_preferences_section(val, filename)?,
+            "leases" => validate_leases_section(val, filename)?,
             _ => unreachable!(),
         }
     }
@@ -765,6 +767,35 @@ fn validate_preferences_section(val: &toml::Value, filename: &str) -> Result<(),
     Ok(())
 }
 
+fn validate_leases_section(val: &toml::Value, filename: &str) -> Result<(), QdevError> {
+    let table = expect_table(val, "leases", filename)?;
+    let allowed = &["stale_age_days"];
+    check_unknown_keys(table, allowed, "leases", filename)?;
+
+    if let Some(v) = table.get("stale_age_days") {
+        if let Some(i) = v.as_integer() {
+            if i < 0 || i > u32::MAX as i64 {
+                return Err(QdevError::usage_error(format!(
+                    "Schema violation in {}: key 'stale_age_days' in [leases] must be a valid u32 integer",
+                    filename
+                ))
+                .with_details(serde_json::json!({
+                    "file": filename,
+                    "key": "leases.stale_age_days",
+                })));
+            }
+        } else {
+            return Err(type_mismatch_error(
+                "stale_age_days",
+                "leases",
+                "integer",
+                filename,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn expect_table<'a>(
     val: &'a toml::Value,
     key: &str,
@@ -1282,6 +1313,14 @@ pub fn merge_configs(
     sources.insert("preferences.editor".to_string(), src);
     if let Some(v) = ed_val.and_then(|v| v.as_str().map(|s| s.to_string())) {
         config.preferences.editor = Some(v);
+    }
+
+    // 15. [leases]
+    sources.insert("leases".to_string(), section_source("leases"));
+    let (stale_val, src) = get_val("leases", "stale_age_days");
+    sources.insert("leases.stale_age_days".to_string(), src);
+    if let Some(v) = stale_val.and_then(|v| v.as_integer().map(|i| i as u32)) {
+        config.leases.stale_age_days = v;
     }
 
     Ok(AnnotatedConfig::new(config, sources))

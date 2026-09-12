@@ -157,6 +157,8 @@ pub enum PayloadKind {
     Sync,
     Doctor,
     Transition,
+    Claim,
+    Release,
 }
 
 impl PayloadKind {
@@ -171,6 +173,8 @@ impl PayloadKind {
             PayloadKind::Sync => include_str!("../schemas/payload-sync.json"),
             PayloadKind::Doctor => include_str!("../schemas/payload-doctor.json"),
             PayloadKind::Transition => include_str!("../schemas/payload-transition.json"),
+            PayloadKind::Claim => include_str!("../schemas/payload-claim.json"),
+            PayloadKind::Release => include_str!("../schemas/payload-release.json"),
         }
     }
 
@@ -196,11 +200,13 @@ impl PayloadKind {
             PayloadKind::Sync => "sync",
             PayloadKind::Doctor => "doctor",
             PayloadKind::Transition => "transition",
+            PayloadKind::Claim => "claim",
+            PayloadKind::Release => "release",
         }
     }
 
     /// Returns an array of all currently-supported payload kinds.
-    pub const fn all() -> &'static [PayloadKind; 8] {
+    pub const fn all() -> &'static [PayloadKind; 10] {
         &[
             PayloadKind::Story,
             PayloadKind::Error,
@@ -210,6 +216,8 @@ impl PayloadKind {
             PayloadKind::Sync,
             PayloadKind::Doctor,
             PayloadKind::Transition,
+            PayloadKind::Claim,
+            PayloadKind::Release,
         ]
     }
 
@@ -236,6 +244,8 @@ impl PayloadKind {
             "sync" => Ok(PayloadKind::Sync),
             "doctor" => Ok(PayloadKind::Doctor),
             "transition" | "transitions" => Ok(PayloadKind::Transition),
+            "claim" | "claims" => Ok(PayloadKind::Claim),
+            "release" | "releases" => Ok(PayloadKind::Release),
             _ => Err(QdevError::usage_error(format!(
                 "Unknown payload name '{}'. Valid payload names: {}",
                 s,

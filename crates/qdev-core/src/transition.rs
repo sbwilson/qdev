@@ -651,6 +651,11 @@ impl TransitionEngine {
             Vec::new()
         };
 
+        // 10a. If target is terminal, auto-release story lease if present per Story 2.3
+        if target_state.is_terminal() {
+            let _ = crate::lease::auto_release_lease(&options.workspace_root, &id);
+        }
+
         // 10b. If transition is backward, record scratchpad entry and decision entity under write lock
         let decision_id = if transition_kind == TransitionKind::Backward {
             let justification = options.justification.as_deref().unwrap_or("").trim();

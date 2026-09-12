@@ -435,6 +435,16 @@ impl AnnotatedConfig {
             out.push_str(&format!("  editor = {:?} (source: {})\n", ed, src));
         }
 
+        out.push_str("\n[leases]\n");
+        let src = self
+            .sources
+            .get("leases.stale_age_days")
+            .unwrap_or(&ConfigSource::Default);
+        out.push_str(&format!(
+            "  stale_age_days = {} (source: {})\n",
+            self.config.leases.stale_age_days, src
+        ));
+
         out
     }
 }

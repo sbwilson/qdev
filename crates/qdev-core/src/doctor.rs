@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::ser::SerializeMap;
 use serde::Serialize;
 
-use crate::config::Config;
+use crate::config::{Config, LeasesConfig};
 use crate::errors::QdevError;
 use crate::store::sqlite::CACHE_SCHEMA_VERSION;
 use crate::store::{EntityFilter, Store};
@@ -256,9 +256,90 @@ impl DoctorSection for ValidationDoctorSection {
     }
 }
 
+/// Reports story lease health: total active lease count, stale threshold, stale lease count,
+/// and stale lease details for leases older than `stale_age_days`.
+pub struct LeasesDoctorSection {
+    workspace_root: PathBuf,
+    config: LeasesConfig,
+}
+
+impl LeasesDoctorSection {
+    pub fn new(workspace_root: PathBuf, config: LeasesConfig) -> Self {
+        Self {
+            workspace_root,
+            config,
+        }
+    }
+}
+
+impl DoctorSection for LeasesDoctorSection {
+    fn name(&self) -> &'static str {
+        "leases"
+    }
+
+    fn run(&self, _store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
+        match crate::lease::list_leases(&self.workspace_root) {
+            Ok(leases) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let stale_threshold_secs = (self.config.stale_age_days as i64) * 86400;
+
+                let mut stale_leases = Vec::new();
+                for lease in &leases {
+                    let started_at_ts = crate::lease::parse_iso8601_to_timestamp(&lease.started_at)
+                        .unwrap_or(0);
+                    let age_secs = (now - started_at_ts).max(0);
+                    let age_days = age_secs / 86400;
+                    if age_secs >= stale_threshold_secs {
+                        stale_leases.push(serde_json::json!({
+                            "story_id": lease.story_id,
+                            "holder": lease.holder,
+                            "worktree_path": lease.worktree_path,
+                            "started_at": lease.started_at,
+                            "age_days": age_days,
+                        }));
+                    }
+                }
+
+                stale_leases.sort_by(|a, b| {
+                    a["story_id"].as_str().cmp(&b["story_id"].as_str())
+                });
+
+                let active_count = leases.len();
+                let stale_count = stale_leases.len();
+
+                Ok(DoctorSectionReport {
+                    name: self.name().to_string(),
+                    fields: vec![
+                        ("status".to_string(), serde_json::Value::from("ok")),
+                        ("unavailable_reason".to_string(), serde_json::Value::Null),
+                        ("active_count".to_string(), serde_json::Value::from(active_count)),
+                        ("stale_count".to_string(), serde_json::Value::from(stale_count)),
+                        ("stale_age_days".to_string(), serde_json::Value::from(self.config.stale_age_days)),
+                        ("stale_leases".to_string(), serde_json::Value::from(stale_leases)),
+                    ],
+                })
+            }
+            Err(e) => Ok(DoctorSectionReport {
+                name: self.name().to_string(),
+                fields: vec![
+                    ("status".to_string(), serde_json::Value::from("unavailable")),
+                    ("unavailable_reason".to_string(), serde_json::Value::from(e.code())),
+                    ("active_count".to_string(), serde_json::Value::Null),
+                    ("stale_count".to_string(), serde_json::Value::Null),
+                    ("stale_age_days".to_string(), serde_json::Value::from(self.config.stale_age_days)),
+                    ("stale_leases".to_string(), serde_json::Value::Null),
+                ],
+            }),
+        }
+    }
+}
+
 /// Builds the default set of doctor sections, in the order `qdev doctor` reports them: `cache`
-/// first, then `validation`. This stays the single wiring point — later epics append their own
-/// `DoctorSection` impl here (gates, leases, hygiene, ...) and take whatever context they need
+/// first, then `validation`, then `leases`. This stays the single wiring point — later epics append
+/// their own `DoctorSection` impl here (gates, hygiene, ...) and take whatever context they need
 /// from the arguments already threaded through, without widening the trait.
 pub fn default_doctor_sections(
     workspace_root: &Path,
@@ -269,6 +350,10 @@ pub fn default_doctor_sections(
         Box::new(ValidationDoctorSection::new(
             workspace_root.to_path_buf(),
             config.clone(),
+        )),
+        Box::new(LeasesDoctorSection::new(
+            workspace_root.to_path_buf(),
+            config.leases.clone(),
         )),
     ]
 }

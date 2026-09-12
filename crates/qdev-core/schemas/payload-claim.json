@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Story Claim Payload Schema",
+  "description": "Output shape of `qdev claim <id> --json`. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "story_id",
+    "holder",
+    "author_type",
+    "worktree_path",
+    "branch",
+    "started_at",
+    "session_token"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "story_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "holder": {
+      "type": "string",
+      "minLength": 1
+    },
+    "author_type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "worktree_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "started_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "session_token": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false
+}

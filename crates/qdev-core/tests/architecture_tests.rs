@@ -171,6 +171,12 @@ const IDENTITY_RULE_SITES: &[(&str, &str, &str)] = &[
         "`create_backward_transition_decision` joins the directory the rule gives to the name \
          `canonical_file_name` gives — the rule spelled once, not a second answer",
     ),
+    (
+        "qdev-core/src/lease.rs",
+        "let dec_file_path = workspace_root.join(&rel_dir).join(&file_name);",
+        "`create_lease_override_decision` joins the directory the rule gives to the name \
+         `canonical_file_name` gives — the rule spelled once, not a second answer",
+    ),
 ];
 
 /// The rule's own helpers. A binding assigned from one of them holds an entity file name, so

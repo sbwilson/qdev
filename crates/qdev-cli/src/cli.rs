@@ -57,6 +57,52 @@ pub enum Commands {
     Sync(SyncArgs),
     /// Report structured cache and workspace diagnostics
     Doctor,
+    /// Claim a story lease
+    Claim(ClaimArgs),
+    /// Release a story lease
+    Release(ReleaseArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClaimArgs {
+    /// Target entity kind or identifier (e.g. "story" or "E12S4")
+    pub target: String,
+
+    /// Story identifier when kind is specified (e.g. "E12S4")
+    pub id: Option<String>,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReleaseArgs {
+    /// Target entity kind or identifier (e.g. "story" or "E12S4")
+    pub target: Option<String>,
+
+    /// Story identifier when kind is specified (e.g. "E12S4")
+    pub id: Option<String>,
+
+    /// Force release of another worker's or stale lease
+    #[arg(long = "force")]
+    pub force: bool,
+
+    /// Justification for breaking a lease with --force
+    #[arg(long = "justification")]
+    pub justification: Option<String>,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]

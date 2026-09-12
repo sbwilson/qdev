@@ -546,8 +546,8 @@ fn test_doctor_section_order_is_cache_then_validation_with_no_duplicate_keys() {
     let names: Vec<&str> = first.iter().map(|s| s["name"].as_str().unwrap()).collect();
     assert_eq!(
         names,
-        vec!["cache", "validation"],
-        "cache must be reported before validation"
+        vec!["cache", "validation", "leases"],
+        "cache must be reported before validation and validation before leases"
     );
     assert_eq!(
         first.iter().map(|s| s["name"].clone()).collect::<Vec<_>>(),
@@ -566,9 +566,10 @@ fn test_doctor_section_order_is_cache_then_validation_with_no_duplicate_keys() {
     let raw = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let cache_at = raw.find("\"cache\"").unwrap();
     let validation_at = raw.find("\"validation\"").unwrap();
+    let leases_at = raw.find("\"leases\"").unwrap();
     assert!(
-        cache_at < validation_at,
-        "sections must be serialized cache-first: {}",
+        cache_at < validation_at && validation_at < leases_at,
+        "sections must be serialized cache-first then validation then leases: {}",
         raw
     );
     // Asserted per section rather than as a global count, so a third section added by a later

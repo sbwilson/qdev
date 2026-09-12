@@ -318,6 +318,25 @@ impl Default for PreferencesConfig {
     }
 }
 
+/// Leases configuration section `[leases]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeasesConfig {
+    #[serde(default = "default_stale_age_days")]
+    pub stale_age_days: u32,
+}
+
+fn default_stale_age_days() -> u32 {
+    3
+}
+
+impl Default for LeasesConfig {
+    fn default() -> Self {
+        Self {
+            stale_age_days: default_stale_age_days(),
+        }
+    }
+}
+
 /// Universal typed configuration schema combining all 14 sections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -349,4 +368,6 @@ pub struct Config {
     pub identity: IdentityConfig,
     #[serde(default)]
     pub preferences: PreferencesConfig,
+    #[serde(default)]
+    pub leases: LeasesConfig,
 }

@@ -83,11 +83,11 @@ fn test_validation_section_reports_zero_for_an_empty_healthy_cache() {
 }
 
 /// `default_doctor_sections` stays the single wiring point, and reports `cache` before
-/// `validation` — the order `qdev doctor --json` serializes them in.
+/// `validation` before `leases` — the order `qdev doctor --json` serializes them in.
 #[test]
 fn test_default_doctor_sections_order() {
     let temp = TempDir::new().unwrap();
     let sections = qdev_core::default_doctor_sections(temp.path(), &Config::default());
     let names: Vec<&str> = sections.iter().map(|s| s.name()).collect();
-    assert_eq!(names, vec!["cache", "validation"]);
+    assert_eq!(names, vec!["cache", "validation", "leases"]);
 }

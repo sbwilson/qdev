@@ -1,0 +1,2608 @@
+diff --git a/crates/qdev-cli/src/cli.rs b/crates/qdev-cli/src/cli.rs
+index 713840b..1d32b2e 100644
+--- a/crates/qdev-cli/src/cli.rs
++++ b/crates/qdev-cli/src/cli.rs
+@@ -57,6 +57,52 @@ pub enum Commands {
+     Sync(SyncArgs),
+     /// Report structured cache and workspace diagnostics
+     Doctor,
++    /// Claim a story lease
++    Claim(ClaimArgs),
++    /// Release a story lease
++    Release(ReleaseArgs),
++}
++
++#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
++pub struct ClaimArgs {
++    /// Target entity kind or identifier (e.g. "story" or "E12S4")
++    pub target: String,
++
++    /// Story identifier when kind is specified (e.g. "E12S4")
++    pub id: Option<String>,
++
++    /// Attribution author type override ('human' or 'agent')
++    #[arg(long = "author-type")]
++    pub author_type: Option<String>,
++
++    /// Attribution developer/agent ID override
++    #[arg(long = "author-id")]
++    pub author_id: Option<String>,
++}
++
++#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
++pub struct ReleaseArgs {
++    /// Target entity kind or identifier (e.g. "story" or "E12S4")
++    pub target: Option<String>,
++
++    /// Story identifier when kind is specified (e.g. "E12S4")
++    pub id: Option<String>,
++
++    /// Force release of another worker's or stale lease
++    #[arg(long = "force")]
++    pub force: bool,
++
++    /// Justification for breaking a lease with --force
++    #[arg(long = "justification")]
++    pub justification: Option<String>,
++
++    /// Attribution author type override ('human' or 'agent')
++    #[arg(long = "author-type")]
++    pub author_type: Option<String>,
++
++    /// Attribution developer/agent ID override
++    #[arg(long = "author-id")]
++    pub author_id: Option<String>,
+ }
+ 
+ #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+diff --git a/crates/qdev-cli/src/main.rs b/crates/qdev-cli/src/main.rs
+index 9da0682..9eb5a57 100644
+--- a/crates/qdev-cli/src/main.rs
++++ b/crates/qdev-cli/src/main.rs
+@@ -281,6 +281,12 @@ fn run(raw_args: &[String]) -> ExitCode {
+             handle_sync(sync_args, &annotated_config, &cli, &output, &current_dir)
+         }
+         Some(Commands::Doctor) => handle_doctor(&annotated_config, &cli, &output, &current_dir),
++        Some(Commands::Claim(ref claim_args)) => {
++            handle_claim(claim_args, &annotated_config, &cli, &output, &current_dir)
++        }
++        Some(Commands::Release(ref release_args)) => {
++            handle_release(release_args, &annotated_config, &cli, &output, &current_dir)
++        }
+         Some(Commands::Init(_)) => unreachable!(),
+         Some(Commands::Schema(_)) => unreachable!(),
+     }
+@@ -360,7 +366,9 @@ fn requires_workspace(command: Option<&Commands>) -> bool {
+         | Some(Commands::Graph(_))
+         | Some(Commands::Validate(_))
+         | Some(Commands::Sync(_))
+-        | Some(Commands::Doctor) => true,
++        | Some(Commands::Doctor)
++        | Some(Commands::Claim(_))
++        | Some(Commands::Release(_)) => true,
+     }
+ }
+ 
+@@ -3402,3 +3410,216 @@ fn truncate_field(s: &str, max: usize) -> String {
+     let truncated: String = s.chars().take(max - 1).collect();
+     format!("{}…", truncated)
+ }
++
++fn handle_claim(
++    args: &cli::ClaimArgs,
++    annotated_config: &qdev_core::AnnotatedConfig,
++    cli: &Cli,
++    output: &OutputEmitter,
++    current_dir: &std::path::Path,
++) -> ExitCode {
++    let root = qdev_core::find_workspace_root(current_dir);
++    let (kind, story_id) = match resolve_kind_and_id(&args.target, args.id.as_deref()) {
++        Ok(res) => res,
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    };
++
++    let opt_store = open_query_store(&root, annotated_config).ok();
++
++    if let Some(k) = kind {
++        if k != qdev_core::EntityKind::Story {
++            let err = QdevError::usage_error("Only story entities can be leased");
++            let _ = output.emit_error(&err);
++            return err.exit_code();
++        }
++    } else if let Some(ref store) = opt_store {
++        if let Ok(Some(record)) = store.get_entity(&story_id) {
++            if record.kind != qdev_core::EntityKind::Story {
++                let err = QdevError::usage_error("Only story entities can be leased");
++                let _ = output.emit_error(&err);
++                return err.exit_code();
++            }
++        }
++    } else if let Ok((k, _, _)) = qdev_core::resolve_entity_file(
++        &root,
++        None,
++        &story_id,
++        Some(&annotated_config.config.storage),
++    ) {
++        if k != qdev_core::EntityKind::Story {
++            let err = QdevError::usage_error("Only story entities can be leased");
++            let _ = output.emit_error(&err);
++            return err.exit_code();
++        }
++    }
++
++    let author = match resolve_author(
++        args.author_type.as_deref(),
++        args.author_id.as_deref(),
++        annotated_config,
++        &root,
++    ) {
++        Ok(a) => a,
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    };
++
++    match qdev_core::claim_story(
++        &root,
++        &story_id,
++        &author,
++        Some(&annotated_config.config.storage),
++        opt_store.as_ref().map(|s| s as &dyn qdev_core::Store),
++    ) {
++        Ok(lease) => {
++            if cli.json {
++                let envelope = JsonEnvelope::new(lease);
++                if let Err(e) = output.emit_envelope(&envelope) {
++                    let err = QdevError::infrastructure_failure(
++                        "io_error",
++                        format!("Failed to emit claim envelope: {}", e),
++                    );
++                    let _ = output.emit_error(&err);
++                    return ExitCode::InfrastructureFailure;
++                }
++            } else {
++                let msg = format!(
++                    "Claimed lease on story {}\nexport QDEV_SESSION={}\n",
++                    story_id, lease.session_token
++                );
++                if let Err(e) = output.emit_text(&msg) {
++                    let err = QdevError::infrastructure_failure(
++                        "io_error",
++                        format!("Failed to emit claim output: {}", e),
++                    );
++                    let _ = output.emit_error(&err);
++                    return ExitCode::InfrastructureFailure;
++                }
++            }
++            ExitCode::Success
++        }
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            e.exit_code()
++        }
++    }
++}
++
++fn handle_release(
++    args: &cli::ReleaseArgs,
++    annotated_config: &qdev_core::AnnotatedConfig,
++    cli: &Cli,
++    output: &OutputEmitter,
++    current_dir: &std::path::Path,
++) -> ExitCode {
++    let root = qdev_core::find_workspace_root(current_dir);
++
++    let opt_store = open_query_store(&root, annotated_config).ok();
++
++    let story_id = if let Some(ref target) = args.target {
++        let (kind, id) = match resolve_kind_and_id(target, args.id.as_deref()) {
++            Ok(res) => res,
++            Err(e) => {
++                let _ = output.emit_error(&e);
++                return e.exit_code();
++            }
++        };
++
++        if let Some(k) = kind {
++            if k != qdev_core::EntityKind::Story {
++                let err = QdevError::usage_error("Only story entities can be leased");
++                let _ = output.emit_error(&err);
++                return err.exit_code();
++            }
++        } else if let Some(ref store) = opt_store {
++            if let Ok(Some(record)) = store.get_entity(&id) {
++                if record.kind != qdev_core::EntityKind::Story {
++                    let err = QdevError::usage_error("Only story entities can be leased");
++                    let _ = output.emit_error(&err);
++                    return err.exit_code();
++                }
++            }
++        } else if let Ok((k, _, _)) = qdev_core::resolve_entity_file(
++            &root,
++            None,
++            &id,
++            Some(&annotated_config.config.storage),
++        ) {
++            if k != qdev_core::EntityKind::Story {
++                let err = QdevError::usage_error("Only story entities can be leased");
++                let _ = output.emit_error(&err);
++                return err.exit_code();
++            }
++        }
++        id
++    } else {
++        match qdev_core::find_active_lease(&root) {
++            Ok(lease) => lease.story_id,
++            Err(e) => {
++                let _ = output.emit_error(&e);
++                return e.exit_code();
++            }
++        }
++    };
++
++    let author = match resolve_author(
++        args.author_type.as_deref(),
++        args.author_id.as_deref(),
++        annotated_config,
++        &root,
++    ) {
++        Ok(a) => a,
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    };
++
++    match qdev_core::release_story(
++        &root,
++        &story_id,
++        &author,
++        args.force,
++        args.justification.as_deref(),
++        Some(&annotated_config.config.storage),
++        opt_store.as_ref().map(|s| s as &dyn qdev_core::Store),
++    ) {
++        Ok(res) => {
++            if cli.json {
++                let envelope = JsonEnvelope::new(res);
++                if let Err(e) = output.emit_envelope(&envelope) {
++                    let err = QdevError::infrastructure_failure(
++                        "io_error",
++                        format!("Failed to emit release envelope: {}", e),
++                    );
++                    let _ = output.emit_error(&err);
++                    return ExitCode::InfrastructureFailure;
++                }
++            } else {
++                let mut msg = format!("Released lease on story {}\n", res.story_id);
++                if let Some(ref dec_id) = res.decision_id {
++                    msg.push_str(&format!("Recorded decision: {}\n", dec_id));
++                }
++                if let Err(e) = output.emit_text(&msg) {
++                    let err = QdevError::infrastructure_failure(
++                        "io_error",
++                        format!("Failed to emit release output: {}", e),
++                    );
++                    let _ = output.emit_error(&err);
++                    return ExitCode::InfrastructureFailure;
++                }
++            }
++            ExitCode::Success
++        }
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            e.exit_code()
++        }
++    }
++}
++
+diff --git a/crates/qdev-cli/tests/doctor_cli_tests.rs b/crates/qdev-cli/tests/doctor_cli_tests.rs
+index 0ef8a8f..7b30b4d 100644
+--- a/crates/qdev-cli/tests/doctor_cli_tests.rs
++++ b/crates/qdev-cli/tests/doctor_cli_tests.rs
+@@ -546,8 +546,8 @@ fn test_doctor_section_order_is_cache_then_validation_with_no_duplicate_keys() {
+     let names: Vec<&str> = first.iter().map(|s| s["name"].as_str().unwrap()).collect();
+     assert_eq!(
+         names,
+-        vec!["cache", "validation"],
+-        "cache must be reported before validation"
++        vec!["cache", "validation", "leases"],
++        "cache must be reported before validation and validation before leases"
+     );
+     assert_eq!(
+         first.iter().map(|s| s["name"].clone()).collect::<Vec<_>>(),
+@@ -566,9 +566,10 @@ fn test_doctor_section_order_is_cache_then_validation_with_no_duplicate_keys() {
+     let raw = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+     let cache_at = raw.find("\"cache\"").unwrap();
+     let validation_at = raw.find("\"validation\"").unwrap();
++    let leases_at = raw.find("\"leases\"").unwrap();
+     assert!(
+-        cache_at < validation_at,
+-        "sections must be serialized cache-first: {}",
++        cache_at < validation_at && validation_at < leases_at,
++        "sections must be serialized cache-first then validation then leases: {}",
+         raw
+     );
+     // Asserted per section rather than as a global count, so a third section added by a later
+diff --git a/crates/qdev-cli/tests/workspace_guard_cli_tests.rs b/crates/qdev-cli/tests/workspace_guard_cli_tests.rs
+index 17ecc1c..a74963f 100644
+--- a/crates/qdev-cli/tests/workspace_guard_cli_tests.rs
++++ b/crates/qdev-cli/tests/workspace_guard_cli_tests.rs
+@@ -23,6 +23,8 @@ fn guarded_invocations() -> Vec<Vec<&'static str>> {
+         vec!["validate"],
+         vec!["sync"],
+         vec!["doctor"],
++        vec!["claim", "story", "E1S1"],
++        vec!["release", "story", "E1S1"],
+     ]
+ }
+ 
+diff --git a/crates/qdev-core/schemas/payload-doctor.json b/crates/qdev-core/schemas/payload-doctor.json
+index 7d10bc9..0b03f1d 100644
+--- a/crates/qdev-core/schemas/payload-doctor.json
++++ b/crates/qdev-core/schemas/payload-doctor.json
+@@ -99,6 +99,60 @@
+                 }
+               }
+             }
++          },
++          {
++            "if": {
++              "properties": { "name": { "const": "leases" } },
++              "required": ["name"]
++            },
++            "then": {
++              "required": [
++                "status",
++                "unavailable_reason",
++                "active_count",
++                "stale_count",
++                "stale_age_days",
++                "stale_leases"
++              ],
++              "properties": {
++                "status": {
++                  "type": "string",
++                  "enum": ["ok", "unavailable"],
++                  "description": "\"unavailable\" when the leases diagnostic pass could not complete."
++                },
++                "unavailable_reason": {
++                  "type": ["string", "null"],
++                  "description": "The error code that prevented the pass from completing; null when status is \"ok\"."
++                },
++                "active_count": {
++                  "type": ["integer", "null"],
++                  "description": "The total number of active story leases discovered across local and shared git locations. Null when the pass could not complete."
++                },
++                "stale_count": {
++                  "type": ["integer", "null"],
++                  "description": "The number of active leases older than stale_age_days. Null when the pass could not complete."
++                },
++                "stale_age_days": {
++                  "type": "integer",
++                  "description": "The configured threshold in days after which a lease is considered stale."
++                },
++                "stale_leases": {
++                  "type": ["array", "null"],
++                  "items": {
++                    "type": "object",
++                    "required": ["story_id", "holder", "worktree_path", "started_at", "age_days"],
++                    "properties": {
++                      "story_id": { "type": "string" },
++                      "holder": { "type": "string" },
++                      "worktree_path": { "type": "string" },
++                      "started_at": { "type": "string" },
++                      "age_days": { "type": "integer" }
++                    }
++                  },
++                  "description": "List of stale lease records older than stale_age_days."
++                }
++              }
++            }
+           }
+         ]
+       }
+diff --git a/crates/qdev-core/src/config/mod.rs b/crates/qdev-core/src/config/mod.rs
+index 59baa09..a8b1e47 100644
+--- a/crates/qdev-core/src/config/mod.rs
++++ b/crates/qdev-core/src/config/mod.rs
+@@ -8,7 +8,7 @@ use std::process::Command;
+ pub use source::{AnnotatedConfig, AnnotatedValue, ConfigSource};
+ pub use types::{
+     CommitMessagesConfig, Config, EnvironmentConfig, GateConfig, GitConfig, HygieneConfig,
+-    IdentityConfig, ModelsConfig, ModuleConfig, PreferencesConfig, ProjectConfig, RegulatoryConfig,
++    IdentityConfig, LeasesConfig, ModelsConfig, ModuleConfig, PreferencesConfig, ProjectConfig, RegulatoryConfig,
+     SoupConfig, StorageConfig, TeamsConfig, DEFAULT_CITATION_PATTERN,
+ };
+ 
+@@ -29,6 +29,7 @@ const ALLOWED_TOP_LEVEL_SECTIONS: &[&str] = &[
+     "gates",
+     "identity",
+     "preferences",
++    "leases",
+ ];
+ 
+ /// The committed project configuration file.
+@@ -71,6 +72,7 @@ pub fn validate_config_table(table: &toml::Table, filename: &str) -> Result<(),
+             "gates" => validate_gates_section(val, filename)?,
+             "identity" => validate_identity_section(val, filename)?,
+             "preferences" => validate_preferences_section(val, filename)?,
++            "leases" => validate_leases_section(val, filename)?,
+             _ => unreachable!(),
+         }
+     }
+@@ -765,6 +767,35 @@ fn validate_preferences_section(val: &toml::Value, filename: &str) -> Result<(),
+     Ok(())
+ }
+ 
++fn validate_leases_section(val: &toml::Value, filename: &str) -> Result<(), QdevError> {
++    let table = expect_table(val, "leases", filename)?;
++    let allowed = &["stale_age_days"];
++    check_unknown_keys(table, allowed, "leases", filename)?;
++
++    if let Some(v) = table.get("stale_age_days") {
++        if let Some(i) = v.as_integer() {
++            if i < 0 || i > u32::MAX as i64 {
++                return Err(QdevError::usage_error(format!(
++                    "Schema violation in {}: key 'stale_age_days' in [leases] must be a valid u32 integer",
++                    filename
++                ))
++                .with_details(serde_json::json!({
++                    "file": filename,
++                    "key": "leases.stale_age_days",
++                })));
++            }
++        } else {
++            return Err(type_mismatch_error(
++                "stale_age_days",
++                "leases",
++                "integer",
++                filename,
++            ));
++        }
++    }
++    Ok(())
++}
++
+ fn expect_table<'a>(
+     val: &'a toml::Value,
+     key: &str,
+@@ -1284,6 +1315,14 @@ pub fn merge_configs(
+         config.preferences.editor = Some(v);
+     }
+ 
++    // 15. [leases]
++    sources.insert("leases".to_string(), section_source("leases"));
++    let (stale_val, src) = get_val("leases", "stale_age_days");
++    sources.insert("leases.stale_age_days".to_string(), src);
++    if let Some(v) = stale_val.and_then(|v| v.as_integer().map(|i| i as u32)) {
++        config.leases.stale_age_days = v;
++    }
++
+     Ok(AnnotatedConfig::new(config, sources))
+ }
+ 
+diff --git a/crates/qdev-core/src/config/source.rs b/crates/qdev-core/src/config/source.rs
+index eef2dbb..1de751c 100644
+--- a/crates/qdev-core/src/config/source.rs
++++ b/crates/qdev-core/src/config/source.rs
+@@ -435,6 +435,16 @@ impl AnnotatedConfig {
+             out.push_str(&format!("  editor = {:?} (source: {})\n", ed, src));
+         }
+ 
++        out.push_str("\n[leases]\n");
++        let src = self
++            .sources
++            .get("leases.stale_age_days")
++            .unwrap_or(&ConfigSource::Default);
++        out.push_str(&format!(
++            "  stale_age_days = {} (source: {})\n",
++            self.config.leases.stale_age_days, src
++        ));
++
+         out
+     }
+ }
+diff --git a/crates/qdev-core/src/config/types.rs b/crates/qdev-core/src/config/types.rs
+index 2485e28..8522949 100644
+--- a/crates/qdev-core/src/config/types.rs
++++ b/crates/qdev-core/src/config/types.rs
+@@ -318,6 +318,25 @@ impl Default for PreferencesConfig {
+     }
+ }
+ 
++/// Leases configuration section `[leases]`.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct LeasesConfig {
++    #[serde(default = "default_stale_age_days")]
++    pub stale_age_days: u32,
++}
++
++fn default_stale_age_days() -> u32 {
++    3
++}
++
++impl Default for LeasesConfig {
++    fn default() -> Self {
++        Self {
++            stale_age_days: default_stale_age_days(),
++        }
++    }
++}
++
+ /// Universal typed configuration schema combining all 14 sections.
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+ pub struct Config {
+@@ -349,4 +368,6 @@ pub struct Config {
+     pub identity: IdentityConfig,
+     #[serde(default)]
+     pub preferences: PreferencesConfig,
++    #[serde(default)]
++    pub leases: LeasesConfig,
+ }
+diff --git a/crates/qdev-core/src/doctor.rs b/crates/qdev-core/src/doctor.rs
+index a4f2877..1ef927b 100644
+--- a/crates/qdev-core/src/doctor.rs
++++ b/crates/qdev-core/src/doctor.rs
+@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
+ use serde::ser::SerializeMap;
+ use serde::Serialize;
+ 
+-use crate::config::Config;
++use crate::config::{Config, LeasesConfig};
+ use crate::errors::QdevError;
+ use crate::store::sqlite::CACHE_SCHEMA_VERSION;
+ use crate::store::{EntityFilter, Store};
+@@ -256,9 +256,90 @@ impl DoctorSection for ValidationDoctorSection {
+     }
+ }
+ 
++/// Reports story lease health: total active lease count, stale threshold, stale lease count,
++/// and stale lease details for leases older than `stale_age_days`.
++pub struct LeasesDoctorSection {
++    workspace_root: PathBuf,
++    config: LeasesConfig,
++}
++
++impl LeasesDoctorSection {
++    pub fn new(workspace_root: PathBuf, config: LeasesConfig) -> Self {
++        Self {
++            workspace_root,
++            config,
++        }
++    }
++}
++
++impl DoctorSection for LeasesDoctorSection {
++    fn name(&self) -> &'static str {
++        "leases"
++    }
++
++    fn run(&self, _store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
++        match crate::lease::list_leases(&self.workspace_root) {
++            Ok(leases) => {
++                let now = std::time::SystemTime::now()
++                    .duration_since(std::time::UNIX_EPOCH)
++                    .map(|d| d.as_secs() as i64)
++                    .unwrap_or(0);
++                let stale_threshold_secs = (self.config.stale_age_days as i64) * 86400;
++
++                let mut stale_leases = Vec::new();
++                for lease in &leases {
++                    let started_at_ts = crate::lease::parse_iso8601_to_timestamp(&lease.started_at)
++                        .unwrap_or(0);
++                    let age_secs = (now - started_at_ts).max(0);
++                    let age_days = age_secs / 86400;
++                    if age_secs >= stale_threshold_secs {
++                        stale_leases.push(serde_json::json!({
++                            "story_id": lease.story_id,
++                            "holder": lease.holder,
++                            "worktree_path": lease.worktree_path,
++                            "started_at": lease.started_at,
++                            "age_days": age_days,
++                        }));
++                    }
++                }
++
++                stale_leases.sort_by(|a, b| {
++                    a["story_id"].as_str().cmp(&b["story_id"].as_str())
++                });
++
++                let active_count = leases.len();
++                let stale_count = stale_leases.len();
++
++                Ok(DoctorSectionReport {
++                    name: self.name().to_string(),
++                    fields: vec![
++                        ("status".to_string(), serde_json::Value::from("ok")),
++                        ("unavailable_reason".to_string(), serde_json::Value::Null),
++                        ("active_count".to_string(), serde_json::Value::from(active_count)),
++                        ("stale_count".to_string(), serde_json::Value::from(stale_count)),
++                        ("stale_age_days".to_string(), serde_json::Value::from(self.config.stale_age_days)),
++                        ("stale_leases".to_string(), serde_json::Value::from(stale_leases)),
++                    ],
++                })
++            }
++            Err(e) => Ok(DoctorSectionReport {
++                name: self.name().to_string(),
++                fields: vec![
++                    ("status".to_string(), serde_json::Value::from("unavailable")),
++                    ("unavailable_reason".to_string(), serde_json::Value::from(e.code())),
++                    ("active_count".to_string(), serde_json::Value::Null),
++                    ("stale_count".to_string(), serde_json::Value::Null),
++                    ("stale_age_days".to_string(), serde_json::Value::from(self.config.stale_age_days)),
++                    ("stale_leases".to_string(), serde_json::Value::Null),
++                ],
++            }),
++        }
++    }
++}
++
+ /// Builds the default set of doctor sections, in the order `qdev doctor` reports them: `cache`
+-/// first, then `validation`. This stays the single wiring point — later epics append their own
+-/// `DoctorSection` impl here (gates, leases, hygiene, ...) and take whatever context they need
++/// first, then `validation`, then `leases`. This stays the single wiring point — later epics append
++/// their own `DoctorSection` impl here (gates, hygiene, ...) and take whatever context they need
+ /// from the arguments already threaded through, without widening the trait.
+ pub fn default_doctor_sections(
+     workspace_root: &Path,
+@@ -270,5 +351,9 @@ pub fn default_doctor_sections(
+             workspace_root.to_path_buf(),
+             config.clone(),
+         )),
++        Box::new(LeasesDoctorSection::new(
++            workspace_root.to_path_buf(),
++            config.leases.clone(),
++        )),
+     ]
+ }
+diff --git a/crates/qdev-core/src/lib.rs b/crates/qdev-core/src/lib.rs
+index c674453..a1f57dc 100644
+--- a/crates/qdev-core/src/lib.rs
++++ b/crates/qdev-core/src/lib.rs
+@@ -6,6 +6,7 @@ pub mod errors;
+ pub mod id;
+ pub mod init;
+ pub mod interactivity;
++pub mod lease;
+ pub mod query;
+ pub mod schema;
+ pub mod store;
+@@ -13,6 +14,13 @@ pub mod transition;
+ pub mod validate;
+ pub mod write;
+ 
++pub use lease::{
++    auto_release_lease, claim_story, create_lease_override_decision, discover_git_branch,
++    discover_git_common_dir, find_active_lease, find_workspace_leases, generate_session_token,
++    get_lease, list_leases, parse_iso8601_to_timestamp, release_story, ReleasePayload,
++    StoryLease,
++};
++
+ pub use store::{
+     create_schema, determine_entity_kind, drop_all_user_tables, ensure_cache, inspect_cache_schema,
+     newer_cache_conflict, stamp_cache_version, CacheSchemaStatus, ConstraintRecord, DecisionRecord,
+@@ -29,14 +37,14 @@ pub use dag::{
+ 
+ pub use doctor::{
+     default_doctor_sections, CacheDoctorSection, DoctorSection, DoctorSectionReport,
+-    ValidationDoctorSection,
++    LeasesDoctorSection, ValidationDoctorSection,
+ };
+ 
+ pub use config::{
+     find_workspace_root, load_config, load_project_storage, merge_configs, resolve_git_email,
+     validate_config_table, AnnotatedConfig, AnnotatedValue, CommitMessagesConfig, Config,
+     ConfigSource, EnvironmentConfig, GateConfig, GitConfig, HygieneConfig, IdentityConfig,
+-    ModelsConfig, ModuleConfig, PreferencesConfig, ProjectConfig, RegulatoryConfig, SoupConfig,
++    LeasesConfig, ModelsConfig, ModuleConfig, PreferencesConfig, ProjectConfig, RegulatoryConfig, SoupConfig,
+     StorageConfig, TeamsConfig, DEFAULT_CITATION_PATTERN, LOCAL_CONFIG_FILENAME,
+     PROJECT_CONFIG_FILENAME,
+ };
+diff --git a/crates/qdev-core/src/schema.rs b/crates/qdev-core/src/schema.rs
+index 0acfb6a..6884e89 100644
+--- a/crates/qdev-core/src/schema.rs
++++ b/crates/qdev-core/src/schema.rs
+@@ -157,6 +157,8 @@ pub enum PayloadKind {
+     Sync,
+     Doctor,
+     Transition,
++    Claim,
++    Release,
+ }
+ 
+ impl PayloadKind {
+@@ -171,6 +173,8 @@ impl PayloadKind {
+             PayloadKind::Sync => include_str!("../schemas/payload-sync.json"),
+             PayloadKind::Doctor => include_str!("../schemas/payload-doctor.json"),
+             PayloadKind::Transition => include_str!("../schemas/payload-transition.json"),
++            PayloadKind::Claim => include_str!("../schemas/payload-claim.json"),
++            PayloadKind::Release => include_str!("../schemas/payload-release.json"),
+         }
+     }
+ 
+@@ -196,11 +200,13 @@ impl PayloadKind {
+             PayloadKind::Sync => "sync",
+             PayloadKind::Doctor => "doctor",
+             PayloadKind::Transition => "transition",
++            PayloadKind::Claim => "claim",
++            PayloadKind::Release => "release",
+         }
+     }
+ 
+     /// Returns an array of all currently-supported payload kinds.
+-    pub const fn all() -> &'static [PayloadKind; 8] {
++    pub const fn all() -> &'static [PayloadKind; 10] {
+         &[
+             PayloadKind::Story,
+             PayloadKind::Error,
+@@ -210,6 +216,8 @@ impl PayloadKind {
+             PayloadKind::Sync,
+             PayloadKind::Doctor,
+             PayloadKind::Transition,
++            PayloadKind::Claim,
++            PayloadKind::Release,
+         ]
+     }
+ 
+@@ -236,6 +244,8 @@ impl PayloadKind {
+             "sync" => Ok(PayloadKind::Sync),
+             "doctor" => Ok(PayloadKind::Doctor),
+             "transition" | "transitions" => Ok(PayloadKind::Transition),
++            "claim" | "claims" => Ok(PayloadKind::Claim),
++            "release" | "releases" => Ok(PayloadKind::Release),
+             _ => Err(QdevError::usage_error(format!(
+                 "Unknown payload name '{}'. Valid payload names: {}",
+                 s,
+diff --git a/crates/qdev-core/src/transition.rs b/crates/qdev-core/src/transition.rs
+index 09f9a55..449ab05 100644
+--- a/crates/qdev-core/src/transition.rs
++++ b/crates/qdev-core/src/transition.rs
+@@ -651,6 +651,11 @@ impl TransitionEngine {
+             Vec::new()
+         };
+ 
++        // 10a. If target is terminal, auto-release story lease if present per Story 2.3
++        if target_state.is_terminal() {
++            let _ = crate::lease::auto_release_lease(&options.workspace_root, &id);
++        }
++
+         // 10b. If transition is backward, record scratchpad entry and decision entity under write lock
+         let decision_id = if transition_kind == TransitionKind::Backward {
+             let justification = options.justification.as_deref().unwrap_or("").trim();
+diff --git a/crates/qdev-core/src/write.rs b/crates/qdev-core/src/write.rs
+index d4ca41f..704e90a 100644
+--- a/crates/qdev-core/src/write.rs
++++ b/crates/qdev-core/src/write.rs
+@@ -157,6 +157,18 @@ pub fn acquire_write_lock(
+     }
+ }
+ 
++/// Acquires the workspace advisory write lock (`write.lock` in the cache directory).
++pub fn acquire_workspace_write_lock(
++    workspace_root: &Path,
++    storage: Option<&StorageConfig>,
++) -> Result<AdvisoryLockGuard, QdevError> {
++    let cache_dir_rel = storage
++        .map(|s| s.cache_dir.as_str())
++        .unwrap_or(".qdev/cache");
++    let lock_path = workspace_root.join(cache_dir_rel).join("write.lock");
++    acquire_write_lock(&lock_path, Duration::from_millis(5000))
++}
++
+ /// Atomically writes content to `dest_path` by creating a temporary file in the target's
+ /// parent directory and renaming it over the destination.
+ pub fn write_file_atomic(dest_path: &Path, content: &str) -> Result<(), QdevError> {
+diff --git a/crates/qdev-core/tests/architecture_tests.rs b/crates/qdev-core/tests/architecture_tests.rs
+index 374cee8..b46ae25 100644
+--- a/crates/qdev-core/tests/architecture_tests.rs
++++ b/crates/qdev-core/tests/architecture_tests.rs
+@@ -171,6 +171,12 @@ const IDENTITY_RULE_SITES: &[(&str, &str, &str)] = &[
+         "`create_backward_transition_decision` joins the directory the rule gives to the name \
+          `canonical_file_name` gives — the rule spelled once, not a second answer",
+     ),
++    (
++        "qdev-core/src/lease.rs",
++        "let dec_file_path = workspace_root.join(&rel_dir).join(&file_name);",
++        "`create_lease_override_decision` joins the directory the rule gives to the name \
++         `canonical_file_name` gives — the rule spelled once, not a second answer",
++    ),
+ ];
+ 
+ /// The rule's own helpers. A binding assigned from one of them holds an entity file name, so
+diff --git a/crates/qdev-core/tests/doctor_tests.rs b/crates/qdev-core/tests/doctor_tests.rs
+index d0fb093..bff124b 100644
+--- a/crates/qdev-core/tests/doctor_tests.rs
++++ b/crates/qdev-core/tests/doctor_tests.rs
+@@ -83,11 +83,11 @@ fn test_validation_section_reports_zero_for_an_empty_healthy_cache() {
+ }
+ 
+ /// `default_doctor_sections` stays the single wiring point, and reports `cache` before
+-/// `validation` — the order `qdev doctor --json` serializes them in.
++/// `validation` before `leases` — the order `qdev doctor --json` serializes them in.
+ #[test]
+ fn test_default_doctor_sections_order() {
+     let temp = TempDir::new().unwrap();
+     let sections = qdev_core::default_doctor_sections(temp.path(), &Config::default());
+     let names: Vec<&str> = sections.iter().map(|s| s.name()).collect();
+-    assert_eq!(names, vec!["cache", "validation"]);
++    assert_eq!(names, vec!["cache", "validation", "leases"]);
+ }
+
+diff --git a/crates/qdev-core/schemas/payload-claim.json b/crates/qdev-core/schemas/payload-claim.json
+new file mode 100644
+index 0000000..5d136cf
+--- /dev/null
++++ b/crates/qdev-core/schemas/payload-claim.json
+@@ -0,0 +1,50 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "Story Claim Payload Schema",
++  "description": "Output shape of `qdev claim <id> --json`. Schema changes follow semver on schema_version; additive fields do not bump the major.",
++  "type": "object",
++  "required": [
++    "schema_version",
++    "story_id",
++    "holder",
++    "author_type",
++    "worktree_path",
++    "branch",
++    "started_at",
++    "session_token"
++  ],
++  "properties": {
++    "schema_version": {
++      "type": "string"
++    },
++    "story_id": {
++      "type": "string",
++      "minLength": 1
++    },
++    "holder": {
++      "type": "string",
++      "minLength": 1
++    },
++    "author_type": {
++      "type": "string",
++      "minLength": 1
++    },
++    "worktree_path": {
++      "type": "string",
++      "minLength": 1
++    },
++    "branch": {
++      "type": "string",
++      "minLength": 1
++    },
++    "started_at": {
++      "type": "string",
++      "minLength": 1
++    },
++    "session_token": {
++      "type": "string",
++      "minLength": 1
++    }
++  },
++  "additionalProperties": false
++}
+
+diff --git a/crates/qdev-core/schemas/payload-release.json b/crates/qdev-core/schemas/payload-release.json
+new file mode 100644
+index 0000000..86b8be8
+--- /dev/null
++++ b/crates/qdev-core/schemas/payload-release.json
+@@ -0,0 +1,28 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "Story Release Payload Schema",
++  "description": "Output shape of `qdev release [id] --json`. Schema changes follow semver on schema_version; additive fields do not bump the major.",
++  "type": "object",
++  "required": [
++    "schema_version",
++    "story_id",
++    "released"
++  ],
++  "properties": {
++    "schema_version": {
++      "type": "string"
++    },
++    "story_id": {
++      "type": "string",
++      "minLength": 1
++    },
++    "released": {
++      "type": "boolean"
++    },
++    "decision_id": {
++      "type": "string",
++      "minLength": 1
++    }
++  },
++  "additionalProperties": false
++}
+
+diff --git a/crates/qdev-core/src/lease.rs b/crates/qdev-core/src/lease.rs
+new file mode 100644
+index 0000000..82c6791
+--- /dev/null
++++ b/crates/qdev-core/src/lease.rs
+@@ -0,0 +1,706 @@
++use std::collections::BTreeMap;
++use std::fs;
++use std::path::{Path, PathBuf};
++use std::process::Command;
++
++use serde::{Deserialize, Serialize};
++
++use crate::config::StorageConfig;
++use crate::errors::QdevError;
++use crate::id::allocate_decision_id_in_with_rng;
++use crate::schema::EntityKind;
++use crate::store::{DecisionRecord, EntityRecord, SqliteStore, Store};
++use crate::write::{
++    acquire_workspace_write_lock, canonical_file_name, current_iso8601, directory_for_kind,
++    resolve_entity_file, sha256_digest, upsert_cache_and_mark_dirty, write_file_atomic, Author,
++};
++
++/// Worktree-visible story lease per Story 2.3.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct StoryLease {
++    pub story_id: String,
++    pub holder: String,
++    #[serde(default = "default_author_type")]
++    pub author_type: String,
++    #[serde(default)]
++    pub worktree_path: String,
++    #[serde(default = "default_branch")]
++    pub branch: String,
++    #[serde(default = "current_iso8601")]
++    pub started_at: String,
++    #[serde(default)]
++    pub session_token: String,
++}
++
++fn default_author_type() -> String {
++    "human".to_string()
++}
++
++fn default_branch() -> String {
++    "main".to_string()
++}
++
++/// Output payload of a story lease release.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct ReleasePayload {
++    pub story_id: String,
++    pub released: bool,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub decision_id: Option<String>,
++}
++
++/// Discovers the git common directory for a repository or linked worktree.
++/// Resolves via `git rev-parse --git-common-dir` or parses `.git` file (`gitdir: ...` / `commondir`).
++pub fn discover_git_common_dir(workspace_root: &Path) -> PathBuf {
++    if let Ok(output) = Command::new("git")
++        .args(["rev-parse", "--git-common-dir"])
++        .current_dir(workspace_root)
++        .output()
++    {
++        if output.status.success() {
++            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
++            if !path_str.is_empty() {
++                let p = Path::new(&path_str);
++                let resolved = if p.is_absolute() {
++                    p.to_path_buf()
++                } else {
++                    workspace_root.join(p)
++                };
++                if let Ok(canonical) = resolved.canonicalize() {
++                    return canonical;
++                }
++                return resolved;
++            }
++        }
++    }
++
++    let git_path = workspace_root.join(".git");
++    if git_path.is_file() {
++        if let Ok(content) = fs::read_to_string(&git_path) {
++            for line in content.lines() {
++                let trimmed = line.trim();
++                if let Some(gitdir) = trimmed.strip_prefix("gitdir:") {
++                    let gitdir_path = gitdir.trim();
++                    let resolved = if Path::new(gitdir_path).is_absolute() {
++                        PathBuf::from(gitdir_path)
++                    } else {
++                        workspace_root.join(gitdir_path)
++                    };
++                    let commondir_file = resolved.join("commondir");
++                    if commondir_file.is_file() {
++                        if let Ok(commondir_content) = fs::read_to_string(&commondir_file) {
++                            let common_str = commondir_content.trim();
++                            let common_resolved = if Path::new(common_str).is_absolute() {
++                                PathBuf::from(common_str)
++                            } else {
++                                resolved.join(common_str)
++                            };
++                            if let Ok(canonical) = common_resolved.canonicalize() {
++                                return canonical;
++                            }
++                            return common_resolved;
++                        }
++                    }
++                    if let Ok(canonical) = resolved.canonicalize() {
++                        return canonical;
++                    }
++                    return resolved;
++                }
++            }
++        }
++    } else if git_path.is_dir() {
++        if let Ok(canonical) = git_path.canonicalize() {
++            return canonical;
++        }
++        return git_path;
++    }
++
++    git_path
++}
++
++/// Discovers current git branch.
++pub fn discover_git_branch(workspace_root: &Path) -> String {
++    if let Ok(output) = Command::new("git")
++        .args(["rev-parse", "--abbrev-ref", "HEAD"])
++        .current_dir(workspace_root)
++        .output()
++    {
++        if output.status.success() {
++            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
++            if !s.is_empty() {
++                return s;
++            }
++        }
++    }
++
++    let git_path = workspace_root.join(".git");
++    let head_path = if git_path.is_file() {
++        if let Ok(content) = fs::read_to_string(&git_path) {
++            let gitdir = content
++                .lines()
++                .find_map(|l| l.strip_prefix("gitdir:").map(|g| g.trim().to_string()))
++                .unwrap_or_default();
++            let p = if Path::new(&gitdir).is_absolute() {
++                PathBuf::from(gitdir)
++            } else {
++                workspace_root.join(gitdir)
++            };
++            p.join("HEAD")
++        } else {
++            git_path.join("HEAD")
++        }
++    } else {
++        git_path.join("HEAD")
++    };
++
++    if let Ok(content) = fs::read_to_string(&head_path) {
++        let trimmed = content.trim();
++        if let Some(branch) = trimmed.strip_prefix("ref: refs/heads/") {
++            return branch.to_string();
++        } else if !trimmed.is_empty() {
++            return "HEAD".to_string();
++        }
++    }
++
++    "main".to_string()
++}
++
++/// Generates a session token `qs_<story_id>_<hex4>`.
++pub fn generate_session_token(story_id: &str) -> String {
++    let mut rng = rand::rng();
++    let num: u16 = rand::Rng::random(&mut rng);
++    format!("qs_{}_{:04x}", story_id, num)
++}
++
++fn days_from_civil(y: i64, m: u64, d: u64) -> i64 {
++    let y = if m <= 2 { y - 1 } else { y };
++    let era = (if y >= 0 { y } else { y - 399 }) / 400;
++    let yoe = (y - era * 400) as u64;
++    let mp = if m > 2 { m - 3 } else { m + 9 };
++    let doy = (153 * mp + 2) / 5 + d - 1;
++    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
++    era * 146097 + (doe as i64) - 719468
++}
++
++/// Parses an ISO 8601 timestamp string into epoch seconds.
++pub fn parse_iso8601_to_timestamp(s: &str) -> Option<i64> {
++    let s = s.trim();
++    if s.len() < 19 {
++        return None;
++    }
++    let year: i64 = s.get(0..4)?.parse().ok()?;
++    let month: u64 = s.get(5..7)?.parse().ok()?;
++    let day: u64 = s.get(8..10)?.parse().ok()?;
++    let hour: i64 = s.get(11..13)?.parse().ok()?;
++    let min: i64 = s.get(14..16)?.parse().ok()?;
++    let sec: i64 = s.get(17..19)?.parse().ok()?;
++
++    if day == 0 || day > 31 || month == 0 || month > 12 {
++        return None;
++    }
++
++    let days = days_from_civil(year, month, day);
++    let mut secs = days * 86400 + hour * 3600 + min * 60 + sec;
++
++    if let Some(tz_part) = s.get(19..) {
++        if let Some(stripped) = tz_part.strip_prefix('+') {
++            if stripped.len() >= 5 {
++                let off_h: i64 = stripped[0..2].parse().ok()?;
++                let off_m: i64 = stripped[3..5].parse().ok()?;
++                secs -= off_h * 3600 + off_m * 60;
++            }
++        } else if let Some(stripped) = tz_part.strip_prefix('-') {
++            if stripped.len() >= 5 {
++                let off_h: i64 = stripped[0..2].parse().ok()?;
++                let off_m: i64 = stripped[3..5].parse().ok()?;
++                secs += off_h * 3600 + off_m * 60;
++            }
++        }
++    }
++
++    Some(secs)
++}
++
++/// Resolves an active lease for a story if one exists in shared or local storage.
++pub fn get_lease(workspace_root: &Path, story_id: &str) -> Option<StoryLease> {
++    let trimmed_id = story_id.trim();
++    if trimmed_id.is_empty() || trimmed_id.contains('/') || trimmed_id.contains('\\') || trimmed_id.contains("..") {
++        return None;
++    }
++
++    let git_common = discover_git_common_dir(workspace_root);
++    let shared_file = git_common.join("qdev/leases").join(format!("{}.json", trimmed_id));
++    if shared_file.is_file() {
++        if let Ok(content) = fs::read_to_string(&shared_file) {
++            if let Ok(lease) = serde_json::from_str::<StoryLease>(&content) {
++                return Some(lease);
++            }
++        }
++    }
++
++    let local_file = workspace_root.join(".qdev/leases").join(format!("{}.json", story_id));
++    if local_file.is_file() {
++        if let Ok(content) = fs::read_to_string(&local_file) {
++            if let Ok(lease) = serde_json::from_str::<StoryLease>(&content) {
++                return Some(lease);
++            }
++        }
++    }
++
++    None
++}
++
++/// Lists all active leases across the shared Git directory and local worktree.
++pub fn list_leases(workspace_root: &Path) -> Result<Vec<StoryLease>, QdevError> {
++    let mut map: BTreeMap<String, StoryLease> = BTreeMap::new();
++
++    let git_common = discover_git_common_dir(workspace_root);
++    let shared_dir = git_common.join("qdev/leases");
++    if shared_dir.is_dir() {
++        if let Ok(entries) = fs::read_dir(&shared_dir) {
++            for entry in entries.flatten() {
++                let path = entry.path();
++                if path.extension().and_then(|s| s.to_str()) == Some("json") {
++                    if let Ok(content) = fs::read_to_string(&path) {
++                        if let Ok(lease) = serde_json::from_str::<StoryLease>(&content) {
++                            map.insert(lease.story_id.clone(), lease);
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    let local_dir = workspace_root.join(".qdev/leases");
++    if local_dir.is_dir() {
++        if let Ok(entries) = fs::read_dir(&local_dir) {
++            for entry in entries.flatten() {
++                let path = entry.path();
++                if path.extension().and_then(|s| s.to_str()) == Some("json") {
++                    if let Ok(content) = fs::read_to_string(&path) {
++                        if let Ok(lease) = serde_json::from_str::<StoryLease>(&content) {
++                            map.entry(lease.story_id.clone()).or_insert(lease);
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    Ok(map.into_values().collect())
++}
++
++/// Lists active leases present in the current workspace directory (`.qdev/leases`).
++pub fn find_workspace_leases(workspace_root: &Path) -> Result<Vec<StoryLease>, QdevError> {
++    let local_dir = workspace_root.join(".qdev/leases");
++    let mut leases = Vec::new();
++    if local_dir.is_dir() {
++        let entries = fs::read_dir(&local_dir).map_err(|e| {
++            QdevError::infrastructure_failure(
++                "io_error",
++                format!("Failed to read leases directory '{}': {}", local_dir.display(), e),
++            )
++        })?;
++        for entry in entries.flatten() {
++            let path = entry.path();
++            if path.extension().and_then(|s| s.to_str()) == Some("json") {
++                if let Ok(content) = fs::read_to_string(&path) {
++                    if let Ok(lease) = serde_json::from_str::<StoryLease>(&content) {
++                        leases.push(lease);
++                    }
++                }
++            }
++        }
++    }
++    leases.sort_by(|a, b| a.story_id.cmp(&b.story_id));
++    Ok(leases)
++}
++
++/// Finds the single active lease held in the current workspace.
++/// Returns exit 1 `no_active_lease` if no lease is held, or exit 2 `usage_error` if multiple are held.
++pub fn find_active_lease(workspace_root: &Path) -> Result<StoryLease, QdevError> {
++    let leases = find_workspace_leases(workspace_root)?;
++    if leases.is_empty() {
++        return Err(QdevError::logical_failure(
++            "no_active_lease",
++            "No active story lease found in workspace",
++        ));
++    }
++    if leases.len() > 1 {
++        return Err(QdevError::usage_error(
++            "Multiple active leases held in workspace; specify story ID to release",
++        ));
++    }
++    Ok(leases.into_iter().next().unwrap())
++}
++
++/// Claims a lease for an unleased story.
++pub fn claim_story(
++    workspace_root: &Path,
++    story_id: &str,
++    author: &Author,
++    storage: Option<&StorageConfig>,
++    opt_store: Option<&dyn Store>,
++) -> Result<StoryLease, QdevError> {
++    let trimmed_id = story_id.trim();
++    if trimmed_id.is_empty() {
++        return Err(QdevError::usage_error("Story ID cannot be empty"));
++    }
++    if trimmed_id.contains('/') || trimmed_id.contains('\\') || trimmed_id.contains("..") {
++        return Err(QdevError::usage_error(format!(
++            "Invalid story ID '{}': cannot contain path separators or parent directory references",
++            trimmed_id
++        )));
++    }
++
++    // 1. Acquire workspace advisory write lock
++    let _lock_guard = acquire_workspace_write_lock(workspace_root, storage)?;
++
++    // 2. Verify story entity exists and is a story kind
++    let entity_kind = if let Some(store) = opt_store {
++        if let Ok(Some(record)) = store.get_entity(trimmed_id) {
++            Some(record.kind)
++        } else {
++            resolve_entity_file(workspace_root, None, trimmed_id, storage)
++                .map(|(k, _, _)| k)
++                .ok()
++        }
++    } else {
++        resolve_entity_file(workspace_root, None, trimmed_id, storage)
++            .map(|(k, _, _)| k)
++            .ok()
++    };
++
++    let kind = match entity_kind {
++        Some(k) => k,
++        None => {
++            return Err(QdevError::logical_failure(
++                "entity_not_found",
++                format!("Story entity '{}' does not exist", trimmed_id),
++            ));
++        }
++    };
++
++    if kind != EntityKind::Story {
++        return Err(QdevError::usage_error("Only story entities can be leased"));
++    }
++
++    // 3. Refuse duplicate claims with exit code 5 (already_leased)
++    if let Some(existing) = get_lease(workspace_root, trimmed_id) {
++        return Err(QdevError::conflict(
++            "already_leased",
++            format!(
++                "Story {} is already leased by {} in {}",
++                trimmed_id, existing.holder, existing.worktree_path
++            ),
++        )
++        .with_details(serde_json::json!({
++            "story_id": trimmed_id,
++            "holder": existing.holder,
++            "worktree_path": existing.worktree_path,
++        })));
++    }
++
++    // 4. Construct lease record
++    let canonical_root = workspace_root
++        .canonicalize()
++        .unwrap_or_else(|_| workspace_root.to_path_buf());
++    let worktree_path = canonical_root.to_string_lossy().to_string();
++    let branch = discover_git_branch(workspace_root);
++    let session_token = generate_session_token(trimmed_id);
++    let started_at = current_iso8601();
++
++    let lease = StoryLease {
++        story_id: trimmed_id.to_string(),
++        holder: author.id.clone(),
++        author_type: author.author_type.clone(),
++        worktree_path,
++        branch,
++        started_at,
++        session_token,
++    };
++
++    let lease_json = serde_json::to_string_pretty(&lease).map_err(|e| {
++        QdevError::infrastructure_failure(
++            "serialization_error",
++            format!("Failed to serialize lease record: {}", e),
++        )
++    })?;
++
++    // 5. Write local lease
++    let local_file = workspace_root.join(".qdev/leases").join(format!("{}.json", trimmed_id));
++    write_file_atomic(&local_file, &lease_json)?;
++
++    // 6. Mirror to shared Git directory
++    let git_common = discover_git_common_dir(workspace_root);
++    let shared_file = git_common.join("qdev/leases").join(format!("{}.json", trimmed_id));
++    if shared_file != local_file && git_common.exists() {
++        write_file_atomic(&shared_file, &lease_json)?;
++    }
++
++    Ok(lease)
++}
++
++/// Releases an existing story lease.
++pub fn release_story(
++    workspace_root: &Path,
++    story_id: &str,
++    author: &Author,
++    force: bool,
++    justification: Option<&str>,
++    storage: Option<&StorageConfig>,
++    opt_store: Option<&dyn Store>,
++) -> Result<ReleasePayload, QdevError> {
++    let trimmed_id = story_id.trim();
++    if trimmed_id.is_empty() {
++        return Err(QdevError::usage_error("Story ID cannot be empty"));
++    }
++    if trimmed_id.contains('/') || trimmed_id.contains('\\') || trimmed_id.contains("..") {
++        return Err(QdevError::usage_error(format!(
++            "Invalid story ID '{}': cannot contain path separators or parent directory references",
++            trimmed_id
++        )));
++    }
++
++    // Verify entity kind if entity exists
++    let entity_kind = if let Some(store) = opt_store {
++        if let Ok(Some(record)) = store.get_entity(trimmed_id) {
++            Some(record.kind)
++        } else {
++            resolve_entity_file(workspace_root, None, trimmed_id, storage)
++                .map(|(k, _, _)| k)
++                .ok()
++        }
++    } else {
++        resolve_entity_file(workspace_root, None, trimmed_id, storage)
++            .map(|(k, _, _)| k)
++            .ok()
++    };
++    if let Some(kind) = entity_kind {
++        if kind != EntityKind::Story {
++            return Err(QdevError::usage_error("Only story entities can be leased"));
++        }
++    }
++
++    let existing = match get_lease(workspace_root, trimmed_id) {
++        Some(l) => l,
++        None => {
++            return Err(QdevError::logical_failure(
++                "lease_not_found",
++                format!("Story {} is not leased", trimmed_id),
++            ));
++        }
++    };
++
++    let is_holder = existing.holder == author.id;
++    let mut decision_id = None;
++
++    if force {
++        let just = justification.map(|j| j.trim()).unwrap_or("");
++        if just.is_empty() {
++            return Err(QdevError::policy_refusal(
++                "needs_justification",
++                "--force requires a non-empty --justification",
++            ));
++        }
++        let dec_id = create_lease_override_decision(
++            workspace_root,
++            storage,
++            trimmed_id,
++            just,
++            author,
++            &existing,
++        )?;
++        decision_id = Some(dec_id);
++    } else if !is_holder {
++        return Err(QdevError::policy_refusal(
++            "policy_refusal",
++            format!(
++                "Story {} is leased by {} in {}; releasing requires --force --justification",
++                trimmed_id, existing.holder, existing.worktree_path
++            ),
++        ));
++    }
++
++    // Remove local and shared lease files
++    let local_file = workspace_root.join(".qdev/leases").join(format!("{}.json", trimmed_id));
++    if local_file.exists() {
++        fs::remove_file(&local_file).map_err(|e| {
++            QdevError::infrastructure_failure(
++                "io_error",
++                format!("Failed to remove local lease file '{}': {}", local_file.display(), e),
++            )
++        })?;
++    }
++
++    let git_common = discover_git_common_dir(workspace_root);
++    let shared_file = git_common.join("qdev/leases").join(format!("{}.json", trimmed_id));
++    if shared_file.exists() {
++        let _ = fs::remove_file(&shared_file);
++    }
++
++    let other_local = Path::new(&existing.worktree_path).join(".qdev/leases").join(format!("{}.json", trimmed_id));
++    if other_local.exists() && other_local != local_file {
++        let _ = fs::remove_file(&other_local);
++    }
++
++    Ok(ReleasePayload {
++        story_id: trimmed_id.to_string(),
++        released: true,
++        decision_id,
++    })
++}
++
++/// Automatically releases an active lease for a story if present (e.g. upon transition to terminal state).
++pub fn auto_release_lease(workspace_root: &Path, story_id: &str) -> Result<(), QdevError> {
++    let trimmed_id = story_id.trim();
++    if trimmed_id.is_empty() || trimmed_id.contains('/') || trimmed_id.contains('\\') || trimmed_id.contains("..") {
++        return Ok(());
++    }
++
++    if let Some(existing) = get_lease(workspace_root, trimmed_id) {
++        let local_file = workspace_root.join(".qdev/leases").join(format!("{}.json", trimmed_id));
++        if local_file.exists() {
++            let _ = fs::remove_file(&local_file);
++        }
++
++        let git_common = discover_git_common_dir(workspace_root);
++        let shared_file = git_common.join("qdev/leases").join(format!("{}.json", trimmed_id));
++        if shared_file.exists() {
++            let _ = fs::remove_file(&shared_file);
++        }
++
++        let other_local = Path::new(&existing.worktree_path).join(".qdev/leases").join(format!("{}.json", trimmed_id));
++        if other_local.exists() && other_local != local_file {
++            let _ = fs::remove_file(&other_local);
++        }
++    }
++    Ok(())
++}
++
++/// Logs a committed `DEC-` record with `decision_type: lease_override` when a lease is broken with `--force --justification`.
++pub fn create_lease_override_decision(
++    workspace_root: &Path,
++    storage: Option<&StorageConfig>,
++    story_id: &str,
++    justification: &str,
++    author: &Author,
++    prior_lease: &StoryLease,
++) -> Result<String, QdevError> {
++    let _lock_guard = acquire_workspace_write_lock(workspace_root, storage)?;
++
++    let default_storage = StorageConfig::default();
++    let st = storage.unwrap_or(&default_storage);
++    let cache_dir_rel = st.cache_dir.as_str();
++    let cache_db_path = workspace_root.join(cache_dir_rel).join("cache.sqlite");
++    let opt_store = if cache_db_path.is_file() {
++        Some(SqliteStore::open(&cache_db_path)?)
++    } else {
++        None
++    };
++
++    let mut rng = rand::rng();
++    let dec_ident = allocate_decision_id_in_with_rng(
++        workspace_root,
++        st,
++        &mut rng,
++        opt_store.as_ref().map(|s| s as &dyn Store),
++    )?;
++    let dec_id = dec_ident.to_string();
++
++    let title = format!("Lease override on story {}", story_id);
++    let timestamp = current_iso8601();
++    let context_desc = format!(
++        "Story lease held by {} in worktree {} overridden",
++        prior_lease.holder, prior_lease.worktree_path
++    );
++
++    let frontmatter_json = serde_json::json!({
++        "id": dec_id,
++        "title": title,
++        "status": "active",
++        "version": 1,
++        "created_by": {
++            "type": author.author_type,
++            "id": author.id,
++        },
++        "updated_by": {
++            "type": author.author_type,
++            "id": author.id,
++        },
++        "subject_id": story_id,
++        "decision_type": "lease_override",
++        "context": context_desc,
++        "ruling": justification,
++        "created_at": timestamp,
++    });
++
++    crate::schema::validate_value_detailed(EntityKind::Decision, &frontmatter_json).map_err(|errs| {
++        QdevError::logical_failure(
++            "schema_violation",
++            format!(
++                "Decision frontmatter schema validation failed: {}",
++                errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")
++            ),
++        )
++    })?;
++
++    let frontmatter_yaml = serde_yaml::to_string(&frontmatter_json).map_err(|e| {
++        QdevError::infrastructure_failure(
++            "serialization_error",
++            format!("Failed to serialize decision frontmatter: {}", e),
++        )
++    })?;
++
++    let dec_content = format!(
++        "---\n{}---\n\n# {}\n\nContext: {}\n\n{}\n",
++        frontmatter_yaml, title, context_desc, justification
++    );
++
++    let rel_dir = directory_for_kind(storage, EntityKind::Decision);
++    let file_name = canonical_file_name(&dec_id);
++    let dec_file_path = workspace_root.join(&rel_dir).join(&file_name);
++
++    write_file_atomic(&dec_file_path, &dec_content)?;
++
++    if let Some(ref store) = opt_store {
++        let rel_source_path = crate::write::workspace_rel_path(&dec_file_path, workspace_root);
++        let content_hash = sha256_digest(dec_content.as_bytes());
++
++        let decision_entity_record = EntityRecord {
++            id: dec_id.clone(),
++            kind: EntityKind::Decision,
++            title: Some(title),
++            status: Some("active".to_string()),
++            owners: None,
++            source_path: rel_source_path,
++            content_hash,
++            version: 1,
++            created_by: Some(author.clone()),
++            updated_by: Some(author.clone()),
++            updated_at: timestamp.to_string(),
++            stale: false,
++            epic_id: None,
++            seq: None,
++            appetite: None,
++            safety_class: None,
++            target_modules: None,
++        };
++        upsert_cache_and_mark_dirty(&cache_db_path, &decision_entity_record)?;
++
++        let decision_record = DecisionRecord {
++            id: dec_id.clone(),
++            subject_id: story_id.to_string(),
++            decision_type: Some("lease_override".to_string()),
++            topic: None,
++            context: Some(context_desc),
++            ruling: Some(justification.to_string()),
++            author_type: Some(author.author_type.clone()),
++            author_id: Some(author.id.clone()),
++            created_at: Some(timestamp.to_string()),
++        };
++        store.upsert_decision(&decision_record)?;
++    }
++
++    Ok(dec_id)
++}
+
+diff --git a/crates/qdev-core/tests/lease_tests.rs b/crates/qdev-core/tests/lease_tests.rs
+new file mode 100644
+index 0000000..76ef2a2
+--- /dev/null
++++ b/crates/qdev-core/tests/lease_tests.rs
+@@ -0,0 +1,388 @@
++use std::fs;
++use std::path::Path;
++
++use qdev_core::config::LeasesConfig;
++use qdev_core::lease::{
++    claim_story, discover_git_common_dir, find_active_lease, get_lease, release_story,
++};
++use qdev_core::store::sqlite::SqliteStore;
++use qdev_core::transition::{TransitionEngine, TransitionOptions};
++use qdev_core::write::Author;
++use qdev_core::{DoctorSection, ExitCode};
++use tempfile::TempDir;
++
++fn setup_workspace(root: &Path) {
++    let stories_dir = root.join("docs/specs/stories");
++    fs::create_dir_all(&stories_dir).unwrap();
++    fs::create_dir_all(root.join(".qdev/cache")).unwrap();
++
++    // Create qdev.toml
++    fs::write(
++        root.join("qdev.toml"),
++        r#"[project]
++name = "test"
++
++[storage]
++specs_dir = "docs/specs"
++state_dir = "docs/state"
++cache_dir = ".qdev/cache"
++"#,
++    )
++    .unwrap();
++
++    // Initialize cache database
++    let cache_db = root.join(".qdev/cache/cache.sqlite");
++    let conn = qdev_core::rusqlite::Connection::open(&cache_db).unwrap();
++    qdev_core::create_schema(&conn).unwrap();
++    qdev_core::stamp_cache_version(&conn).unwrap();
++}
++
++fn write_story(root: &Path, story_id: &str, title: &str, status: &str) {
++    let stories_dir = root.join("docs/specs/stories");
++    fs::create_dir_all(&stories_dir).unwrap();
++    let content = format!(
++        r#"---
++id: {story_id}
++title: "{title}"
++status: {status}
++version: 1
++created_by:
++  type: human
++  id: simon
++updated_by:
++  type: human
++  id: simon
++---
++
++## Acceptance Criteria
++- AC1.
++"#
++    );
++    fs::write(stories_dir.join(format!("{}.md", story_id)), content).unwrap();
++}
++
++#[test]
++fn test_claim_unleased_story_success() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress");
++
++    fs::create_dir_all(root.join(".git")).unwrap();
++    let author = Author::new("human", "simon");
++    let lease = claim_story(root, "E12S4", &author, None, None).unwrap();
++
++    assert_eq!(lease.story_id, "E12S4");
++    assert_eq!(lease.holder, "simon");
++    assert_eq!(lease.author_type, "human");
++    assert!(lease.session_token.starts_with("qs_E12S4_"));
++
++    // Verify local lease file
++    let local_file = root.join(".qdev/leases/E12S4.json");
++    assert!(local_file.is_file());
++    let local_content = fs::read_to_string(&local_file).unwrap();
++    assert!(local_content.contains("\"story_id\": \"E12S4\""));
++    assert!(local_content.contains("\"holder\": \"simon\""));
++
++    // Verify shared mirror file
++    let git_common = discover_git_common_dir(root);
++    let shared_file = git_common.join("qdev/leases/E12S4.json");
++    assert!(shared_file.is_file());
++}
++
++#[test]
++fn test_claim_nonexistent_story_fails_entity_not_found() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let author = Author::new("human", "simon");
++    let err = claim_story(root, "E99S99", &author, None, None).unwrap_err();
++    assert_eq!(err.exit_code(), ExitCode::LogicalFailure);
++    assert_eq!(err.code(), "entity_not_found");
++}
++
++#[test]
++fn test_claim_already_leased_refusal() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress");
++
++    let author = Author::new("human", "simon");
++    let _ = claim_story(root, "E12S4", &author, None, None).unwrap();
++
++    // Second claim should fail with conflict (code already_leased, exit 5)
++    let author2 = Author::new("agent", "worker-1");
++    let err = claim_story(root, "E12S4", &author2, None, None).unwrap_err();
++    assert_eq!(err.exit_code(), ExitCode::Conflict);
++    assert_eq!(err.code(), "already_leased");
++    assert!(err.message().contains("simon"));
++
++    let details = err.details().expect("details must be present");
++    assert_eq!(details["story_id"], "E12S4");
++    assert_eq!(details["holder"], "simon");
++}
++
++#[test]
++fn test_release_own_lease_success() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress");
++
++    fs::create_dir_all(root.join(".git")).unwrap();
++    let author = Author::new("human", "simon");
++    let _ = claim_story(root, "E12S4", &author, None, None).unwrap();
++
++    let res = release_story(root, "E12S4", &author, false, None, None, None).unwrap();
++    assert_eq!(res.story_id, "E12S4");
++    assert!(res.released);
++    assert!(res.decision_id.is_none());
++
++    // Both local and shared files should be deleted
++    assert!(!root.join(".qdev/leases/E12S4.json").exists());
++    let git_common = discover_git_common_dir(root);
++    assert!(!git_common.join("qdev/leases/E12S4.json").exists());
++}
++
++#[test]
++fn test_release_unleased_story_fails_lease_not_found() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let author = Author::new("human", "simon");
++    let err = release_story(root, "E12S4", &author, false, None, None, None).unwrap_err();
++    assert_eq!(err.exit_code(), ExitCode::LogicalFailure);
++    assert_eq!(err.code(), "lease_not_found");
++}
++
++#[test]
++fn test_find_active_lease_single_and_multiple() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S1", "Story 1", "in-progress");
++    write_story(root, "E12S2", "Story 2", "in-progress");
++
++    // Empty workspace
++    let err = find_active_lease(root).unwrap_err();
++    assert_eq!(err.exit_code(), ExitCode::LogicalFailure);
++    assert_eq!(err.code(), "no_active_lease");
++
++    // 1 lease
++    let author = Author::new("human", "simon");
++    claim_story(root, "E12S1", &author, None, None).unwrap();
++    let active = find_active_lease(root).unwrap();
++    assert_eq!(active.story_id, "E12S1");
++
++    // 2 leases
++    claim_story(root, "E12S2", &author, None, None).unwrap();
++    let err = find_active_lease(root).unwrap_err();
++    assert_eq!(err.exit_code(), ExitCode::UsageError);
++}
++
++#[test]
++fn test_release_other_holder_refused_without_force() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress");
++
++    let author_simon = Author::new("human", "simon");
++    claim_story(root, "E12S4", &author_simon, None, None).unwrap();
++
++    // Release by alice without force
++    let author_alice = Author::new("human", "alice");
++    let err = release_story(root, "E12S4", &author_alice, false, None, None, None).unwrap_err();
++    assert_eq!(err.exit_code(), ExitCode::PolicyRefusal);
++    assert_eq!(err.code(), "policy_refusal");
++    assert!(err.message().contains("--force --justification"));
++}
++
++#[test]
++fn test_release_with_force_missing_justification() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress");
++
++    let author_simon = Author::new("human", "simon");
++    claim_story(root, "E12S4", &author_simon, None, None).unwrap();
++
++    let author_alice = Author::new("human", "alice");
++    let err = release_story(root, "E12S4", &author_alice, true, None, None, None).unwrap_err();
++    assert_eq!(err.exit_code(), ExitCode::PolicyRefusal);
++    assert_eq!(err.code(), "needs_justification");
++
++    let err2 = release_story(root, "E12S4", &author_alice, true, Some("   "), None, None).unwrap_err();
++    assert_eq!(err2.exit_code(), ExitCode::PolicyRefusal);
++    assert_eq!(err2.code(), "needs_justification");
++}
++
++#[test]
++fn test_release_with_force_and_justification_creates_decision() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress");
++
++    let author_simon = Author::new("human", "simon");
++    claim_story(root, "E12S4", &author_simon, None, None).unwrap();
++
++    let author_alice = Author::new("human", "alice");
++    let res = release_story(
++        root,
++        "E12S4",
++        &author_alice,
++        true,
++        Some("Agent crashed and left orphan lease"),
++        None,
++        None,
++    )
++    .unwrap();
++
++    assert_eq!(res.story_id, "E12S4");
++    assert!(res.released);
++    let dec_id = res.decision_id.expect("decision_id must be recorded");
++    assert!(dec_id.starts_with("DEC-"));
++
++    // Verify DEC- file was created in docs/state/decisions
++    let dec_dir = root.join("docs/state/decisions");
++    let dec_file = dec_dir.join(format!("{}.md", dec_id));
++    assert!(dec_file.is_file(), "Decision file must exist: {}", dec_file.display());
++    let dec_content = fs::read_to_string(&dec_file).unwrap();
++    assert!(dec_content.contains("decision_type: lease_override"));
++    assert!(dec_content.contains("Agent crashed and left orphan lease"));
++
++    // Verify lease is now released
++    assert!(get_lease(root, "E12S4").is_none());
++}
++
++#[test]
++fn test_transition_done_auto_releases_lease() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "review");
++
++    let author = Author::new("human", "simon");
++    claim_story(root, "E12S4", &author, None, None).unwrap();
++    assert!(get_lease(root, "E12S4").is_some());
++
++    let engine = TransitionEngine::new();
++    let res = engine
++        .transition(&TransitionOptions {
++            workspace_root: root.to_path_buf(),
++            storage: None,
++            entity_kind: "story".to_string(),
++            story_id: "E12S4".to_string(),
++            target_status: "done".to_string(),
++            justification: None,
++            author: author.clone(),
++            if_version: None,
++        })
++        .unwrap();
++
++    assert_eq!(res.to_status, "done");
++    assert!(get_lease(root, "E12S4").is_none(), "Transition to done must auto-release lease");
++}
++
++#[test]
++fn test_linked_worktree_lease_discovery() {
++    let temp = TempDir::new().unwrap();
++    let main_repo = temp.path().join("main_repo");
++    fs::create_dir_all(&main_repo).unwrap();
++    setup_workspace(&main_repo);
++    write_story(&main_repo, "E12S4", "Story 4", "in-progress");
++
++    // Mock a git repo directory structure
++    let git_common = main_repo.join(".git");
++    fs::create_dir_all(&git_common).unwrap();
++
++    // Create linked worktree directory
++    let worktree = temp.path().join("worktree_1");
++    fs::create_dir_all(&worktree).unwrap();
++    setup_workspace(&worktree);
++    write_story(&worktree, "E12S4", "Story 4", "in-progress");
++
++    // Point worktree's .git file to main_repo/.git/worktrees/wt1
++    let wt_gitdir = git_common.join("worktrees/wt1");
++    fs::create_dir_all(&wt_gitdir).unwrap();
++    fs::write(wt_gitdir.join("commondir"), "../..\n").unwrap();
++    fs::write(
++        worktree.join(".git"),
++        format!("gitdir: {}\n", wt_gitdir.display()),
++    )
++    .unwrap();
++
++    // Claim story E12S4 in main_repo by simon
++    let author_simon = Author::new("human", "simon");
++    claim_story(&main_repo, "E12S4", &author_simon, None, None).unwrap();
++
++    // From worktree, lease must be discoverable immediately via shared Git dir!
++    let discovered = get_lease(&worktree, "E12S4").expect("Worktree must discover lease from main repo");
++    assert_eq!(discovered.story_id, "E12S4");
++    assert_eq!(discovered.holder, "simon");
++
++    // Attempting to claim in worktree must fail with exit 5 already_leased
++    let author_bob = Author::new("human", "bob");
++    let err = claim_story(&worktree, "E12S4", &author_bob, None, None).unwrap_err();
++    assert_eq!(err.exit_code(), ExitCode::Conflict);
++    assert_eq!(err.code(), "already_leased");
++}
++
++#[test]
++fn test_doctor_leases_section_reports_active_and_stale() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S1", "Story 1", "in-progress");
++    write_story(root, "E12S2", "Story 2", "in-progress");
++
++    // Claim E12S1 fresh
++    let author = Author::new("human", "simon");
++    claim_story(root, "E12S1", &author, None, None).unwrap();
++
++    // Create a stale lease for E12S2 (5 days old)
++    let stale_started = "2026-09-01T00:00:00Z";
++    let lease_dir = root.join(".qdev/leases");
++    fs::create_dir_all(&lease_dir).unwrap();
++    let stale_lease = qdev_core::lease::StoryLease {
++        story_id: "E12S2".to_string(),
++        holder: "bob".to_string(),
++        author_type: "human".to_string(),
++        worktree_path: root.display().to_string(),
++        branch: "main".to_string(),
++        started_at: stale_started.to_string(),
++        session_token: "qs_E12S2_9999".to_string(),
++    };
++    fs::write(
++        lease_dir.join("E12S2.json"),
++        serde_json::to_string_pretty(&stale_lease).unwrap(),
++    )
++    .unwrap();
++
++    let doctor_section = qdev_core::doctor::LeasesDoctorSection::new(
++        root.to_path_buf(),
++        LeasesConfig { stale_age_days: 3 },
++    );
++
++    let store = SqliteStore::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
++    let report = doctor_section.run(&store).unwrap();
++
++    assert_eq!(report.name, "leases");
++    let fields: std::collections::HashMap<String, serde_json::Value> =
++        report.fields.into_iter().collect();
++
++    assert_eq!(fields["status"], "ok");
++    assert_eq!(fields["active_count"], 2);
++    assert_eq!(fields["stale_count"], 1);
++    assert_eq!(fields["stale_age_days"], 3);
++
++    let stale_list = fields["stale_leases"].as_array().unwrap();
++    assert_eq!(stale_list.len(), 1);
++    assert_eq!(stale_list[0]["story_id"], "E12S2");
++    assert_eq!(stale_list[0]["holder"], "bob");
++}
+
+diff --git a/crates/qdev-cli/tests/lease_cli_tests.rs b/crates/qdev-cli/tests/lease_cli_tests.rs
+new file mode 100644
+index 0000000..2298929
+--- /dev/null
++++ b/crates/qdev-cli/tests/lease_cli_tests.rs
+@@ -0,0 +1,567 @@
++//! CLI integration tests for story leases (Story 2.3).
++
++use std::fs;
++use std::path::Path;
++
++use assert_cmd::Command;
++use serde_json::Value;
++use tempfile::TempDir;
++
++fn setup_workspace(root: &Path) {
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "init",
++            "--non-interactive",
++            "--name",
++            "TestProject",
++            "--developer",
++            "simon",
++            "--team",
++            "core-platform",
++        ])
++        .assert()
++        .success();
++}
++
++fn write_story(root: &Path, id: &str, title: &str, status: &str) {
++    let stories_dir = root.join("docs/specs/stories");
++    fs::create_dir_all(&stories_dir).unwrap();
++    fs::write(
++        stories_dir.join(format!("{}.md", id)),
++        format!(
++            r#"---
++id: {id}
++title: "{title}"
++status: {status}
++version: 1
++created_by:
++  type: human
++  id: simon
++updated_by:
++  type: human
++  id: simon
++---
++
++## Acceptance Criteria
++- AC1.
++"#
++        ),
++    )
++    .unwrap();
++}
++
++#[test]
++fn test_cli_claim_unleased_story_text_mode() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress");
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success()
++        .code(0);
++
++    let output = assert.get_output();
++    let text = std::str::from_utf8(&output.stdout).unwrap();
++    assert!(text.contains("Claimed lease on story E12S4"), "text: {}", text);
++    assert!(text.contains("export QDEV_SESSION=qs_E12S4_"), "text: {}", text);
++
++    // Verify local lease record exists
++    let local_lease = root.join(".qdev/leases/E12S4.json");
++    assert!(local_lease.is_file());
++    let lease_json: Value = serde_json::from_str(&fs::read_to_string(&local_lease).unwrap()).unwrap();
++    assert_eq!(lease_json["story_id"], "E12S4");
++    assert_eq!(lease_json["holder"], "simon");
++    assert!(lease_json["session_token"].as_str().unwrap().starts_with("qs_E12S4_"));
++}
++
++#[test]
++fn test_cli_claim_unleased_story_json_mode() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress");
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4", "--json"])
++        .assert()
++        .success()
++        .code(0);
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert_eq!(val["schema_version"], "1");
++    assert_eq!(val["story_id"], "E12S4");
++    assert_eq!(val["holder"], "simon");
++    assert_eq!(val["author_type"], "human");
++    assert!(val["session_token"].as_str().unwrap().starts_with("qs_E12S4_"));
++}
++
++#[test]
++fn test_cli_claim_nonexistent_story_fails() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["claim", "story", "E99S99", "--json"])
++        .assert()
++        .failure()
++        .code(1);
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert_eq!(val["error"]["code"], "entity_not_found");
++}
++
++#[test]
++fn test_cli_claim_already_leased_refusal() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress");
++
++    // Claim once
++    let mut cmd1 = Command::cargo_bin("qdev").unwrap();
++    cmd1.current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    // Duplicate claim in text mode
++    let mut cmd2 = Command::cargo_bin("qdev").unwrap();
++    let assert2 = cmd2
++        .current_dir(root)
++        .args(["claim", "story", "E12S4", "--author-id", "bob"])
++        .assert()
++        .failure()
++        .code(5);
++
++    let output = assert2.get_output();
++    let stderr = std::str::from_utf8(&output.stderr).unwrap();
++    assert!(stderr.contains("already_leased"), "stderr: {}", stderr);
++    assert!(stderr.contains("simon"), "stderr: {}", stderr);
++
++    // Duplicate claim in JSON mode
++    let mut cmd3 = Command::cargo_bin("qdev").unwrap();
++    let assert3 = cmd3
++        .current_dir(root)
++        .args(["claim", "story", "E12S4", "--json"])
++        .assert()
++        .failure()
++        .code(5);
++
++    let val: Value = serde_json::from_slice(&assert3.get_output().stdout).unwrap();
++    assert_eq!(val["error"]["code"], "already_leased");
++    let details = &val["error"]["details"];
++    assert_eq!(details["story_id"], "E12S4");
++    assert_eq!(details["holder"], "simon");
++}
++
++#[test]
++fn test_cli_release_own_lease() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress");
++
++    // Claim
++    let mut cmd1 = Command::cargo_bin("qdev").unwrap();
++    cmd1.current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    // Release with story ID in text mode
++    let mut cmd2 = Command::cargo_bin("qdev").unwrap();
++    let assert2 = cmd2
++        .current_dir(root)
++        .args(["release", "story", "E12S4"])
++        .assert()
++        .success()
++        .code(0);
++
++    let text = std::str::from_utf8(&assert2.get_output().stdout).unwrap();
++    assert!(text.contains("Released lease on story E12S4"), "text: {}", text);
++    assert!(!root.join(".qdev/leases/E12S4.json").exists());
++}
++
++#[test]
++fn test_cli_release_own_lease_json() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress");
++
++    // Claim
++    let mut cmd1 = Command::cargo_bin("qdev").unwrap();
++    cmd1.current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    // Release in JSON mode
++    let mut cmd2 = Command::cargo_bin("qdev").unwrap();
++    let assert2 = cmd2
++        .current_dir(root)
++        .args(["release", "E12S4", "--json"])
++        .assert()
++        .success()
++        .code(0);
++
++    let val: Value = serde_json::from_slice(&assert2.get_output().stdout).unwrap();
++    assert_eq!(val["schema_version"], "1");
++    assert_eq!(val["story_id"], "E12S4");
++    assert_eq!(val["released"], true);
++}
++
++#[test]
++fn test_cli_release_without_story_id() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress");
++
++    // Without active lease: exit 1 no_active_lease
++    let mut cmd0 = Command::cargo_bin("qdev").unwrap();
++    cmd0.current_dir(root)
++        .args(["release", "--json"])
++        .assert()
++        .failure()
++        .code(1);
++
++    // Claim 1 story
++    let mut cmd1 = Command::cargo_bin("qdev").unwrap();
++    cmd1.current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    // Bare `qdev release` detects and releases active lease
++    let mut cmd2 = Command::cargo_bin("qdev").unwrap();
++    cmd2.current_dir(root)
++        .args(["release"])
++        .assert()
++        .success()
++        .code(0);
++
++    assert!(!root.join(".qdev/leases/E12S4.json").exists());
++}
++
++#[test]
++fn test_cli_release_other_holder_requires_force() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress");
++
++    // Claim as simon
++    let mut cmd1 = Command::cargo_bin("qdev").unwrap();
++    cmd1.current_dir(root)
++        .args(["claim", "story", "E12S4", "--author-id", "simon"])
++        .assert()
++        .success();
++
++    // Non-holder attempts release without force: exit 3
++    let mut cmd2 = Command::cargo_bin("qdev").unwrap();
++    let assert2 = cmd2
++        .current_dir(root)
++        .args(["release", "E12S4", "--author-id", "alice"])
++        .assert()
++        .failure()
++        .code(3);
++
++    let stderr = std::str::from_utf8(&assert2.get_output().stderr).unwrap();
++    assert!(stderr.contains("policy_refusal"), "stderr: {}", stderr);
++    assert!(stderr.contains("--force --justification"), "stderr: {}", stderr);
++
++    // Force without justification: exit 3 needs_justification
++    let mut cmd3 = Command::cargo_bin("qdev").unwrap();
++    cmd3.current_dir(root)
++        .args(["release", "E12S4", "--force", "--author-id", "alice", "--json"])
++        .assert()
++        .failure()
++        .code(3);
++
++    // Force with justification: exit 0, creates DEC- record
++    let mut cmd4 = Command::cargo_bin("qdev").unwrap();
++    let assert4 = cmd4
++        .current_dir(root)
++        .args([
++            "release",
++            "E12S4",
++            "--force",
++            "--justification",
++            "Agent crashed and left stale lease",
++            "--author-id",
++            "alice",
++            "--json",
++        ])
++        .assert()
++        .success()
++        .code(0);
++
++    let val: Value = serde_json::from_slice(&assert4.get_output().stdout).unwrap();
++    assert_eq!(val["released"], true);
++    let dec_id = val["decision_id"].as_str().unwrap();
++    assert!(dec_id.starts_with("DEC-"));
++
++    // Verify decision file exists in docs/state/decisions
++    let dec_file = root.join("docs/state/decisions").join(format!("{}.md", dec_id));
++    assert!(dec_file.is_file());
++    let dec_content = fs::read_to_string(&dec_file).unwrap();
++    assert!(dec_content.contains("decision_type: lease_override"));
++    assert!(dec_content.contains("Agent crashed and left stale lease"));
++}
++
++#[test]
++fn test_cli_transition_done_auto_releases_lease() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "review");
++
++    // Claim lease
++    let mut cmd1 = Command::cargo_bin("qdev").unwrap();
++    cmd1.current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++    assert!(root.join(".qdev/leases/E12S4.json").is_file());
++
++    // Transition to done
++    let mut cmd2 = Command::cargo_bin("qdev").unwrap();
++    cmd2.current_dir(root)
++        .args(["transition", "story", "E12S4", "done"])
++        .assert()
++        .success()
++        .code(0);
++
++    // Lease should be gone
++    assert!(!root.join(".qdev/leases/E12S4.json").exists());
++}
++
++#[test]
++fn test_cli_doctor_reports_stale_leases() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S1", "Story 1", "in-progress");
++    write_story(root, "E12S2", "Story 2", "in-progress");
++
++    // Claim E12S1 fresh
++    let mut cmd1 = Command::cargo_bin("qdev").unwrap();
++    cmd1.current_dir(root)
++        .args(["claim", "story", "E12S1"])
++        .assert()
++        .success();
++
++    // Create stale lease for E12S2
++    let lease_dir = root.join(".qdev/leases");
++    fs::create_dir_all(&lease_dir).unwrap();
++    let stale_lease = qdev_core::lease::StoryLease {
++        story_id: "E12S2".to_string(),
++        holder: "bob".to_string(),
++        author_type: "human".to_string(),
++        worktree_path: root.display().to_string(),
++        branch: "main".to_string(),
++        started_at: "2026-09-01T00:00:00Z".to_string(),
++        session_token: "qs_E12S2_0001".to_string(),
++    };
++    fs::write(
++        lease_dir.join("E12S2.json"),
++        serde_json::to_string_pretty(&stale_lease).unwrap(),
++    )
++    .unwrap();
++
++    // Run doctor in text mode
++    let mut cmd2 = Command::cargo_bin("qdev").unwrap();
++    let assert2 = cmd2.current_dir(root).args(["doctor"]).assert().success();
++    let text = std::str::from_utf8(&assert2.get_output().stdout).unwrap();
++    assert!(text.contains("[leases]"), "text: {}", text);
++    assert!(text.contains("active_count = 2"), "text: {}", text);
++    assert!(text.contains("stale_count = 1"), "text: {}", text);
++
++    // Run doctor in JSON mode
++    let mut cmd3 = Command::cargo_bin("qdev").unwrap();
++    let assert3 = cmd3
++        .current_dir(root)
++        .args(["doctor", "--json"])
++        .assert()
++        .success();
++
++    let val: Value = serde_json::from_slice(&assert3.get_output().stdout).unwrap();
++    let sections = val["sections"].as_array().unwrap();
++    let leases_sec = sections.iter().find(|s| s["name"] == "leases").unwrap();
++
++    assert_eq!(leases_sec["status"], "ok");
++    assert_eq!(leases_sec["active_count"], 2);
++    assert_eq!(leases_sec["stale_count"], 1);
++    assert_eq!(leases_sec["stale_age_days"], 3);
++
++    let stale_leases = leases_sec["stale_leases"].as_array().unwrap();
++    assert_eq!(stale_leases.len(), 1);
++    assert_eq!(stale_leases[0]["story_id"], "E12S2");
++}
++
++#[test]
++fn test_cli_doctor_custom_stale_age_days() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Set custom stale_age_days in qdev.toml
++    let toml_path = root.join("qdev.toml");
++    let mut toml = fs::read_to_string(&toml_path).unwrap();
++    toml.push_str("\n[leases]\nstale_age_days = 7\n");
++    fs::write(toml_path, toml).unwrap();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["doctor", "--json"])
++        .assert()
++        .success();
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    let sections = val["sections"].as_array().unwrap();
++    let leases_sec = sections.iter().find(|s| s["name"] == "leases").unwrap();
++    assert_eq!(leases_sec["stale_age_days"], 7);
++}
++
++#[test]
++fn test_cli_forced_release_creates_queryable_decision() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S1", "Story 1", "in-progress");
++
++    // Alice claims story
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S1", "--author-id", "alice"])
++        .assert()
++        .success();
++
++    // Bob breaks lease with force and justification
++    let mut rel_cmd = Command::cargo_bin("qdev").unwrap();
++    let rel_assert = rel_cmd
++        .current_dir(root)
++        .args([
++            "release",
++            "story",
++            "E12S1",
++            "--force",
++            "--justification",
++            "Reassigning to bob for urgent fix",
++            "--author-id",
++            "bob",
++            "--json",
++        ])
++        .assert()
++        .success();
++
++    let rel_val: Value = serde_json::from_slice(&rel_assert.get_output().stdout).unwrap();
++    let dec_id = rel_val["decision_id"].as_str().expect("must have decision_id");
++    assert!(dec_id.starts_with("DEC-"), "dec_id: {}", dec_id);
++
++    // Query the decision entity via qdev get <dec_id> --json
++    let mut get_cmd = Command::cargo_bin("qdev").unwrap();
++    let get_assert = get_cmd
++        .current_dir(root)
++        .args(["get", dec_id, "--json"])
++        .assert()
++        .success();
++
++    let get_val: Value = serde_json::from_slice(&get_assert.get_output().stdout).unwrap();
++    assert_eq!(get_val["id"], dec_id);
++    assert_eq!(get_val["kind"], "decision");
++    assert_eq!(get_val["status"], "active");
++}
++
++#[test]
++fn test_cli_claim_and_release_reject_non_story_entities() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Create an Epic entity
++    let epics_dir = root.join("docs/specs/epics");
++    fs::create_dir_all(&epics_dir).unwrap();
++    fs::write(
++        epics_dir.join("E12.md"),
++        r#"---
++id: E12
++title: "Epic Twelve"
++status: active
++version: 1
++created_by:
++  type: human
++  id: simon
++updated_by:
++  type: human
++  id: simon
++---
++
++# Epic Twelve
++"#,
++    )
++    .unwrap();
++
++    // Hydrate cache
++    let mut sync_cmd = Command::cargo_bin("qdev").unwrap();
++    sync_cmd.current_dir(root).args(["sync"]).assert().success();
++
++    // 1. qdev claim epic E12 -> usage error (exit 2)
++    let mut cmd1 = Command::cargo_bin("qdev").unwrap();
++    let assert1 = cmd1
++        .current_dir(root)
++        .args(["claim", "epic", "E12"])
++        .assert()
++        .failure()
++        .code(2);
++    let err1 = std::str::from_utf8(&assert1.get_output().stderr).unwrap();
++    assert!(err1.contains("Only story entities can be leased"), "err1: {}", err1);
++
++    // 2. qdev claim E12 (bare entity ID) -> usage error (exit 2)
++    let mut cmd2 = Command::cargo_bin("qdev").unwrap();
++    let assert2 = cmd2
++        .current_dir(root)
++        .args(["claim", "E12"])
++        .assert()
++        .failure()
++        .code(2);
++    let err2 = std::str::from_utf8(&assert2.get_output().stderr).unwrap();
++    assert!(err2.contains("Only story entities can be leased"), "err2: {}", err2);
++
++    // 3. qdev release epic E12 -> usage error (exit 2)
++    let mut cmd3 = Command::cargo_bin("qdev").unwrap();
++    let assert3 = cmd3
++        .current_dir(root)
++        .args(["release", "epic", "E12"])
++        .assert()
++        .failure()
++        .code(2);
++    let err3 = std::str::from_utf8(&assert3.get_output().stderr).unwrap();
++    assert!(err3.contains("Only story entities can be leased"), "err3: {}", err3);
++
++    // 4. qdev release E12 (bare entity ID) -> usage error (exit 2)
++    let mut cmd4 = Command::cargo_bin("qdev").unwrap();
++    let assert4 = cmd4
++        .current_dir(root)
++        .args(["release", "E12"])
++        .assert()
++        .failure()
++        .code(2);
++    let err4 = std::str::from_utf8(&assert4.get_output().stderr).unwrap();
++    assert!(err4.contains("Only story entities can be leased"), "err4: {}", err4);
++}
++

@@ -99,6 +99,60 @@
                 }
               }
             }
+          },
+          {
+            "if": {
+              "properties": { "name": { "const": "leases" } },
+              "required": ["name"]
+            },
+            "then": {
+              "required": [
+                "status",
+                "unavailable_reason",
+                "active_count",
+                "stale_count",
+                "stale_age_days",
+                "stale_leases"
+              ],
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": ["ok", "unavailable"],
+                  "description": "\"unavailable\" when the leases diagnostic pass could not complete."
+                },
+                "unavailable_reason": {
+                  "type": ["string", "null"],
+                  "description": "The error code that prevented the pass from completing; null when status is \"ok\"."
+                },
+                "active_count": {
+                  "type": ["integer", "null"],
+                  "description": "The total number of active story leases discovered across local and shared git locations. Null when the pass could not complete."
+                },
+                "stale_count": {
+                  "type": ["integer", "null"],
+                  "description": "The number of active leases older than stale_age_days. Null when the pass could not complete."
+                },
+                "stale_age_days": {
+                  "type": "integer",
+                  "description": "The configured threshold in days after which a lease is considered stale."
+                },
+                "stale_leases": {
+                  "type": ["array", "null"],
+                  "items": {
+                    "type": "object",
+                    "required": ["story_id", "holder", "worktree_path", "started_at", "age_days"],
+                    "properties": {
+                      "story_id": { "type": "string" },
+                      "holder": { "type": "string" },
+                      "worktree_path": { "type": "string" },
+                      "started_at": { "type": "string" },
+                      "age_days": { "type": "integer" }
+                    }
+                  },
+                  "description": "List of stale lease records older than stale_age_days."
+                }
+              }
+            }
           }
         ]
       }

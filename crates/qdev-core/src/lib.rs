@@ -6,12 +6,20 @@ pub mod errors;
 pub mod id;
 pub mod init;
 pub mod interactivity;
+pub mod lease;
 pub mod query;
 pub mod schema;
 pub mod store;
 pub mod transition;
 pub mod validate;
 pub mod write;
+
+pub use lease::{
+    auto_release_lease, claim_story, create_lease_override_decision, discover_git_branch,
+    discover_git_common_dir, find_active_lease, find_workspace_leases, generate_session_token,
+    get_lease, list_leases, parse_iso8601_to_timestamp, release_story, ReleasePayload,
+    StoryLease,
+};
 
 pub use store::{
     create_schema, determine_entity_kind, drop_all_user_tables, ensure_cache, inspect_cache_schema,
@@ -29,14 +37,14 @@ pub use dag::{
 
 pub use doctor::{
     default_doctor_sections, CacheDoctorSection, DoctorSection, DoctorSectionReport,
-    ValidationDoctorSection,
+    LeasesDoctorSection, ValidationDoctorSection,
 };
 
 pub use config::{
     find_workspace_root, load_config, load_project_storage, merge_configs, resolve_git_email,
     validate_config_table, AnnotatedConfig, AnnotatedValue, CommitMessagesConfig, Config,
     ConfigSource, EnvironmentConfig, GateConfig, GitConfig, HygieneConfig, IdentityConfig,
-    ModelsConfig, ModuleConfig, PreferencesConfig, ProjectConfig, RegulatoryConfig, SoupConfig,
+    LeasesConfig, ModelsConfig, ModuleConfig, PreferencesConfig, ProjectConfig, RegulatoryConfig, SoupConfig,
     StorageConfig, TeamsConfig, DEFAULT_CITATION_PATTERN, LOCAL_CONFIG_FILENAME,
     PROJECT_CONFIG_FILENAME,
 };
