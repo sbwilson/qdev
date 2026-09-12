@@ -370,7 +370,7 @@ pub fn claim_story(
 
     // 2. Verify story entity exists and is a story kind
     let entity_kind = if let Some(store) = opt_store {
-        if let Ok(Some(record)) = store.get_entity(trimmed_id) {
+        if let Ok(Some(record)) = store.get_live_entity_for_derivation(trimmed_id) {
             Some(record.kind)
         } else {
             resolve_entity_file(workspace_root, None, trimmed_id, storage)
@@ -480,7 +480,7 @@ pub fn release_story(
 
     // Verify entity kind if entity exists
     let entity_kind = if let Some(store) = opt_store {
-        if let Ok(Some(record)) = store.get_entity(trimmed_id) {
+        if let Ok(Some(record)) = store.get_live_entity_for_derivation(trimmed_id) {
             Some(record.kind)
         } else {
             resolve_entity_file(workspace_root, None, trimmed_id, storage)

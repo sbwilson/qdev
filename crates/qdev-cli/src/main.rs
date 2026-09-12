@@ -3439,7 +3439,7 @@ fn handle_claim(
             return err.exit_code();
         }
     } else if let Some(ref store) = opt_store {
-        if let Ok(Some(record)) = store.get_entity(&story_id) {
+        if let Ok(Some(record)) = store.get_live_entity_for_derivation(&story_id) {
             if record.kind != qdev_core::EntityKind::Story {
                 let err = QdevError::usage_error("Only story entities can be leased");
                 let _ = output.emit_error(&err);
@@ -3540,7 +3540,7 @@ fn handle_release(
                 return err.exit_code();
             }
         } else if let Some(ref store) = opt_store {
-            if let Ok(Some(record)) = store.get_entity(&id) {
+            if let Ok(Some(record)) = store.get_live_entity_for_derivation(&id) {
                 if record.kind != qdev_core::EntityKind::Story {
                     let err = QdevError::usage_error("Only story entities can be leased");
                     let _ = output.emit_error(&err);

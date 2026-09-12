@@ -857,6 +857,7 @@ pub fn append_scratchpad_entry(
 
 /// Creates a committed DEC- record in `docs/state/decisions/` recording the rationale for a
 /// backward story transition, validated against `decision.json` schema, and synced to SQLite cache if present.
+#[allow(clippy::too_many_arguments)]
 pub fn create_backward_transition_decision(
     workspace_root: &Path,
     storage: Option<&StorageConfig>,
