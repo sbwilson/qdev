@@ -2,9 +2,9 @@
 title: 'Derivation sites are enumerable'
 type: 'bugfix'
 created: '2026-09-12'
-status: 'in-review'
+status: 'done'
 route: 'dispatch'
-review_loop_iteration: 1
+review_loop_iteration: 2
 baseline_commit: 'b4eed6ead305d7b667e2211ef2e777f1442100f5'
 context: [ '{project-root}/docs/architecture.md', '{project-root}/docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-11-pass-3.md', '{project-root}/docs/bmad/implementation-artifacts/spec-stale-means-absent.md' ]
 ---
@@ -88,6 +88,16 @@ context: [ '{project-root}/docs/architecture.md', '{project-root}/docs/bmad/impl
 - **false** — blind-hunter: P3-11 is marked resolved with its current `in-progress` status stated transparently, as the workflow directs when implementation is complete and review remains. It does not claim the story is done.
 - **medium / bad_spec** — edge-case-hunter: the separate presence and status reads admit the same concurrent stale transition described above. The proposed `get_entity_for_derivation` name is not an existing API, but the verified defect requires the spec to design one coherent derivation read rather than assume two calls are atomic.
 - **low / rejected** — verification-gap: the absence of a committed lint self-test is real, but the direct configuration mutation was run and recorded; maintaining a harness that mutates source or configuration solely to test Clippy’s built-in configuration loading is not a direct correction. The loopback will strengthen the actual coverage boundary by including `list_entities`.
+- **patch** — verification-gap: `diff-1-30.patch` hunk for `crates/qdev-core/tests/query_tests.rs` diverged from the working tree with synthetic mock types; updated `diff-1-30.patch` to match the compiling `SqliteStore` tests in the working tree.
+- **low / patch** — blind-hunter: `Store::get_live_entity_for_derivation` lacked a direct unit test in `store_tests.rs`; added direct unit test assertions for absent, live, and stale rows.
+- **low / patch** — blind-hunter: `query_tests.rs` had single-dependency stale coverage; added `test_blocked_true_when_one_dependency_done_and_one_stale_done` asserting that an accompanying stale done dependency blocks even when another dependency is live and done.
+- **false** — blind-hunter: carried: bulk iterations in `validate.rs` check `exists_for_derivation` row-by-row on the rows already in hand to avoid N+1 queries, as documented in code and architecture.
+- **false** — blind-hunter: carried: crate-level test allowances are deliberately confined to test targets, while the acceptance criterion covers core production code.
+- **false** — blind-hunter: function-level allows are on the reporting/write-gate entry points documented in architecture.
+- **false** — blind-hunter: checking target entity kind in `compute_blocked` is outside the defect scope and violates the constraint that live dependency behaviour remains unchanged.
+- **low / rejected** — blind-hunter: carried: a committed CI mutation probe harness is disproportionate to test Clippy's built-in configuration loading.
+- **false** — blind-hunter: updating `sprint-status.yaml` to `review` is handled in Step 5 (Present).
+- **false** — blind-hunter: store query batching is an optimization outside bugfix scope.
 
 ## Design Notes
 

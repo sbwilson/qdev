@@ -308,6 +308,54 @@ fn test_blocked_true_when_dependency_done_but_stale() {
 }
 
 #[test]
+fn test_blocked_true_when_one_dependency_done_and_one_stale_done() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    store
+        .upsert_entity(&story_entity("E20S10", "E20", 10))
+        .unwrap();
+    // Live done dependency
+    store
+        .upsert_entity(&EntityRecord {
+            status: Some("done".to_string()),
+            stale: false,
+            ..story_entity("E20S11", "E20", 11)
+        })
+        .unwrap();
+    // Stale done dependency
+    store
+        .upsert_entity(&EntityRecord {
+            status: Some("done".to_string()),
+            stale: true,
+            ..story_entity("E20S12", "E20", 12)
+        })
+        .unwrap();
+    store
+        .upsert_relation(&RelationRecord {
+            source_id: "E20S10".to_string(),
+            relation: "depends_on".to_string(),
+            target_id: "E20S11".to_string(),
+        })
+        .unwrap();
+    store
+        .upsert_relation(&RelationRecord {
+            source_id: "E20S10".to_string(),
+            relation: "depends_on".to_string(),
+            target_id: "E20S12".to_string(),
+        })
+        .unwrap();
+
+    let result = query_entity(&store, None, "E20S10", &QueryOptions::default()).unwrap();
+    let projection = match result {
+        GetResult::Entity(p) => *p,
+        GetResult::Constraint(_) => panic!("expected an entity projection"),
+    };
+    assert!(
+        projection.blocked,
+        "even with a live done dependency, an accompanying stale done dependency blocks"
+    );
+}
+
+#[test]
 fn test_blocked_true_when_dependency_target_is_dangling() {
     let store = SqliteStore::open_in_memory().unwrap();
     store

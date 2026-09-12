@@ -1,0 +1,355 @@
+diff --git a/clippy.toml b/clippy.toml
+index e69de29..3f9d501 100644
+--- a/clippy.toml
++++ b/clippy.toml
+@@ -0,0 +1,5 @@
++disallowed-methods = [
++  { path = "qdev_core::store::Store::get_entity", reason = "This raw read includes retained stale rows. Use get_live_entity_for_derivation or explicitly document a reporting, ownership, graph, or write-gate exception." },
++  { path = "qdev_core::store::Store::list_entities", reason = "This raw read includes retained stale rows. Filter each row for derivation or explicitly document a reporting, ownership, graph, or write-gate exception." },
++]
++
+diff --git a/crates/qdev-cli/src/main.rs b/crates/qdev-cli/src/main.rs
+index 455e9ea..110be13 100644
+--- a/crates/qdev-cli/src/main.rs
++++ b/crates/qdev-cli/src/main.rs
+@@ -874,6 +874,7 @@ fn handle_create(
+     ExitCode::Success
+ }
+ 
++#[allow(clippy::disallowed_methods)] // Relation write-gate intentionally reads the retained source row.
+ fn handle_update(
+     update_args: &cli::UpdateArgs,
+     annotated_config: &qdev_core::AnnotatedConfig,
+@@ -1645,6 +1646,7 @@ fn parse_relations_from_value(
+ 
+ /// Reads the cache into the pure core proposed-graph gate.  Keeping store access here leaves
+ /// the gate reusable for future callers and gives `relate` and whole-map replacement one rule.
++#[allow(clippy::disallowed_methods)] // Relation write-gate must inspect the complete retained graph.
+ fn validate_proposed_relation_map(
+     store: &qdev_core::SqliteStore,
+     source: &qdev_core::EntityRecord,
+@@ -1670,6 +1672,7 @@ fn validate_proposed_relation_map(
+     )
+ }
+ 
++#[allow(clippy::disallowed_methods)] // Relation write-gate intentionally reads the retained source row.
+ fn handle_relate(
+     relate_args: &cli::RelateArgs,
+     annotated_config: &qdev_core::AnnotatedConfig,
+diff --git a/crates/qdev-cli/tests/validate_cli_tests.rs b/crates/qdev-cli/tests/validate_cli_tests.rs
+index a1f6d3b..181e185 100644
+--- a/crates/qdev-cli/tests/validate_cli_tests.rs
++++ b/crates/qdev-cli/tests/validate_cli_tests.rs
+@@ -1,3 +1,4 @@
++#![allow(clippy::disallowed_methods)] // Integration tests inspect raw retained cache rows directly.
+ use std::fs;
+ use std::path::Path;
+ 
+diff --git a/crates/qdev-core/src/doctor.rs b/crates/qdev-core/src/doctor.rs
+index 7a9e083..3da878c 100644
+--- a/crates/qdev-core/src/doctor.rs
++++ b/crates/qdev-core/src/doctor.rs
+@@ -95,6 +95,7 @@ impl DoctorSection for CacheDoctorSection {
+         "cache"
+     }
+ 
++    #[allow(clippy::disallowed_methods)] // Cache diagnostics count retained rows rather than deriving state from them.
+     fn run(&self, store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
+         let observed_schema_version = store.cache_schema_version()?;
+         let missing_tables = store.cache_missing_tables()?;
+diff --git a/crates/qdev-core/src/query.rs b/crates/qdev-core/src/query.rs
+index cdff2a2..89f81ce 100644
+--- a/crates/qdev-core/src/query.rs
++++ b/crates/qdev-core/src/query.rs
+@@ -143,10 +143,12 @@ fn compute_blocked(
+     }
+     for row in relation_rows {
+         if row.relation == "depends_on" {
+-            let target_status = store.get_entity(&row.target_id)?.and_then(|e| e.status);
++            // The helper makes the staleness decision and reads `status` from one row snapshot:
++            // a stale retained `done` dependency is absent, just as it is to relation validation
++            // and a full rebuild.
++            let target_status = store
++                .get_live_entity_for_derivation(&row.target_id)?
++                .and_then(|entity| entity.status);
+             if target_status.as_deref() != Some("done") {
+                 return Ok(true);
+             }
+@@ -237,6 +239,7 @@ fn build_entity_projection(
+ /// - Otherwise the id is looked up directly against `entities.id` (the globally unique primary
+ ///   key) rather than re-deriving kind from the identifier grammar. If `kind_hint` is given
+ ///   (the caller passed an explicit kind, e.g. `qdev get story E12S4`) and the resolved
+ ///   entity's actual kind differs, this is a usage error.
++#[allow(clippy::disallowed_methods)] // `qdev get` is a reporting path and must surface stale rows.
+ pub fn query_entity(
+     store: &dyn Store,
+     kind_hint: Option<EntityKind>,
+@@ -339,6 +342,7 @@ pub fn query_entity(
+ }
+ 
+ /// Runs a filtered, id-ordered entity listing straight from the cache. Every filter applies as
+ /// an AND.
++#[allow(clippy::disallowed_methods)] // `qdev list` is a reporting path and must surface stale rows.
+ pub fn query_list(
+     store: &dyn Store,
+     options: &ListQueryOptions,
+diff --git a/crates/qdev-core/src/store/mod.rs b/crates/qdev-core/src/store/mod.rs
+index df3e595..81c3b16 100644
+--- a/crates/qdev-core/src/store/mod.rs
++++ b/crates/qdev-core/src/store/mod.rs
+@@ -330,6 +330,18 @@ pub trait Store: Send + Sync {
+     fn list_entities(&self, filter: &EntityFilter) -> Result<Vec<EntityRecord>, QdevError>;
+     fn delete_entity(&self, id: &str) -> Result<bool, QdevError>;
+ 
++    /// Returns the entity only when its cached row is live, for derived state that needs fields
++    /// from one coherent row snapshot. Unlike a presence probe followed by `get_entity`, this
++    /// cannot observe the row before and after a concurrent sweep independently. In particular,
++    /// a retained stale `done` dependency is absent here and must block its dependent story.
++    ///
++    /// The stale-inclusive raw read is deliberate inside this helper: it is the one place that
++    /// turns its row snapshot into the derivation answer. Callers deriving state must use this
++    /// method rather than reading `get_entity` directly.
++    #[allow(clippy::disallowed_methods)]
++    fn get_live_entity_for_derivation(&self, id: &str) -> Result<Option<EntityRecord>, QdevError> {
++        Ok(self.get_entity(id)?.filter(|entity| !entity.stale))
++    }
++
+     /// **The one answer to "does this entity exist, for the purpose of deriving a finding?"**
+     /// A stale row is [`EntityPresence::Stale`], never `Live`, so it is absent to every derived
+     /// finding — which is what makes an incremental sweep (which retains stale rows) and a full
+@@ -343,6 +355,7 @@ pub trait Store: Send + Sync {
+     /// for a cheaper read (`SqliteStore` fetches the flag alone rather than the whole row), but
+     /// it must return exactly what this default would.
++    #[allow(clippy::disallowed_methods)]
+     fn entity_presence_for_derivation(&self, id: &str) -> Result<EntityPresence, QdevError> {
+         Ok(EntityPresence::from_stale_flag(
+             self.get_entity(id)?.map(|entity| entity.stale),
+diff --git a/crates/qdev-core/src/validate.rs b/crates/qdev-core/src/validate.rs
+index b34d0b1..e3ea7ef 100644
+--- a/crates/qdev-core/src/validate.rs
++++ b/crates/qdev-core/src/validate.rs
+@@ -195,6 +195,7 @@ pub struct DuplicateIdScan {
+ /// [`ids_in_use`] for a caller that has already run [`scan_duplicate_planning_ids`] — the same
+ /// answer, without walking both trees a second time. `--fix-ids` needs the scan's `groups` as
+ /// well as its ids, so it uses this rather than paying for the walk twice.
++#[allow(clippy::disallowed_methods)] // ID ownership deliberately includes stale retained rows.
+ pub fn ids_in_use_from_scan(
+     scan: &DuplicateIdScan,
+     store: Option<&dyn Store>,
+@@ -225,6 +226,7 @@ pub fn ids_in_use_from_scan(
+ /// `deferred_work` row without an `entities` row is itself a broken cache and the finding must
+ /// still be reported against a named placeholder rather than dropped.
++#[allow(clippy::disallowed_methods)] // Reporting path lookup deliberately preserves a retained row's source path.
+ fn deferred_work_path(store: &dyn Store, dw_id: &str) -> Result<String, QdevError> {
+     Ok(match store.get_entity(dw_id)? {
+         Some(entity) => entity.source_path,
+@@ -328,6 +330,7 @@ pub fn validate_relation_types(
+ /// `target_module_not_registered`: a story's `target_modules` entry is absent from
+ /// `config.modules[].id`. One finding per (story, unregistered module) pair.
++#[allow(clippy::disallowed_methods)] // Rows are filtered through `exists_for_derivation` below.
+ pub fn find_unregistered_target_modules(
+     store: &dyn Store,
+     config: &Config,
+@@ -388,6 +391,7 @@ pub fn find_off_convention_entity_files(
+ /// standard set rather than the one directory for the entity's kind, because that is exactly
+ /// what the write path accepts: its cross-kind fallback resolves an id in any standard directory,
+ /// so a `kind:` that disagrees with its directory is not itself an identity problem.
++#[allow(clippy::disallowed_methods)] // Rows are filtered through `exists_for_derivation` below.
+ pub fn find_off_convention_entity_files(
+     store: &dyn Store,
+     storage: &crate::config::StorageConfig,
+diff --git a/crates/qdev-core/tests/query_tests.rs b/crates/qdev-core/tests/query_tests.rs
+index 455e9ea..110be13 100644
+--- a/crates/qdev-core/tests/query_tests.rs
++++ b/crates/qdev-core/tests/query_tests.rs
+@@ -275,6 +275,37 @@ fn test_blocked_true_when_dependency_not_done() {
+     assert!(projection.blocked);
+ }
+ 
++#[test]
++fn test_blocked_true_when_dependency_done_but_stale() {
++    let store = SqliteStore::open_in_memory().unwrap();
++    store
++        .upsert_entity(&story_entity("E20S4", "E20", 4))
++        .unwrap();
++    store
++        .upsert_entity(&EntityRecord {
++            status: Some("done".to_string()),
++            stale: true,
++            ..story_entity("E20S5", "E20", 5)
++        })
++        .unwrap();
++    store
++        .upsert_relation(&RelationRecord {
++            source_id: "E20S4".to_string(),
++            relation: "depends_on".to_string(),
++            target_id: "E20S5".to_string(),
++        })
++        .unwrap();
++
++    let result = query_entity(&store, None, "E20S4", &QueryOptions::default()).unwrap();
++    let projection = match result {
++        GetResult::Entity(p) => *p,
++        GetResult::Constraint(_) => panic!("expected an entity projection"),
++    };
++    assert!(
++        projection.blocked,
++        "a stale retained done dependency is absent for derivation and must block"
++    );
++}
++
++#[test]
++fn test_blocked_true_when_one_dependency_done_and_one_stale_done() {
++    let store = SqliteStore::open_in_memory().unwrap();
++    store
++        .upsert_entity(&story_entity("E20S10", "E20", 10))
++        .unwrap();
++    // Live done dependency
++    store
++        .upsert_entity(&EntityRecord {
++            status: Some("done".to_string()),
++            stale: false,
++            ..story_entity("E20S11", "E20", 11)
++        })
++        .unwrap();
++    // Stale done dependency
++    store
++        .upsert_entity(&EntityRecord {
++            status: Some("done".to_string()),
++            stale: true,
++            ..story_entity("E20S12", "E20", 12)
++        })
++        .unwrap();
++    store
++        .upsert_relation(&RelationRecord {
++            source_id: "E20S10".to_string(),
++            relation: "depends_on".to_string(),
++            target_id: "E20S11".to_string(),
++        })
++        .unwrap();
++    store
++        .upsert_relation(&RelationRecord {
++            source_id: "E20S10".to_string(),
++            relation: "depends_on".to_string(),
++            target_id: "E20S12".to_string(),
++        })
++        .unwrap();
++
++    let result = query_entity(&store, None, "E20S10", &QueryOptions::default()).unwrap();
++    let projection = match result {
++        GetResult::Entity(p) => *p,
++        GetResult::Constraint(_) => panic!("expected an entity projection"),
++    };
++    assert!(
++        projection.blocked,
++        "even with a live done dependency, an accompanying stale done dependency blocks"
++    );
++}
++
+ #[test]
+ fn test_blocked_true_when_dependency_target_is_dangling() {
+diff --git a/crates/qdev-core/tests/store_tests.rs b/crates/qdev-core/tests/store_tests.rs
+index 9b69b50..2c40c74 100644
+--- a/crates/qdev-core/tests/store_tests.rs
++++ b/crates/qdev-core/tests/store_tests.rs
+@@ -1,3 +1,4 @@
++#![allow(clippy::disallowed_methods)] // Integration tests inspect raw retained cache rows directly.
+ use qdev_core::error::QdevError;
+ use qdev_core::models::*;
+ use qdev_core::store::sqlite::SqliteStore;
+@@ -1457,6 +1458,8 @@ fn test_derivation_presence_and_exists_helpers_follow_the_stale_rule() {
+         EntityPresence::Live
+     );
+     assert!(store.entity_exists_for_derivation("E1S1").unwrap());
++    assert!(store.get_live_entity_for_derivation("E1S1").unwrap().is_some());
++    assert!(store.get_live_entity_for_derivation("NONEXISTENT").unwrap().is_none());
+ 
+     record.stale = true;
+     store.upsert_entity(&record).unwrap();
+@@ -1468,6 +1471,10 @@ fn test_derivation_presence_and_exists_helpers_follow_the_stale_rule() {
+         !store.entity_exists_for_derivation("E1S1").unwrap(),
+         "stale means absent for derivation"
+     );
++    assert!(
++        store.get_live_entity_for_derivation("E1S1").unwrap().is_none(),
++        "a stale retained row is absent from get_live_entity_for_derivation"
++    );
+     // ...while the read is untouched, which is what retention exists for.
+     assert!(
+         store.get_entity("E1S1").unwrap().is_some_and(|e| e.stale),
+diff --git a/crates/qdev-core/tests/sweep_tests.rs b/crates/qdev-core/tests/sweep_tests.rs
+index a157b11..765fdf7 100644
+--- a/crates/qdev-core/tests/sweep_tests.rs
++++ b/crates/qdev-core/tests/sweep_tests.rs
+@@ -1,3 +1,4 @@
++#![allow(clippy::disallowed_methods)] // Integration tests inspect raw retained cache rows directly.
+ use std::collections::BTreeMap;
+ use std::fs;
+ use std::path::Path;
+diff --git a/crates/qdev-core/tests/validate_tests.rs b/crates/qdev-core/tests/validate_tests.rs
+index daf2b44..93f1fa6 100644
+--- a/crates/qdev-core/tests/validate_tests.rs
++++ b/crates/qdev-core/tests/validate_tests.rs
+@@ -1,3 +1,4 @@
++#![allow(clippy::disallowed_methods)] // Integration tests inspect raw retained cache rows directly.
+ use std::collections::HashSet;
+ use std::fs;
+ 
+diff --git a/crates/qdev-core/tests/write_tests.rs b/crates/qdev-core/tests/write_tests.rs
+index 515767b..37617b7 100644
+--- a/crates/qdev-core/tests/write_tests.rs
++++ b/crates/qdev-core/tests/write_tests.rs
+@@ -1,3 +1,4 @@
++#![allow(clippy::disallowed_methods)] // Integration tests inspect raw retained cache rows directly.
+ use std::collections::BTreeMap;
+ use std::fs;
+ 
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 107d3fa..d58dfc9 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -559,8 +559,16 @@ Finding codes and their schema are documented in `contracts/findings.md`.
+ 
+-  **The derivation helper is the rule.** `Store::entity_exists_for_derivation` (and its
+-  three-state `entity_presence_for_derivation`, for the two deferred-work checks that must tell a
+-  stale row from a missing one) is the *only* place this check is implemented; it lives on the
+-  `Store` trait as a provided method, so an implementor cannot get it wrong. Every call site that
+-  derives a finding from an entity's existence calls this helper.
++  **The derivation helpers answer the rule, and the raw APIs are linted.**
++  `Store::entity_exists_for_derivation` (and its three-state
++  `entity_presence_for_derivation`, for the two deferred-work checks that must tell a stale row
++  from a missing one) answers "does this entity exist, for the purpose of deriving a finding?";
++  the rule itself lives in `EntityPresence::from_stale_flag`. When derived state also needs entity
++  fields, `Store::get_live_entity_for_derivation` returns one live-row snapshot, so the stale
++  decision and, for example, a dependency's `status` cannot come from different cache states.
++  `clippy::disallowed_methods` rejects unmarked uses of stale-inclusive `get_entity` and
++  `list_entities` in production code. Each deliberate raw read therefore carries a local
++  documented allow explaining why it is reporting, ownership, graph, or write-gate work rather
++  than a new derivation site.
+ 
+   Deliberate exceptions are each named at their call site, narrow, and look like the bug:
+   - `deferred_work_path` asks the unfiltered `get_entity` for a *path to report against*. A stale row's `source_path` is still the path of the file the finding is about.
+@@ -569,6 +577,9 @@ Finding codes and their schema are documented in `contracts/findings.md`.
+   - The relation-graph queries keep their `WHERE stale = 0` in SQL. They validate the whole graph in one query, and pulling that through a per-row helper would trade one query for N.
++  - `qdev get`, `qdev list`, and doctor cache counts are reporting paths, so they intentionally
++    return or count retained stale rows. Relation-write gates intentionally inspect retained
++    source rows and the complete cached graph until their stale-source policy is separately
++    decided.
+ 
+   Reads are untouched — `get_entity`, `list_entities` and the `qdev get`/`qdev list` payloads still return a stale entity with its `stale` flag set, which is what the retention exists for.
+ 
+diff --git a/docs/bmad/implementation-artifacts/deferred-work.md b/docs/bmad/implementation-artifacts/deferred-work.md
+index f003b0c..fc41c59 100644
+--- a/docs/bmad/implementation-artifacts/deferred-work.md
++++ b/docs/bmad/implementation-artifacts/deferred-work.md
+@@ -344,8 +344,4 @@
+-- **P3-11** — `qdev get` uses raw `get_entity` in `compute_blocked` without checking derivation presence; a stale `done` dependency unblocks while validation flags dangling.
+-  - evidence: `crates/qdev-core/src/query.rs:146` reads `get_entity` directly.
++- ~~**P3-11**~~ — **RESOLVED 2026-09-12 by `1-30-derivation-sites-are-enumerable`** (spec `spec-1-30-derivation-sites-are-enumerable.md`, status `in-progress`): `blocked` now reads a single live-row derivation snapshot, so a retained stale `done` dependency blocks exactly as a dangling dependency does. Clippy rejects unmarked stale-inclusive `get_entity` and `list_entities` calls in production code; named reporting, ownership, graph, and write-gate exceptions remain explicit.
+diff --git a/docs/bmad/implementation-artifacts/sprint-status.yaml b/docs/bmad/implementation-artifacts/sprint-status.yaml
+index 010d869..3f9ebcc 100644
+--- a/docs/bmad/implementation-artifacts/sprint-status.yaml
++++ b/docs/bmad/implementation-artifacts/sprint-status.yaml
+@@ -63,1 +63,1 @@
+-  1-30-derivation-sites-are-enumerable: ready-for-dev   # P3-11
++  1-30-derivation-sites-are-enumerable: in-progress     # P3-11

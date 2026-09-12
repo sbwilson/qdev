@@ -1457,6 +1457,8 @@ fn test_entity_presence_for_derivation_maps_all_three_states() {
         EntityPresence::Live
     );
     assert!(store.entity_exists_for_derivation("E1S1").unwrap());
+    assert!(store.get_live_entity_for_derivation("E1S1").unwrap().is_some());
+    assert!(store.get_live_entity_for_derivation("NONEXISTENT").unwrap().is_none());
 
     record.stale = true;
     store.upsert_entity(&record).unwrap();
@@ -1468,6 +1470,10 @@ fn test_entity_presence_for_derivation_maps_all_three_states() {
     assert!(
         !store.entity_exists_for_derivation("E1S1").unwrap(),
         "stale means absent for derivation"
+    );
+    assert!(
+        store.get_live_entity_for_derivation("E1S1").unwrap().is_none(),
+        "a stale retained row is absent from get_live_entity_for_derivation"
     );
     // ...while the read is untouched, which is what retention exists for.
     assert!(
