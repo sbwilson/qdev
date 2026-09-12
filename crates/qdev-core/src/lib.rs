@@ -23,7 +23,7 @@ pub use store::{
 
 pub use dag::{
     allowed_kind_pairs, find_dependency_cycle, is_known_relation, is_valid_kind_pair,
-    relation_names, would_create_cycle,
+    relation_names, validate_proposed_relation_map, would_create_cycle,
 };
 
 pub use doctor::{

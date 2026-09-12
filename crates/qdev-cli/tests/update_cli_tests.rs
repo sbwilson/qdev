@@ -34,6 +34,260 @@ fn create_sample_story(root: &Path, id: &str, content: &str) {
     fs::write(dir.join(format!("{}.md", id)), content).unwrap();
 }
 
+fn relation_story(id: &str, relations: &str) -> String {
+    format!(
+        r#"---
+id: {id}
+title: Story {id}
+status: draft
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+{relations}---
+
+## Acceptance Criteria
+- AC.
+"#
+    )
+}
+
+fn assert_update_refusal_is_non_mutating(
+    root: &Path,
+    field: &str,
+    expected_code: &str,
+    expected_exit: i32,
+    original: &str,
+) {
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["update", "E1S2", "--field", field, "--json"])
+        .assert()
+        .failure()
+        .code(expected_exit);
+    let output: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(output["error"]["code"], expected_code);
+    assert_eq!(
+        fs::read_to_string(root.join("docs/specs/stories/E1S2.md")).unwrap(),
+        original,
+        "a refused relation update must not change frontmatter bytes"
+    );
+    let connection = rusqlite::Connection::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let version: u64 = connection
+        .query_row(
+            "SELECT version FROM entities WHERE id = 'E1S2'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let dirty_rows: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM dirty_entities WHERE id = 'E1S2'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, 1);
+    assert_eq!(dirty_rows, 0);
+}
+
+#[test]
+fn test_update_relations_uses_the_same_prewrite_graph_gate_as_relate() {
+    // Dangling target.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    create_sample_story(root, "E1S2", &relation_story("E1S2", ""));
+    let original = fs::read_to_string(root.join("docs/specs/stories/E1S2.md")).unwrap();
+    assert_update_refusal_is_non_mutating(
+        root,
+        "relations={depends_on: [E9S9]}",
+        "dangling_relation",
+        1,
+        &original,
+    );
+
+    // Invalid source/target pair.
+    // An epic belongs in the epics directory; use a separate workspace to keep the fixture's
+    // filename-to-kind rule explicit.
+    let pair_temp = TempDir::new().unwrap();
+    let pair_root = pair_temp.path();
+    setup_workspace(pair_root);
+    create_sample_story(pair_root, "E1S2", &relation_story("E1S2", ""));
+    let epic_dir = pair_root.join("docs/specs/epics");
+    fs::create_dir_all(&epic_dir).unwrap();
+    fs::write(epic_dir.join("E1.md"), relation_story("E1", "")).unwrap();
+    let pair_original = fs::read_to_string(pair_root.join("docs/specs/stories/E1S2.md")).unwrap();
+    assert_update_refusal_is_non_mutating(
+        pair_root,
+        "relations={traces_to: [E1]}",
+        "invalid_relation_kind",
+        1,
+        &pair_original,
+    );
+
+    // A cycle in the replacement's final graph.
+    let cycle_temp = TempDir::new().unwrap();
+    let cycle_root = cycle_temp.path();
+    setup_workspace(cycle_root);
+    create_sample_story(
+        cycle_root,
+        "E1S1",
+        &relation_story("E1S1", "relations:\n  depends_on: [E1S2]\n"),
+    );
+    create_sample_story(cycle_root, "E1S2", &relation_story("E1S2", ""));
+    let cycle_original = fs::read_to_string(cycle_root.join("docs/specs/stories/E1S2.md")).unwrap();
+    assert_update_refusal_is_non_mutating(
+        cycle_root,
+        "relations={depends_on: [E1S1]}",
+        "dependency_cycle",
+        1,
+        &cycle_original,
+    );
+
+    // Unknown names are usage errors through this surface too, before schema validation could
+    // turn them into a different logical-failure contract.
+    assert_update_refusal_is_non_mutating(
+        root,
+        "relations={unknown_relation: [E1S2]}",
+        "usage_error",
+        2,
+        &original,
+    );
+
+    // A malformed map is intentionally not interpreted by the graph gate; the existing generic
+    // writer's schema failure remains responsible, and still cannot mutate any write state.
+    assert_update_refusal_is_non_mutating(
+        root,
+        "relations=not-a-map",
+        "schema_validation_failed",
+        1,
+        &original,
+    );
+}
+
+#[test]
+fn test_update_relations_replaces_and_removes_edges_in_the_final_graph() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    create_sample_story(root, "E1S1", &relation_story("E1S1", ""));
+    create_sample_story(root, "E1S3", &relation_story("E1S3", ""));
+    create_sample_story(
+        root,
+        "E1S2",
+        &relation_story("E1S2", "relations:\n  depends_on: [E1S1]\n"),
+    );
+    // The existing source map forms a cycle. Replacing it must assess the final map rather than
+    // treating the new entry as an addition to the old one.
+    create_sample_story(
+        root,
+        "E1S1",
+        &relation_story("E1S1", "relations:\n  depends_on: [E1S2]\n"),
+    );
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args([
+            "update",
+            "E1S2",
+            "--field",
+            "relations={depends_on: [E1S3]}",
+        ])
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(root.join("docs/specs/stories/E1S2.md")).unwrap();
+    assert!(content.contains("depends_on:"));
+    assert!(content.contains("E1S3"));
+    assert!(!content.contains("E1S1"));
+
+    // A new process hydrates exactly the replacement map into cache rows.
+    let mut status = Command::cargo_bin("qdev").unwrap();
+    status.current_dir(root).args(["status"]).assert().success();
+    let connection = rusqlite::Connection::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let rows: Vec<(String, String)> = {
+        let mut statement = connection
+            .prepare("SELECT relation, target_id FROM relations WHERE source_id = 'E1S2'")
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(rows, vec![("depends_on".to_string(), "E1S3".to_string())]);
+}
+
+#[test]
+fn test_update_rejects_case_variant_of_canonical_field_key() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    create_sample_story(root, "E1S2", &relation_story("E1S2", ""));
+    let original = fs::read_to_string(root.join("docs/specs/stories/E1S2.md")).unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["update", "E1S2", "--field", "Status=ready", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    let output: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(output["error"]["code"], "usage_error");
+    assert_eq!(
+        fs::read_to_string(root.join("docs/specs/stories/E1S2.md")).unwrap(),
+        original
+    );
+
+    let mut kind = Command::cargo_bin("qdev").unwrap();
+    kind.current_dir(root)
+        .args(["update", "E1S2", "--field", "Kind=story", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    assert_eq!(
+        fs::read_to_string(root.join("docs/specs/stories/E1S2.md")).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn test_update_relations_validates_against_the_proposed_kind() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let epics = root.join("docs/specs/epics");
+    fs::create_dir_all(&epics).unwrap();
+    fs::write(epics.join("E1.md"), relation_story("E1", "")).unwrap();
+    create_sample_story(root, "E1S1", &relation_story("E1S1", ""));
+
+    // `depends_on` is invalid for the cached Epic, but valid for the Story the same update
+    // creates. Preflight must use the latter just as the writer's schema validation does.
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args([
+            "update",
+            "E1",
+            "--field",
+            "kind=story",
+            "--field",
+            "relations={depends_on: [E1S1]}",
+        ])
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(epics.join("E1.md")).unwrap();
+    assert!(content.contains("kind: story"));
+    assert!(content.contains("depends_on:"));
+}
+
 #[test]
 fn test_update_single_field_happy_path() {
     let temp = TempDir::new().unwrap();

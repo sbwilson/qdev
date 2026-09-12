@@ -84,6 +84,33 @@ updated_by:
     .unwrap();
 }
 
+fn create_requirement(root: &Path, id: &str) {
+    let dir = root.join("docs/specs/requirements");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(format!("{}.md", id)),
+        format!(
+            r#"---
+id: {id}
+title: "Requirement {id}"
+status: draft
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Description
+- Requirement.
+"#
+        ),
+    )
+    .unwrap();
+}
+
 fn read_story(root: &Path, id: &str) -> String {
     fs::read_to_string(root.join("docs/specs/stories").join(format!("{}.md", id))).unwrap()
 }
@@ -385,6 +412,7 @@ fn test_relate_preserves_existing_relation_key_order() {
     setup_workspace(root);
     create_story(root, "E1S9", "");
     create_story(root, "E1S1", "");
+    create_requirement(root, "FR-1");
     // Deliberately out of alphabetical order: traces_to, then depends_on.
     create_story(
         root,

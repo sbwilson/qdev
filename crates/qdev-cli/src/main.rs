@@ -1,6 +1,7 @@
 mod cli;
 mod output;
 
+use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::panic;
 use std::process::ExitCode as StdExitCode;
@@ -934,6 +935,96 @@ fn handle_update(
         }
     }
 
+    // A case-variant of a canonical key would be appended as a second, ignored frontmatter key
+    // by the exact-case patcher.  It is a usage error, not a spelling we silently normalize.
+    const CANONICAL_FRONTMATTER_FIELDS: &[&str] = &[
+        "appetite",
+        "assignments",
+        "at",
+        "base_version",
+        "baseline_snapshot",
+        "binds",
+        "cause",
+        "completed_at",
+        "constraints",
+        "commit_sha",
+        "context",
+        "control",
+        "id",
+        "created_by",
+        "created_at",
+        "decision",
+        "decision_type",
+        "dependency_version",
+        "duration_ms",
+        "epic_id",
+        "evaluated_for_release",
+        "evidence_path",
+        "exit_code",
+        "gate",
+        "gate_id",
+        "gates",
+        "hazard",
+        "iec62304_class",
+        "introduced_by_story",
+        "kind",
+        "license",
+        "metric_value",
+        "metrics",
+        "mitigations",
+        "name",
+        "origin_story_id",
+        "output_hash",
+        "owners",
+        "personas",
+        "phase",
+        "prevents",
+        "probability",
+        "ran_at",
+        "rationale",
+        "relations",
+        "release",
+        "release_date",
+        "release_version",
+        "requirement_type",
+        "resolution",
+        "risk_level",
+        "ruling",
+        "safety_class",
+        "safety_risk",
+        "seq",
+        "severity",
+        "started_at",
+        "status",
+        "story_id",
+        "subject_id",
+        "summary",
+        "target_module",
+        "target_modules",
+        "text",
+        "title",
+        "topic",
+        "traces_to",
+        "updated_by",
+        "version",
+        "vision",
+    ];
+    for (key, _) in &custom_fields {
+        if let Some(&canonical) = CANONICAL_FRONTMATTER_FIELDS
+            .iter()
+            .find(|candidate| candidate.eq_ignore_ascii_case(key))
+        {
+            if key != canonical {
+                let err = QdevError::usage_error(format!(
+                    "Non-canonical --field key '{}'; use '{}'",
+                    key, canonical
+                ));
+                let _ = output.emit_error(&err);
+                return ExitCode::UsageError;
+            }
+        }
+    }
+
     // Check conflicting arguments: flag vs --field
     if update_args.status.is_some()
         && custom_fields
@@ -957,6 +1048,55 @@ fn handle_update(
         );
         let _ = output.emit_error(&err);
         return ExitCode::UsageError;
+    }
+
+    // `relations` replaces the whole map, so validate that final map before the generic writer
+    // obtains its lock or can touch the file/cache/version.  Invalid YAML shapes remain the
+    // generic writer's schema-validation responsibility; a well-formed relation map uses the
+    // same proposed-graph gate as `relate`.
+    if let Some((_, relations_value)) = custom_fields
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "relations")
+    {
+        if let Some(proposed_relations) = relation_map_from_yaml(relations_value) {
+            let store = match open_query_store(&root, annotated_config) {
+                Ok(store) => store,
+                Err(e) => {
+                    let _ = output.emit_error(&e);
+                    return e.exit_code();
+                }
+            };
+            let source = match store.get_entity(&entity_id) {
+                Ok(Some(source)) => source,
+                Ok(None) => {
+                    let err =
+                        QdevError::usage_error(format!("Source entity '{}' not found", entity_id));
+                    let _ = output.emit_error(&err);
+                    return ExitCode::UsageError;
+                }
+                Err(e) => {
+                    let _ = output.emit_error(&e);
+                    return e.exit_code();
+                }
+            };
+            let proposed_source_kind = custom_fields
+                .iter()
+                .rev()
+                .find(|(key, _)| key == "kind")
+                .and_then(|(_, value)| value.as_str())
+                .and_then(|kind| qdev_core::EntityKind::from_str_loose(kind).ok())
+                .unwrap_or(source.kind);
+            if let Err(e) = validate_proposed_relation_map(
+                &store,
+                &source,
+                proposed_source_kind,
+                &proposed_relations,
+            ) {
+                let _ = output.emit_error(&e);
+                return e.exit_code();
+            }
+        }
     }
 
     // Resolve active author attribution through the shared resolver — see `resolve_author`.
@@ -1481,6 +1621,55 @@ fn validate_relation_name(relation: &str) -> Result<(), QdevError> {
     )))
 }
 
+/// Converts a syntactically usable YAML relation map for the command gate.  Invalid shapes are
+/// deliberately returned as `None`: the generic update writer retains ownership of its existing
+/// schema-validation error contract for arbitrary `--field` values.
+fn relation_map_from_yaml(value: &serde_yaml::Value) -> Option<BTreeMap<String, Vec<String>>> {
+    let serde_yaml::Value::Mapping(map) = value else {
+        return None;
+    };
+    let mut relations = BTreeMap::new();
+    for (relation, targets) in map {
+        let relation = relation.as_str()?.to_string();
+        let serde_yaml::Value::Sequence(targets) = targets else {
+            return None;
+        };
+        let targets = targets
+            .iter()
+            .map(|target| target.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()?;
+        relations.insert(relation, targets);
+    }
+    Some(relations)
+}
+
+/// Reads the cache into the pure core proposed-graph gate.  Keeping store access here leaves
+/// the gate reusable for future callers and gives `relate` and whole-map replacement one rule.
+fn validate_proposed_relation_map(
+    store: &qdev_core::SqliteStore,
+    source: &qdev_core::EntityRecord,
+    source_kind: qdev_core::EntityKind,
+    proposed_relations: &BTreeMap<String, Vec<String>>,
+) -> Result<(), QdevError> {
+    let entities = store
+        .list_entities(&qdev_core::EntityFilter::default())?
+        .into_iter()
+        .map(|entity| (entity.id, entity.kind))
+        .collect::<Vec<_>>();
+    let relations = store
+        .list_relations()?
+        .into_iter()
+        .map(|relation| (relation.source_id, relation.relation, relation.target_id))
+        .collect::<Vec<_>>();
+    qdev_core::validate_proposed_relation_map(
+        &source.id,
+        source_kind,
+        proposed_relations,
+        &entities,
+        &relations,
+    )
+}
+
 fn handle_relate(
     relate_args: &cli::RelateArgs,
     annotated_config: &qdev_core::AnnotatedConfig,
@@ -1504,7 +1693,7 @@ fn handle_relate(
         }
     };
 
-    // Refuse before any write: wrong kind pair, dangling target, or a would-be depends_on cycle.
+    // Resolve the source before building the complete proposed map for the shared relation gate.
     let source = match store.get_entity(&relate_args.source_id) {
         Ok(Some(e)) => e,
         Ok(None) => {
@@ -1521,65 +1710,31 @@ fn handle_relate(
         }
     };
 
-    let target_id = match store.get_entity(&relate_args.target_id) {
-        Ok(Some(target)) => {
-            if !qdev_core::is_valid_kind_pair(&relate_args.relation, source.kind, target.kind) {
-                let err = QdevError::logical_failure(
-                    "invalid_relation_kind",
-                    format!(
-                        "Relation '{}' from {} ({}) to {} ({}) is not an allowed kind pair",
-                        relate_args.relation,
-                        relate_args.source_id,
-                        source.kind,
-                        relate_args.target_id,
-                        target.kind
-                    ),
-                );
-                let _ = output.emit_error(&err);
-                return err.exit_code();
-            }
-            target.id
+    let target_id = relate_args.target_id.clone();
+    let mut proposed_relations = store.get_relations_for_source(&source.id).map(|rows| {
+        let mut map = BTreeMap::<String, Vec<String>>::new();
+        for row in rows {
+            map.entry(row.relation).or_default().push(row.target_id);
         }
-        Ok(None) => {
-            let err = QdevError::logical_failure(
-                "dangling_relation",
-                format!("Target entity '{}' does not exist", relate_args.target_id),
-            );
-            let _ = output.emit_error(&err);
-            return err.exit_code();
+        map
+    });
+    let proposed_relations = match proposed_relations.as_mut() {
+        Ok(relations) => {
+            let targets = relations.entry(relate_args.relation.clone()).or_default();
+            if !targets.iter().any(|target| target == &target_id) {
+                targets.push(target_id.clone());
+            }
+            relations
         }
         Err(e) => {
-            let _ = output.emit_error(&e);
+            let _ = output.emit_error(e);
             return e.exit_code();
         }
     };
-
-    if relate_args.relation == "depends_on" {
-        let existing_edges = match store.list_relations() {
-            Ok(rows) => rows
-                .into_iter()
-                .filter(|r| r.relation == "depends_on")
-                .map(|r| (r.source_id, r.target_id))
-                .collect::<Vec<_>>(),
-            Err(e) => {
-                let _ = output.emit_error(&e);
-                return e.exit_code();
-            }
-        };
-        if let Some(cycle) = qdev_core::would_create_cycle(&existing_edges, &source.id, &target_id)
-        {
-            let err = QdevError::logical_failure(
-                "dependency_cycle",
-                format!(
-                    "Adding depends_on from '{}' to '{}' would create a cycle: {}",
-                    source.id,
-                    target_id,
-                    cycle.join(" -> ")
-                ),
-            );
-            let _ = output.emit_error(&err);
-            return err.exit_code();
-        }
+    if let Err(e) = validate_proposed_relation_map(&store, &source, source.kind, proposed_relations)
+    {
+        let _ = output.emit_error(&e);
+        return e.exit_code();
     }
 
     let author = match resolve_author(

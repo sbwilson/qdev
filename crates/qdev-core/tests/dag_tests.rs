@@ -1,13 +1,14 @@
 //! Relation kind-pair validation, `depends_on` cycle detection, and hydration wiring
 //! (spec-1-10).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use qdev_core::dag::{
     allowed_kind_pairs, find_dependency_cycle, is_known_relation, is_valid_kind_pair,
-    relation_names, would_create_cycle,
+    relation_names, validate_proposed_relation_map, would_create_cycle,
 };
 use qdev_core::schema::EntityKind;
 use qdev_core::store::{ensure_cache, FindingRecord, SqliteStore, Store};
@@ -180,6 +181,44 @@ fn test_would_create_cycle_false_when_unrelated() {
 #[test]
 fn test_would_create_cycle_self_relation() {
     assert!(would_create_cycle(&[], "E1S1", "E1S1").is_some());
+}
+
+#[test]
+fn test_proposed_relation_gate_validates_the_replacement_graph() {
+    let entities = vec![
+        ("E1S1".to_string(), EntityKind::Story),
+        ("E1S2".to_string(), EntityKind::Story),
+        ("E1S3".to_string(), EntityKind::Story),
+    ];
+    // The stored source map is cyclic, but the proposed replacement removes its only edge.
+    let existing = vec![
+        (
+            "E1S1".to_string(),
+            "depends_on".to_string(),
+            "E1S2".to_string(),
+        ),
+        (
+            "E1S2".to_string(),
+            "depends_on".to_string(),
+            "E1S1".to_string(),
+        ),
+    ];
+    let replacement = BTreeMap::from([("depends_on".to_string(), vec!["E1S3".to_string()])]);
+
+    assert!(validate_proposed_relation_map(
+        "E1S2",
+        EntityKind::Story,
+        &replacement,
+        &entities,
+        &existing,
+    )
+    .is_ok());
+
+    let invalid = BTreeMap::from([("depends_on".to_string(), vec!["E9S9".to_string()])]);
+    let err =
+        validate_proposed_relation_map("E1S2", EntityKind::Story, &invalid, &entities, &existing)
+            .unwrap_err();
+    assert_eq!(err.code(), "dangling_relation");
 }
 
 // ---------------------------------------------------------------------------

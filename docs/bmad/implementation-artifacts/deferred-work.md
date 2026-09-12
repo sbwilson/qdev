@@ -433,3 +433,14 @@ document is not a work list. Nothing below may be marked done without a spec nam
   summary: `qdev validate --changed` omits directory `read_error` findings because changed paths from git diff are file-level paths.
   evidence: In `validate.rs:770-773`, `filter_by_changed` retains non-cycle findings only when `changed_paths.contains(&finding.path)`. Git diff (`git diff --name-only`) returns modified file paths rather than directory paths, so a directory `read_error` finding (whose path is a directory such as `docs/specs/stories`) is never in `changed_paths` and is silently filtered out even if the unreadable directory was newly introduced or contains modified files.
 
+- source_spec: `docs/bmad/implementation-artifacts/spec-1-29-one-gate-for-relation-writes.md`
+  summary: Relation graph validation still occurs before the advisory write lock, so concurrent relation writers can validate one graph and commit a cycle.
+  evidence: `handle_relate` and generic relation updates read the graph and call the gate before `apply_relation_change` or `apply_entity_update` acquire `write.lock`. This predates story 1-29's shared gate; fixing it requires a lock-held graph-validation design that preserves the cache and atomic-write protocol.
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-1-29-one-gate-for-relation-writes.md`
+  summary: Generic `update --field relations=…` leaves relation cache rows stale until the next boot sweep, unlike the dedicated relation writer.
+  evidence: `apply_entity_update` calls `upsert_cache_and_mark_dirty`, whose documented `None` relation change leaves the relations table to the next process's sweep; `apply_relation_change` supplies a relation change in the same transaction. Normal CLI commands boot-sweep the dirty entity, but in-process readers can observe stale edges.
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-1-29-one-gate-for-relation-writes.md`
+  summary: Repository-wide `cargo fmt --check` fails on pre-existing formatting drift outside story 1-29.
+  evidence: The formatter reports baseline differences in `crates/qdev-cli/tests/validate_cli_tests.rs`, `crates/qdev-core/src/store/sqlite.rs`, `crates/qdev-core/src/validate.rs`, `crates/qdev-core/src/write.rs`, and `crates/qdev-core/tests/sweep_tests.rs`; story 1-29's modified files do not appear in that output.

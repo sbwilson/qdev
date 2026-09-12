@@ -4,8 +4,9 @@
 //! `qdev relate`/`qdev unrelate` (to refuse an unknown relation name before anything else) and
 //! by `qdev relate` (to refuse a bad edge before it is ever written).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
+use crate::errors::QdevError;
 use crate::schema::EntityKind;
 
 /// The one list of relations: architecture.md §8's table, in its order, each name beside the
@@ -66,6 +67,83 @@ pub fn is_valid_kind_pair(relation: &str, source: EntityKind, target: EntityKind
     allowed_kind_pairs(relation)
         .iter()
         .any(|&(s, t)| s == source && t == target)
+}
+
+/// Validates the complete relation map a source entity is about to own, against the graph that
+/// would exist after replacing that source's old edges.  This is the command-write gate shared
+/// by `relate` and `update --field relations=…`; hydration remains the backstop for hand edits.
+///
+/// `entities` and `existing_relations` are intentionally plain data rather than a store handle:
+/// the gate is pure, so callers can validate a proposed graph without mutating cache state.
+pub fn validate_proposed_relation_map(
+    source_id: &str,
+    source_kind: EntityKind,
+    proposed_relations: &BTreeMap<String, Vec<String>>,
+    entities: &[(String, EntityKind)],
+    existing_relations: &[(String, String, String)],
+) -> Result<(), QdevError> {
+    let entity_kinds: HashMap<&str, EntityKind> = entities
+        .iter()
+        .map(|(id, kind)| (id.as_str(), *kind))
+        .collect();
+
+    for (relation, targets) in proposed_relations {
+        if !is_known_relation(relation) {
+            return Err(QdevError::usage_error(format!(
+                "Unknown relation '{}', must be one of: {}",
+                relation,
+                relation_names().collect::<Vec<_>>().join(", ")
+            )));
+        }
+
+        for target_id in targets {
+            let Some(&target_kind) = entity_kinds.get(target_id.as_str()) else {
+                return Err(QdevError::logical_failure(
+                    "dangling_relation",
+                    format!("Target entity '{}' does not exist", target_id),
+                ));
+            };
+            if !is_valid_kind_pair(relation, source_kind, target_kind) {
+                return Err(QdevError::logical_failure(
+                    "invalid_relation_kind",
+                    format!(
+                        "Relation '{}' from {} ({}) to {} ({}) is not an allowed kind pair",
+                        relation, source_id, source_kind, target_id, target_kind
+                    ),
+                ));
+            }
+        }
+    }
+
+    // A replacement removes every old source edge before adding its proposed ones.  Checking
+    // this final graph (rather than adding candidates to the old graph) permits a replacement
+    // that removes an edge from a formerly cyclic source map.
+    let mut dependency_edges: Vec<(String, String)> = existing_relations
+        .iter()
+        .filter(|(source, relation, _)| source != source_id && relation == "depends_on")
+        .map(|(source, _, target)| (source.clone(), target.clone()))
+        .collect();
+    if let Some(targets) = proposed_relations.get("depends_on") {
+        dependency_edges.extend(
+            targets
+                .iter()
+                .cloned()
+                .map(|target| (source_id.to_string(), target)),
+        );
+    }
+
+    if let Some(cycle) = find_dependency_cycle(&dependency_edges) {
+        return Err(QdevError::logical_failure(
+            "dependency_cycle",
+            format!(
+                "Proposed depends_on relations for '{}' would create a cycle: {}",
+                source_id,
+                cycle.join(" -> ")
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Finds one `depends_on` cycle in `edges` (a list of `(source_id, target_id)` pairs), if any.
