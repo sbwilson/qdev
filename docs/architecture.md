@@ -558,12 +558,26 @@ Two deliberate exceptions, both narrow:
 - **Retention.** A file that parsed before and now fails to parse or read keeps its previous rows flagged `stale`; a rebuild has no previous rows to retain. The findings agree because a stale row is treated as *absent* by everything that derives a finding — a rule **enforced by one helper**, not remembered at each site (see below): relation validation reads only live entities and only the edges a live entity declares, so an edge into a stale entity dangles (as it does on a rebuild) and a stale entity's own retained edges are invisible (as they are on a rebuild). `qdev sync --rebuild` remains the guaranteed repair for anything else.
 - **Stale rows are excluded from computed checks.** `qdev validate`'s four cache-reading checks (`orphan_deferred_work`, `dw_missing_rationale`, `target_module_not_registered`, `entity_file_off_convention`) treat a stale row as absent: qdev does not assert things about a file it could not read, the file already carries the `schema_violation`, `merge_conflict` or `read_error` finding naming the actionable problem, and a rebuild has no stale rows to derive from. This holds for a row a check merely *refers to* as much as for its own subject — a deferred-work row whose origin story is merge-conflicted reports `orphan_deferred_work` from both paths, because a rebuild has no row for that story at all.
 
-  **One helper enforces it, rather than each site remembering it.** `Store::entity_exists_for_derivation` (and its three-state `entity_presence_for_derivation`, for the two deferred-work checks that must tell a stale row from a missing one) answers "does this entity exist, for the purpose of deriving a finding?", and the rule itself lives in a single function, `EntityPresence::from_stale_flag`. Every derivation site asks it; none re-implements the filter. A bare `Store::get_entity(..).is_some()` at a derivation site is the defect this replaced — the probe that forgot the rule within hours of its being written down here.
+  **The derivation helpers answer the rule, and the raw APIs are linted.**
+  `Store::entity_exists_for_derivation` (and its three-state
+  `entity_presence_for_derivation`, for the two deferred-work checks that must tell a stale row
+  from a missing one) answers "does this entity exist, for the purpose of deriving a finding?";
+  the rule itself lives in `EntityPresence::from_stale_flag`. When derived state also needs entity
+  fields, `Store::get_live_entity_for_derivation` returns one live-row snapshot, so the stale
+  decision and, for example, a dependency's `status` cannot come from different cache states.
+  `clippy::disallowed_methods` rejects unmarked uses of stale-inclusive `get_entity` and
+  `list_entities` in production code. Each deliberate raw read therefore carries a local
+  documented allow explaining why it is reporting, ownership, graph, or write-gate work rather
+  than a new derivation site.
 
-  Three deliberate exceptions, each named at its site, all narrow, and all of them look like the bug:
+  Deliberate exceptions are each named at their call site, narrow, and look like the bug:
   - `deferred_work_path` asks the unfiltered `get_entity` for a *path to report against*. A stale row's `source_path` is still the path of the file the finding is about.
   - `ids_in_use` asks the unfiltered `list_entities` about *id ownership*. A stale row's id is still taken; filtering it would hand that id to a second entity. This one is the easiest of the three to "fix" by mistake — the rule above reads as a consistency requirement — so it is pinned by a named test (`test_ids_in_use_includes_a_stale_rows_id_and_allocation_skips_it`) on a fixture whose declared and carried halves see nothing, and applying the filter fails it.
   - The relation-graph queries keep their `WHERE stale = 0` in SQL. They validate the whole graph in one query, and pulling that through a per-row helper would trade one query for N.
+  - `qdev get`, `qdev list`, and doctor cache counts are reporting paths, so they intentionally
+    return or count retained stale rows. Relation-write gates intentionally inspect retained
+    source rows and the complete cached graph until their stale-source policy is separately
+    decided.
 
   Reads are untouched — `get_entity`, `list_entities` and the `qdev get`/`qdev list` payloads still return a stale entity with its `stale` flag set, which is what the retention exists for.
 

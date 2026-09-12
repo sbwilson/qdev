@@ -276,6 +276,38 @@ fn test_blocked_true_when_dependency_not_done() {
 }
 
 #[test]
+fn test_blocked_true_when_dependency_done_but_stale() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    store
+        .upsert_entity(&story_entity("E20S4", "E20", 4))
+        .unwrap();
+    store
+        .upsert_entity(&EntityRecord {
+            status: Some("done".to_string()),
+            stale: true,
+            ..story_entity("E20S5", "E20", 5)
+        })
+        .unwrap();
+    store
+        .upsert_relation(&RelationRecord {
+            source_id: "E20S4".to_string(),
+            relation: "depends_on".to_string(),
+            target_id: "E20S5".to_string(),
+        })
+        .unwrap();
+
+    let result = query_entity(&store, None, "E20S4", &QueryOptions::default()).unwrap();
+    let projection = match result {
+        GetResult::Entity(p) => *p,
+        GetResult::Constraint(_) => panic!("expected an entity projection"),
+    };
+    assert!(
+        projection.blocked,
+        "a stale retained done dependency is absent for derivation and must block"
+    );
+}
+
+#[test]
 fn test_blocked_true_when_dependency_target_is_dangling() {
     let store = SqliteStore::open_in_memory().unwrap();
     store

@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)] // Integration tests inspect raw retained cache rows directly.
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;

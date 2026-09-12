@@ -195,6 +195,7 @@ pub fn ids_in_use(
 /// [`ids_in_use`] for a caller that has already run [`scan_duplicate_planning_ids`] — the same
 /// answer, without walking both trees a second time. `--fix-ids` needs the scan's `groups` as
 /// well as its ids, so it uses this rather than paying for the walk twice.
+#[allow(clippy::disallowed_methods)] // ID ownership deliberately includes stale retained rows.
 pub fn ids_in_use_from_scan(
     scan: &DuplicateIdScan,
     store: Option<&dyn Store>,
@@ -224,6 +225,7 @@ pub fn ids_in_use_from_scan(
 /// ever sees `Live` or a missing row — the unfiltered read matters for the missing case, where a
 /// `deferred_work` row without an `entities` row is itself a broken cache and the finding must
 /// still be reported against a named placeholder rather than dropped.
+#[allow(clippy::disallowed_methods)] // Reporting path lookup deliberately preserves a retained row's source path.
 fn deferred_work_path(store: &dyn Store, dw_id: &str) -> Result<String, QdevError> {
     Ok(match store.get_entity(dw_id)? {
         Some(entity) => entity.source_path,
@@ -326,6 +328,7 @@ pub fn find_dw_missing_rationale(store: &dyn Store) -> Result<Vec<FindingRecord>
 
 /// `target_module_not_registered`: a story's `target_modules` entry is absent from
 /// `config.modules[].id`. One finding per (story, unregistered module) pair.
+#[allow(clippy::disallowed_methods)] // Rows are filtered through `exists_for_derivation` below.
 pub fn find_unregistered_target_modules(
     store: &dyn Store,
     config: &Config,
@@ -385,6 +388,7 @@ pub fn find_unregistered_target_modules(
 /// fallback resolves an id in any standard directory, so a `kind:` that disagrees with its
 /// directory is not itself an identity problem. The expected name reported names the directory
 /// for the entity's kind, which is where a new file of that kind belongs.
+#[allow(clippy::disallowed_methods)] // Rows are filtered through `exists_for_derivation` below.
 pub fn find_off_convention_entity_files(
     store: &dyn Store,
     storage: &crate::config::StorageConfig,

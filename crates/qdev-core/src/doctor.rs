@@ -95,6 +95,7 @@ impl DoctorSection for CacheDoctorSection {
         "cache"
     }
 
+    #[allow(clippy::disallowed_methods)] // Cache diagnostics count retained rows rather than deriving state from them.
     fn run(&self, store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
         let observed_schema_version = store.cache_schema_version()?;
         let missing_tables = store.cache_missing_tables()?;

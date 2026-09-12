@@ -125,8 +125,8 @@ fn group_relations(rows: &[RelationRecord]) -> BTreeMap<String, Vec<String>> {
     grouped
 }
 
-/// Computes `blocked` per the frozen spec: true if any `depends_on` target's cached status
-/// isn't `done` (including a dangling target with no cached row). No cycle traversal.
+/// Computes `blocked` per the frozen spec: true if any `depends_on` target's live cached status
+/// isn't `done` (including dangling and retained-stale targets). No cycle traversal.
 ///
 /// Stories only, matching the documented invariant and `payload-story.json`. `depends_on` is a
 /// Story -> Story relation, but hydration only *records* an out-of-band edge on another kind as
@@ -143,7 +143,12 @@ fn compute_blocked(
     }
     for row in relation_rows {
         if row.relation == "depends_on" {
-            let target_status = store.get_entity(&row.target_id)?.and_then(|e| e.status);
+            // The helper makes the staleness decision and reads `status` from one row snapshot:
+            // a stale retained `done` dependency is absent, just as it is to relation validation
+            // and a full rebuild.
+            let target_status = store
+                .get_live_entity_for_derivation(&row.target_id)?
+                .and_then(|entity| entity.status);
             if target_status.as_deref() != Some("done") {
                 return Ok(true);
             }
@@ -234,6 +239,7 @@ fn build_entity_projection(
 ///   key) rather than re-deriving kind from the identifier grammar. If `kind_hint` is given
 ///   (the caller passed an explicit kind, e.g. `qdev get story E12S4`) and the resolved
 ///   entity's actual kind differs, this is a usage error.
+#[allow(clippy::disallowed_methods)] // `qdev get` is a reporting path and must surface stale rows.
 pub fn query_entity(
     store: &dyn Store,
     kind_hint: Option<EntityKind>,
@@ -336,6 +342,7 @@ impl ListQueryOptions {
 
 /// Runs a filtered, id-ordered entity listing straight from the cache. Every filter applies as
 /// an AND.
+#[allow(clippy::disallowed_methods)] // `qdev list` is a reporting path and must surface stale rows.
 pub fn query_list(
     store: &dyn Store,
     options: &ListQueryOptions,

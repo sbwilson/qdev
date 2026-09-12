@@ -1,0 +1,4 @@
+disallowed-methods = [
+  { path = "qdev_core::store::Store::get_entity", reason = "This raw read includes retained stale rows. Use get_live_entity_for_derivation or explicitly document a reporting, ownership, graph, or write-gate exception." },
+  { path = "qdev_core::store::Store::list_entities", reason = "This raw read includes retained stale rows. Filter each row for derivation or explicitly document a reporting, ownership, graph, or write-gate exception." },
+]

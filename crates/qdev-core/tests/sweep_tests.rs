@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)] // Integration tests inspect raw retained cache rows directly.
+
 //! Incremental hydration sweep tests (spec-1-7).
 //!
 //! Covers the I/O & edge-case matrix from the spec plus the warm-sweep benchmark bound.

@@ -874,6 +874,7 @@ fn handle_create_story(
     ExitCode::Success
 }
 
+#[allow(clippy::disallowed_methods)] // Relation write-gate intentionally reads the retained source row.
 fn handle_update(
     update_args: &cli::UpdateArgs,
     annotated_config: &qdev_core::AnnotatedConfig,
@@ -1645,6 +1646,7 @@ fn relation_map_from_yaml(value: &serde_yaml::Value) -> Option<BTreeMap<String, 
 
 /// Reads the cache into the pure core proposed-graph gate.  Keeping store access here leaves
 /// the gate reusable for future callers and gives `relate` and whole-map replacement one rule.
+#[allow(clippy::disallowed_methods)] // Relation write-gate must inspect the complete retained graph.
 fn validate_proposed_relation_map(
     store: &qdev_core::SqliteStore,
     source: &qdev_core::EntityRecord,
@@ -1670,6 +1672,7 @@ fn validate_proposed_relation_map(
     )
 }
 
+#[allow(clippy::disallowed_methods)] // Relation write-gate intentionally reads the retained source row.
 fn handle_relate(
     relate_args: &cli::RelateArgs,
     annotated_config: &qdev_core::AnnotatedConfig,

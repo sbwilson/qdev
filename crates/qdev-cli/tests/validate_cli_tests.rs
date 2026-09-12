@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)] // Integration tests inspect raw retained cache rows directly.
+
 //! `qdev validate` CLI tests (spec-1-11): `--json` shape, exit codes, `--changed` filtering, and
 //! `--fix-ids` non-interactive refusal / guided renumber.
 

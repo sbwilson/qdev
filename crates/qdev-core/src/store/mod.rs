@@ -330,6 +330,19 @@ pub trait Store: Send + Sync {
     fn list_entities(&self, filter: &EntityFilter) -> Result<Vec<EntityRecord>, QdevError>;
     fn delete_entity(&self, id: &str) -> Result<bool, QdevError>;
 
+    /// Returns the entity only when its cached row is live, for derived state that needs fields
+    /// from one coherent row snapshot. Unlike a presence probe followed by `get_entity`, this
+    /// cannot observe the row before and after a concurrent sweep independently. In particular,
+    /// a retained stale `done` dependency is absent here and must block its dependent story.
+    ///
+    /// The stale-inclusive raw read is deliberate inside this helper: it is the one place that
+    /// turns its row snapshot into the derivation answer. Callers deriving state must use this
+    /// method rather than reading `get_entity` directly.
+    #[allow(clippy::disallowed_methods)]
+    fn get_live_entity_for_derivation(&self, id: &str) -> Result<Option<EntityRecord>, QdevError> {
+        Ok(self.get_entity(id)?.filter(|entity| !entity.stale))
+    }
+
     /// **The one answer to "does this entity exist, for the purpose of deriving a finding?"**
     /// A stale row is [`EntityPresence::Stale`], never `Live`, so it is absent to every derived
     /// finding — which is what makes an incremental sweep (which retains stale rows) and a full
@@ -342,6 +355,7 @@ pub trait Store: Send + Sync {
     /// mistake this whole helper exists to make impossible. An implementation may override it
     /// for a cheaper read (`SqliteStore` fetches the flag alone rather than the whole row), but
     /// it must return exactly what this default would.
+    #[allow(clippy::disallowed_methods)]
     fn entity_presence_for_derivation(&self, id: &str) -> Result<EntityPresence, QdevError> {
         Ok(EntityPresence::from_stale_flag(
             self.get_entity(id)?.map(|entity| entity.stale),

@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)] // Integration tests inspect raw retained cache rows directly.
+
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

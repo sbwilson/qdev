@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-12-2026 16:44
+last_updated: 09-12-2026 17:12
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -60,7 +60,7 @@ development_status:
   1-27-fix-ids-leaves-every-entity-resolvable: review  # P3-4 (after 1-24)
   1-28-an-unreadable-directory-is-a-finding: review    # NEW-8 / P3-3
   1-29-one-gate-for-relation-writes: review             # P3-5
-  1-30-derivation-sites-are-enumerable: backlog         # P3-11
+  1-30-derivation-sites-are-enumerable: in-progress     # P3-11
 
   epic-2: backlog
   2-1-state-machine-lifecycle-hooks: backlog

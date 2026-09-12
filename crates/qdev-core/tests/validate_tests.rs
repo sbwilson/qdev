@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)] // Integration tests inspect raw retained cache rows directly.
+
 //! `qdev validate` core logic tests (spec-1-11), covering the I/O & edge-case matrix: the four
 //! freshly computed checks, cache-native findings passthrough, and `--changed` filtering against
 //! a real git merge-base diff.
