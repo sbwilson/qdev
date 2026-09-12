@@ -16,14 +16,14 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-12-2026 17:45
+last_updated: 09-12-2026 18:45
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
 story_location: "docs/bmad/implementation-artifacts"
 
 development_status:
-  epic-1: in-progress
+  epic-1: done
   1-1-workspace-scaffolding-json-envelope-exit-codes: done
   1-2-dual-configuration-loader: done
   1-3-qdev-init: done
@@ -56,11 +56,11 @@ development_status:
   # when the story starts. Order matters where noted: 1-27 uses 1-24's resolver.
   1-24-identity-answers-from-the-rule: done             # P3-2, P3-6
   1-25-unchanged-is-not-healthy: done                   # P3-1
-  1-26-a-kind-change-repairs-itself: review             # NEW-4
-  1-27-fix-ids-leaves-every-entity-resolvable: review  # P3-4 (after 1-24)
-  1-28-an-unreadable-directory-is-a-finding: review    # NEW-8 / P3-3
-  1-29-one-gate-for-relation-writes: review             # P3-5
-  1-30-derivation-sites-are-enumerable: review         # P3-11
+  1-26-a-kind-change-repairs-itself: done               # NEW-4
+  1-27-fix-ids-leaves-every-entity-resolvable: done     # P3-4 (after 1-24)
+  1-28-an-unreadable-directory-is-a-finding: done       # NEW-8 / P3-3
+  1-29-one-gate-for-relation-writes: done               # P3-5
+  1-30-derivation-sites-are-enumerable: done            # P3-11
 
   epic-2: backlog
   2-1-state-machine-lifecycle-hooks: backlog
