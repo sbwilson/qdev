@@ -3597,14 +3597,13 @@ fn test_every_matrix_state_at_once_sweeps_equal_to_a_rebuild_and_is_idempotent()
 // Unreadable directory is a finding (spec-1-28)
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 struct DirPermGuard(PathBuf);
+#[cfg(unix)]
 impl Drop for DirPermGuard {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
-        }
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
     }
 }
 
@@ -3622,6 +3621,7 @@ fn make_dir_unreadable(root: &Path, rel: &str) -> (bool, Option<DirPermGuard>) {
     (true, Some(DirPermGuard(path)))
 }
 
+#[cfg(unix)]
 #[test]
 fn test_unreadable_subdirectory_retains_cached_entities_stale_and_records_finding() {
     let temp = TempDir::new().unwrap();
@@ -3685,6 +3685,7 @@ fn test_unreadable_subdirectory_retains_cached_entities_stale_and_records_findin
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn test_unreadable_top_level_specs_dir_retains_all_stories_stale() {
     let temp = TempDir::new().unwrap();
@@ -3726,6 +3727,7 @@ fn test_unreadable_top_level_specs_dir_retains_all_stories_stale() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn test_unreadable_directory_deleted_clears_finding_and_purges_entities() {
     let temp = TempDir::new().unwrap();
@@ -3777,6 +3779,7 @@ fn test_unreadable_directory_deleted_clears_finding_and_purges_entities() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn test_unreadable_directory_during_reset_and_rebuild_records_finding() {
     let temp = TempDir::new().unwrap();
@@ -3807,6 +3810,7 @@ fn test_unreadable_directory_during_reset_and_rebuild_records_finding() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn test_unreadable_scratch_and_evidence_dir_records_finding_and_preserves_entries() {
     let temp = TempDir::new().unwrap();

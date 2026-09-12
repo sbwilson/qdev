@@ -2305,14 +2305,13 @@ updated_by:
 // Unreadable directory CLI tests (spec-1-28)
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 struct DirPermGuard(std::path::PathBuf);
+#[cfg(unix)]
 impl Drop for DirPermGuard {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
-        }
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
     }
 }
 
@@ -2331,6 +2330,7 @@ fn make_dir_unreadable(path: &Path) -> (bool, Option<DirPermGuard>) {
 
 /// Scenario 1: Unreadable story subdirectory causes `qdev validate` to exit 1 (LogicalFailure)
 /// and report a `read_error` finding naming the directory. Restoring permissions exits 0.
+#[cfg(unix)]
 #[test]
 fn test_validate_unreadable_directory_exits_1_and_reports_read_error() {
     let temp = TempDir::new().unwrap();
@@ -2390,6 +2390,7 @@ fn test_validate_unreadable_directory_exits_1_and_reports_read_error() {
 
 /// Scenario 2: `qdev doctor` reports the unreadable directory finding in `findings_by_code`
 /// under the `validation` section.
+#[cfg(unix)]
 #[test]
 fn test_doctor_reports_unreadable_directory_finding_in_validation_section() {
     let temp = TempDir::new().unwrap();
@@ -2434,6 +2435,7 @@ fn test_doctor_reports_unreadable_directory_finding_in_validation_section() {
 
 /// Scenario 3: ID allocation with unreadable directory skips the retained stale entity ID
 /// and allocates the next available ID.
+#[cfg(unix)]
 #[test]
 fn test_create_story_skips_id_of_retained_stale_entity_under_unreadable_dir() {
     let temp = TempDir::new().unwrap();
@@ -2485,6 +2487,7 @@ fn test_create_story_skips_id_of_retained_stale_entity_under_unreadable_dir() {
 
 /// Scenario 4: Write path (`qdev update`) on an entity in an unreadable directory exits 4
 /// (InfrastructureFailure / io_error) naming the directory, rather than reporting entity not found (exit 2).
+#[cfg(unix)]
 #[test]
 fn test_update_on_entity_in_unreadable_directory_exits_4_infrastructure_failure() {
     let temp = TempDir::new().unwrap();
