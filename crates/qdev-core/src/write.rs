@@ -1395,26 +1395,39 @@ pub fn find_file_in_dir_for_id(dir: &Path, id: &str) -> Result<Option<PathBuf>, 
 /// exist; and `E1S7.MD` resolved on macOS and Windows but not on Linux. Listing the directory
 /// and judging each real name gives one answer on every host, and two matches mean two files
 /// because they are two directory entries.
-///
-/// One consequence is deliberately left standing: a `read_dir` that *fails* is still swallowed,
-/// and without the probe there is no second source, so an unreadable directory now answers "no
-/// file holds this id" for every id in it rather than only for the slugged ones. That is a
-/// worse shape than before, and it is story 1-28's rule to fix (an unreadable directory must be
-/// an error, not an empty answer) — recorded here so the next reader does not take the silence
-/// for a decision.
+/// If `fs::read_dir` fails on an existing directory, that failure is surfaced as an
+/// `infrastructure_failure` (`io_error`), rather than being swallowed into "no file holds this
+/// id".
 fn find_file_in_dir(dir: &Path, id: &str) -> Result<Option<PathBuf>, QdevError> {
-    if !dir.exists() {
-        return Ok(None);
+    match dir.try_exists() {
+        Ok(false) => return Ok(None),
+        Ok(true) => {}
+        Err(e) => {
+            return Err(QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to access directory '{}': {}", dir.display(), e),
+            ));
+        }
     }
+    let entries = fs::read_dir(dir).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "io_error",
+            format!("Failed to read directory '{}': {}", dir.display(), e),
+        )
+    })?;
     let mut matches = Vec::new();
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if filename_carries_id(name, id) {
-                        matches.push(path);
-                    }
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to read directory entry in '{}': {}", dir.display(), e),
+            )
+        })?;
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(name) = entry.file_name().to_str() {
+                if filename_carries_id(name, id) {
+                    matches.push(path);
                 }
             }
         }

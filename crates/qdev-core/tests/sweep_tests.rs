@@ -3590,3 +3590,255 @@ fn test_every_matrix_state_at_once_sweeps_equal_to_a_rebuild_and_is_idempotent()
 
     assert_sweep_equals_rebuild(&store, root, &storage);
 }
+
+// ---------------------------------------------------------------------------
+// Unreadable directory is a finding (spec-1-28)
+// ---------------------------------------------------------------------------
+
+struct DirPermGuard(PathBuf);
+impl Drop for DirPermGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+}
+
+#[cfg(unix)]
+fn make_dir_unreadable(root: &Path, rel: &str) -> (bool, Option<DirPermGuard>) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join(rel);
+    if fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).is_err() {
+        return (false, None);
+    }
+    if fs::read_dir(&path).is_ok() {
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o755));
+        return (false, None);
+    }
+    (true, Some(DirPermGuard(path)))
+}
+
+#[test]
+fn test_unreadable_subdirectory_retains_cached_entities_stale_and_records_finding() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    let sub = root.join("docs/specs/stories/sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("E1S3.md"), story_md("E1S3", "Story Three")).unwrap();
+    write_story(root, "E1S1", "Story One");
+
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    assert!(store.get_entity("E1S3").unwrap().is_some());
+    assert!(!entity_stale(&store, "E1S3"));
+    assert!(store.list_findings().unwrap().is_empty());
+
+    #[cfg(unix)]
+    {
+        let (unreadable, _guard) = make_dir_unreadable(root, "docs/specs/stories/sub");
+        if !unreadable {
+            eprintln!("skipping: environment allows reading 0o000 directory");
+            return;
+        }
+
+        let summary = store.sweep_workspace(root, &storage).unwrap();
+        assert_eq!(summary.purged, 0, "entities under unreadable directory must not be purged");
+        assert!(
+            entity_stale(&store, "E1S3"),
+            "entity under unreadable directory must be retained flagged stale"
+        );
+        assert!(
+            !entity_stale(&store, "E1S1"),
+            "entity under readable directory must not be stale"
+        );
+
+        let findings = store.get_findings_for_path("docs/specs/stories/sub").unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "read_error");
+        assert_eq!(findings[0].severity, "error");
+
+        // Now restore permissions and sweep again
+        drop(_guard);
+        let summary2 = store.sweep_workspace(root, &storage).unwrap();
+        assert_eq!(summary2.purged, 0);
+        assert!(
+            !entity_stale(&store, "E1S3"),
+            "entity must be unstaled when directory is readable again"
+        );
+        let findings2 = store.get_findings_for_path("docs/specs/stories/sub").unwrap();
+        assert!(findings2.is_empty(), "directory read_error finding must be cleared");
+    }
+}
+
+#[test]
+fn test_unreadable_top_level_specs_dir_retains_all_stories_stale() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    write_story(root, "E1S1", "Story One");
+    write_story(root, "E1S2", "Story Two");
+
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    assert_eq!(count_rows(root, "SELECT COUNT(*) FROM entities;"), 2);
+
+    #[cfg(unix)]
+    {
+        let (unreadable, _guard) = make_dir_unreadable(root, "docs/specs/stories");
+        if !unreadable {
+            eprintln!("skipping: environment allows reading 0o000 directory");
+            return;
+        }
+
+        let summary = store.sweep_workspace(root, &storage).unwrap();
+        assert_eq!(summary.purged, 0);
+        assert!(entity_stale(&store, "E1S1"));
+        assert!(entity_stale(&store, "E1S2"));
+        assert_eq!(count_rows(root, "SELECT COUNT(*) FROM entities;"), 2);
+
+        let findings = store.get_findings_for_path("docs/specs/stories").unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "read_error");
+
+        drop(_guard);
+        store.sweep_workspace(root, &storage).unwrap();
+        assert!(!entity_stale(&store, "E1S1"));
+        assert!(!entity_stale(&store, "E1S2"));
+        assert!(store.get_findings_for_path("docs/specs/stories").unwrap().is_empty());
+    }
+}
+
+#[test]
+fn test_unreadable_directory_deleted_clears_finding_and_purges_entities() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    let sub = root.join("docs/specs/stories/sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("E1S3.md"), story_md("E1S3", "Story Three")).unwrap();
+
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    assert!(store.get_entity("E1S3").unwrap().is_some());
+
+    #[cfg(unix)]
+    {
+        let (unreadable, guard) = make_dir_unreadable(root, "docs/specs/stories/sub");
+        if !unreadable {
+            eprintln!("skipping: environment allows reading 0o000 directory");
+            return;
+        }
+
+        store.sweep_workspace(root, &storage).unwrap();
+        assert!(entity_stale(&store, "E1S3"));
+        assert_eq!(
+            store.get_findings_for_path("docs/specs/stories/sub").unwrap().len(),
+            1
+        );
+
+        // Restore permissions and remove the directory
+        drop(guard);
+        fs::remove_dir_all(&sub).unwrap();
+
+        let summary = store.sweep_workspace(root, &storage).unwrap();
+        assert_eq!(summary.purged, 1, "deleted directory's entities must be purged");
+        assert!(store.get_entity("E1S3").unwrap().is_none());
+        assert!(
+            store.get_findings_for_path("docs/specs/stories/sub").unwrap().is_empty(),
+            "deleted directory's read_error finding must be cleared"
+        );
+    }
+}
+
+#[test]
+fn test_unreadable_directory_during_reset_and_rebuild_records_finding() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "");
+    let sub = root.join("docs/specs/stories/sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("E1S3.md"), story_md("E1S3", "Story Three")).unwrap();
+
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+
+    #[cfg(unix)]
+    {
+        let (unreadable, _guard) = make_dir_unreadable(root, "docs/specs/stories/sub");
+        if !unreadable {
+            eprintln!("skipping: environment allows reading 0o000 directory");
+            return;
+        }
+
+        store.reset_and_rebuild(root, &storage).unwrap();
+        let findings = store.get_findings_for_path("docs/specs/stories/sub").unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "read_error");
+        assert_eq!(findings[0].severity, "error");
+    }
+}
+
+#[test]
+fn test_unreadable_scratch_and_evidence_dir_records_finding_and_preserves_entries() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write_qdev_toml(root, "[[gates]]\nid = \"fmt\"\ncommand = \"cargo fmt\"\n");
+    make_workspace(root, &["E1S1"]);
+    write_at(
+        root,
+        "docs/state/scratch/E1S1.jsonl",
+        "{\"seq\":1,\"at\":\"2026-09-07T00:00:00Z\",\"author_type\":\"human\",\"author_id\":\"alice\",\"kind\":\"note\",\"text\":\"Spike\"}\n",
+    );
+    write_at(
+        root,
+        "docs/state/evidence/E1S1/abc-fmt.json",
+        r#"{
+  "id": "abc-fmt",
+  "story_id": "E1S1",
+  "gate_id": "fmt",
+  "commit_sha": "abc",
+  "status": "pass",
+  "exit_code": 0,
+  "duration_ms": 100,
+  "summary": "Formatted"
+}"#,
+    );
+
+    let storage = storage();
+    let store = ensure_cache(root, &storage).unwrap();
+    assert_eq!(count_rows(root, "SELECT COUNT(*) FROM scratchpad_entries;"), 1);
+    assert_eq!(count_rows(root, "SELECT COUNT(*) FROM gate_runs;"), 1);
+
+    #[cfg(unix)]
+    {
+        let (unreadable_scratch, _guard1) = make_dir_unreadable(root, "docs/state/scratch");
+        let (unreadable_evidence, _guard2) = make_dir_unreadable(root, "docs/state/evidence");
+        if !unreadable_scratch || !unreadable_evidence {
+            eprintln!("skipping: environment allows reading 0o000 directory");
+            return;
+        }
+
+        let summary = store.sweep_workspace(root, &storage).unwrap();
+        assert_eq!(summary.purged, 0, "entries under unreadable directories must not be purged");
+        assert_eq!(count_rows(root, "SELECT COUNT(*) FROM scratchpad_entries;"), 1);
+        assert_eq!(count_rows(root, "SELECT COUNT(*) FROM gate_runs;"), 1);
+
+        let scratch_findings = store.get_findings_for_path("docs/state/scratch").unwrap();
+        assert_eq!(scratch_findings.len(), 1);
+        assert_eq!(scratch_findings[0].code, "read_error");
+
+        let evidence_findings = store.get_findings_for_path("docs/state/evidence").unwrap();
+        assert_eq!(evidence_findings.len(), 1);
+        assert_eq!(evidence_findings[0].code, "read_error");
+
+        drop(_guard1);
+        drop(_guard2);
+        let summary2 = store.sweep_workspace(root, &storage).unwrap();
+        assert_eq!(summary2.purged, 0);
+        assert!(store.get_findings_for_path("docs/state/scratch").unwrap().is_empty());
+        assert!(store.get_findings_for_path("docs/state/evidence").unwrap().is_empty());
+    }
+}

@@ -416,12 +416,13 @@ impl SqliteStore {
     ) -> Result<SweepSummary, QdevError> {
         // Collect all file paths to parse in deterministic sorted order
         let mut entity_files = Vec::new();
+        let mut unreadable_dirs = Vec::new();
 
         let specs_dir = workspace_root.join(&storage.specs_dir);
         let state_dir = workspace_root.join(&storage.state_dir);
 
-        collect_markdown_files(&specs_dir, &mut entity_files);
-        collect_markdown_files(&state_dir, &mut entity_files);
+        collect_markdown_files(&specs_dir, &mut entity_files, &mut unreadable_dirs);
+        collect_markdown_files(&state_dir, &mut entity_files, &mut unreadable_dirs);
 
         // Sort by path for deterministic rebuild order
         entity_files.sort();
@@ -433,13 +434,16 @@ impl SqliteStore {
         // Also collect scratchpad (.jsonl) and evidence (.json) files
         let scratch_dir = state_dir.join("scratch");
         let mut scratch_files = Vec::new();
-        collect_files_with_ext(&scratch_dir, "jsonl", &mut scratch_files);
+        collect_files_with_ext(&scratch_dir, "jsonl", &mut scratch_files, &mut unreadable_dirs);
         scratch_files.sort();
 
         let evidence_dir = state_dir.join("evidence");
         let mut evidence_files = Vec::new();
-        collect_files_with_ext(&evidence_dir, "json", &mut evidence_files);
+        collect_files_with_ext(&evidence_dir, "json", &mut evidence_files, &mut unreadable_dirs);
         evidence_files.sort();
+
+        unreadable_dirs.sort_by(|a, b| a.0.cmp(&b.0));
+        unreadable_dirs.dedup_by(|a, b| a.0 == b.0);
 
         let config_path = workspace_root.join("qdev.toml");
 
@@ -479,6 +483,12 @@ DELETE FROM sync_meta;
                     format!("Failed to clear tables for rebuild: {}", e),
                 )
             })?;
+
+            // Record read_error findings for unreadable directories
+            for (dir_path, err) in &unreadable_dirs {
+                let rel = safe_relative_dir_path(workspace_root, dir_path);
+                record_dir_read_error(&tx, &rel, err)?;
+            }
 
             // `parsed` counts only confirmed successful reads + hydrations this pass, matching
             // the meaning `sweep_workspace` gives `SweepSummary.parsed`.
@@ -2986,20 +2996,29 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
 
         // Collect the current on-disk file sets (the same 4+1 sets a full rebuild scans)
         let mut entity_files = Vec::new();
-        collect_markdown_files(&specs_dir, &mut entity_files);
-        collect_markdown_files(&state_dir, &mut entity_files);
+        let mut unreadable_dirs = Vec::new();
+        collect_markdown_files(&specs_dir, &mut entity_files, &mut unreadable_dirs);
+        collect_markdown_files(&state_dir, &mut entity_files, &mut unreadable_dirs);
         entity_files.sort();
         // Deduped for the same reason as the rebuild's walk: an overlapping
         // `specs_dir`/`state_dir` layout would otherwise sweep a file twice.
         entity_files.dedup();
 
         let mut scratch_files = Vec::new();
-        collect_files_with_ext(&scratch_dir, "jsonl", &mut scratch_files);
+        collect_files_with_ext(&scratch_dir, "jsonl", &mut scratch_files, &mut unreadable_dirs);
         scratch_files.sort();
 
         let mut evidence_files = Vec::new();
-        collect_files_with_ext(&evidence_dir, "json", &mut evidence_files);
+        collect_files_with_ext(&evidence_dir, "json", &mut evidence_files, &mut unreadable_dirs);
         evidence_files.sort();
+
+        unreadable_dirs.sort_by(|a, b| a.0.cmp(&b.0));
+        unreadable_dirs.dedup_by(|a, b| a.0 == b.0);
+
+        let unreadable_dirs_rel: Vec<String> = unreadable_dirs
+            .iter()
+            .map(|(d, _)| safe_relative_dir_path(workspace_root, d))
+            .collect();
 
         let mut disk: Vec<(String, PathBuf, SweepFileRole)> = Vec::new();
         for f in &entity_files {
@@ -3195,6 +3214,57 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
             // Paths whose hydration succeeded this pass. Only these consume a dirty row.
             let mut parsed_paths: HashSet<String> = HashSet::new();
 
+            // Clear directory read_error findings that are now resolved (directory is readable or deleted)
+            let mut prior_read_error_paths: Vec<String> = Vec::new();
+            {
+                let mut stmt = tx
+                    .prepare("SELECT DISTINCT path FROM findings WHERE code = 'read_error';")
+                    .map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to prepare findings path scan: {}", e),
+                        )
+                    })?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to scan read_error finding paths: {}", e),
+                        )
+                    })?;
+                for r in rows {
+                    prior_read_error_paths.push(r.map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to read finding path for sweep: {}", e),
+                        )
+                    })?);
+                }
+            }
+            let mut restored_dirs: Vec<String> = Vec::new();
+            for path in &prior_read_error_paths {
+                if is_under_any_unreadable_dir(path, &unreadable_dirs_rel) {
+                    continue;
+                }
+                let abs = workspace_root.join(path);
+                if abs.is_dir() {
+                    restored_dirs.push(path.clone());
+                    clear_findings_for_path(&tx, path)?;
+                    finding_paths.remove(path);
+                } else if matches!(abs.try_exists(), Ok(false)) {
+                    clear_findings_for_path(&tx, path)?;
+                    finding_paths.remove(path);
+                }
+            }
+
+            // Record read_error findings for currently unreadable directories
+            for (dir_path, err) in &unreadable_dirs {
+                let rel = safe_relative_dir_path(workspace_root, dir_path);
+                record_dir_read_error(&tx, &rel, err)?;
+                finding_paths.insert(rel);
+            }
+
             // 1. Purge removed files: any path the cache knows about that is no longer on disk.
             //
             // The known set is the union of `sync_state` and every `entities.source_path`, not
@@ -3212,6 +3282,11 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                 .collect();
             removed.sort();
             for path in &removed {
+                if is_under_any_unreadable_dir(path, &unreadable_dirs_rel) {
+                    flag_stale_by_source_path(&tx, path)?;
+                    retained += 1;
+                    continue;
+                }
                 purge_removed_path(&tx, path)?;
                 purged += 1;
                 // Keep the in-memory view of the cache in step with what was just deleted, so
@@ -3227,6 +3302,8 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                 let (stamp, size) = file_change_stamp(abs);
                 let size_i64 = size as i64;
                 let is_dirty = dirty_paths.contains(rel);
+                let restored_from_unreadable_dir =
+                    is_under_any_unreadable_dir(rel, &restored_dirs);
                 let stored = sync_map.get(rel);
 
                 // A file is a re-hash candidate only if its mtime or size differs, its
@@ -3274,7 +3351,12 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                     None => false,
                 };
 
-                if !meta_changed && !is_dirty && !unaccounted && !unresolved_second {
+                if !meta_changed
+                    && !is_dirty
+                    && !unaccounted
+                    && !unresolved_second
+                    && !restored_from_unreadable_dir
+                {
                     // Content and permissions both known unchanged: the stamp compared above is
                     // the later of mtime and ctime, so a `chmod` that makes the file unreadable
                     // moves it and the file takes the candidate path below, where the failed read
@@ -3314,7 +3396,12 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
                 // nothing for this.
                 let last_hydration_failed = finding_paths.contains(rel);
 
-                if hash_changed || is_dirty || unaccounted || last_hydration_failed {
+                if hash_changed
+                    || is_dirty
+                    || unaccounted
+                    || last_hydration_failed
+                    || restored_from_unreadable_dir
+                {
                     match role {
                         SweepFileRole::Markdown => {
                             // `parsed` counts only successful upserts; conflicted / schema-violating
@@ -4168,6 +4255,43 @@ fn record_read_error(
         &format!("File could not be read: {}", err),
     )?;
     flag_stale_by_source_path(tx, rel_path)
+}
+
+/// Records an unreadable directory as an error-severity `read_error` finding with path set to
+/// the relative directory path from workspace root.
+fn record_dir_read_error(
+    tx: &rusqlite::Transaction,
+    rel_path: &str,
+    err: &std::io::Error,
+) -> Result<(), QdevError> {
+    clear_findings_for_path(tx, rel_path)?;
+    record_finding(
+        tx,
+        rel_path,
+        FindingCode::ReadError,
+        "error",
+        &format!("Directory could not be read: {}", err),
+    )
+}
+
+fn safe_relative_dir_path(workspace_root: &Path, dir_path: &Path) -> String {
+    let rel = relative_path(workspace_root, dir_path);
+    if rel.is_empty() {
+        ".".to_string()
+    } else {
+        rel
+    }
+}
+
+fn is_under_any_unreadable_dir(rel_path: &str, unreadable_dirs_rel: &[String]) -> bool {
+    let p = Path::new(rel_path);
+    unreadable_dirs_rel.iter().any(|u| {
+        if u == "." {
+            return true;
+        }
+        let u_path = Path::new(u);
+        p.starts_with(u_path)
+    })
 }
 
 fn record_finding(
@@ -5655,42 +5779,93 @@ ON CONFLICT(id) DO UPDATE SET
     Ok(())
 }
 
-pub(crate) fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) {
-    if !dir.exists() || !dir.is_dir() {
+pub(crate) fn collect_markdown_files(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    unreadable_dirs: &mut Vec<(PathBuf, std::io::Error)>,
+) {
+    match dir.try_exists() {
+        Ok(false) => return,
+        Ok(true) => {}
+        Err(e) => {
+            unreadable_dirs.push((dir.to_path_buf(), e));
+            return;
+        }
+    }
+    if !dir.is_dir() {
         return;
     }
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() && !path.is_symlink() {
-                collect_markdown_files(&path, files);
-            } else if path.is_file() {
-                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                    if ext.eq_ignore_ascii_case("md") {
-                        files.push(path);
+    match fs::read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(entry) => {
+                        let path = entry.path();
+                        if path.is_dir() && !path.is_symlink() {
+                            collect_markdown_files(&path, files, unreadable_dirs);
+                        } else if path.is_file() {
+                            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                                if ext.eq_ignore_ascii_case("md") {
+                                    files.push(path);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        unreadable_dirs.push((dir.to_path_buf(), e));
+                        break;
                     }
                 }
             }
         }
+        Err(e) => {
+            unreadable_dirs.push((dir.to_path_buf(), e));
+        }
     }
 }
 
-fn collect_files_with_ext(dir: &Path, extension: &str, files: &mut Vec<PathBuf>) {
-    if !dir.exists() || !dir.is_dir() {
+fn collect_files_with_ext(
+    dir: &Path,
+    extension: &str,
+    files: &mut Vec<PathBuf>,
+    unreadable_dirs: &mut Vec<(PathBuf, std::io::Error)>,
+) {
+    match dir.try_exists() {
+        Ok(false) => return,
+        Ok(true) => {}
+        Err(e) => {
+            unreadable_dirs.push((dir.to_path_buf(), e));
+            return;
+        }
+    }
+    if !dir.is_dir() {
         return;
     }
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_files_with_ext(&path, extension, files);
-            } else if path.is_file() {
-                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                    if ext.eq_ignore_ascii_case(extension) {
-                        files.push(path);
+    match fs::read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(entry) => {
+                        let path = entry.path();
+                        if path.is_dir() && !path.is_symlink() {
+                            collect_files_with_ext(&path, extension, files, unreadable_dirs);
+                        } else if path.is_file() {
+                            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                                if ext.eq_ignore_ascii_case(extension) {
+                                    files.push(path);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        unreadable_dirs.push((dir.to_path_buf(), e));
+                        break;
                     }
                 }
             }
+        }
+        Err(e) => {
+            unreadable_dirs.push((dir.to_path_buf(), e));
         }
     }
 }

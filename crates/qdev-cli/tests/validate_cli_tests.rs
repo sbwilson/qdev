@@ -2298,3 +2298,228 @@ updated_by:
     assert!(stdout.contains("Renumbered"));
     assert!(stdout.contains("[error] schema_violation"));
 }
+
+// ---------------------------------------------------------------------------
+// Unreadable directory CLI tests (spec-1-28)
+// ---------------------------------------------------------------------------
+
+struct DirPermGuard(std::path::PathBuf);
+impl Drop for DirPermGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+}
+
+#[cfg(unix)]
+fn make_dir_unreadable(path: &Path) -> (bool, Option<DirPermGuard>) {
+    use std::os::unix::fs::PermissionsExt;
+    if fs::set_permissions(path, fs::Permissions::from_mode(0o000)).is_err() {
+        return (false, None);
+    }
+    if fs::read_dir(path).is_ok() {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
+        return (false, None);
+    }
+    (true, Some(DirPermGuard(path.to_path_buf())))
+}
+
+/// Scenario 1: Unreadable story subdirectory causes `qdev validate` to exit 1 (LogicalFailure)
+/// and report a `read_error` finding naming the directory. Restoring permissions exits 0.
+#[test]
+fn test_validate_unreadable_directory_exits_1_and_reports_read_error() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let sub = root.join("docs/specs/stories/sub");
+    fs::create_dir_all(&sub).unwrap();
+    write_story(&sub, "E1S3");
+
+    // Cache the story first
+    let mut cmd_warm = Command::cargo_bin("qdev").unwrap();
+    cmd_warm
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .success()
+        .code(0);
+
+    #[cfg(unix)]
+    {
+        let (unreadable, _guard) = make_dir_unreadable(&sub);
+        if !unreadable {
+            eprintln!("skipping: environment allows reading 0o000 directory");
+            return;
+        }
+
+        let mut cmd = Command::cargo_bin("qdev").unwrap();
+        let assert = cmd
+            .current_dir(root)
+            .args(["validate", "--json"])
+            .assert()
+            .failure()
+            .code(1);
+
+        let output = assert.get_output();
+        let val: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let findings = val["findings"].as_array().unwrap();
+        let dir_finding = findings
+            .iter()
+            .find(|f| f["path"] == "docs/specs/stories/sub")
+            .expect("must report finding for unreadable directory");
+        assert_eq!(dir_finding["code"], "read_error");
+        assert_eq!(dir_finding["severity"], "error");
+
+        // Restore permissions: validate runs clean again and exits 0
+        drop(_guard);
+        let mut cmd_restored = Command::cargo_bin("qdev").unwrap();
+        cmd_restored
+            .current_dir(root)
+            .args(["validate", "--json"])
+            .assert()
+            .success()
+            .code(0);
+    }
+}
+
+/// Scenario 2: `qdev doctor` reports the unreadable directory finding in `findings_by_code`
+/// under the `validation` section.
+#[test]
+fn test_doctor_reports_unreadable_directory_finding_in_validation_section() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let sub = root.join("docs/specs/stories/sub");
+    fs::create_dir_all(&sub).unwrap();
+    write_story(&sub, "E1S3");
+
+    #[cfg(unix)]
+    {
+        let (unreadable, _guard) = make_dir_unreadable(&sub);
+        if !unreadable {
+            eprintln!("skipping: environment allows reading 0o000 directory");
+            return;
+        }
+
+        let mut cmd = Command::cargo_bin("qdev").unwrap();
+        let assert = cmd
+            .current_dir(root)
+            .args(["doctor", "--json"])
+            .assert()
+            .success()
+            .code(0);
+
+        let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+        let sections = val["sections"].as_array().unwrap();
+        let validation = sections
+            .iter()
+            .find(|s| s["name"] == "validation")
+            .expect("a 'validation' section must be present");
+        assert!(
+            validation["findings_by_code"]["read_error"].as_u64().unwrap_or(0) >= 1,
+            "doctor must report read_error in findings_by_code under validation: {validation}"
+        );
+    }
+}
+
+/// Scenario 3: ID allocation with unreadable directory skips the retained stale entity ID
+/// and allocates the next available ID.
+#[test]
+fn test_create_story_skips_id_of_retained_stale_entity_under_unreadable_dir() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    write_story(&stories_dir, "E1S1");
+    write_story(&stories_dir, "E1S2");
+    let sub = stories_dir.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    write_story(&sub, "E1S3");
+
+    // Warm-up sweep so E1S3 is cached
+    let mut cmd_warm = Command::cargo_bin("qdev").unwrap();
+    cmd_warm
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .success()
+        .code(0);
+
+    #[cfg(unix)]
+    {
+        let (unreadable, _guard) = make_dir_unreadable(&sub);
+        if !unreadable {
+            eprintln!("skipping: environment allows reading 0o000 directory");
+            return;
+        }
+
+        // Create next story in epic E1; since E1S3 is retained stale in ids_in_use,
+        // it must allocate E1S4, skipping E1S3.
+        let mut cmd = Command::cargo_bin("qdev").unwrap();
+        let assert = cmd
+            .current_dir(root)
+            .args(["create", "story", "E1", "--title", "New Story"])
+            .assert()
+            .success()
+            .code(0);
+
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+        assert!(
+            stdout.contains("E1S4"),
+            "allocator must skip cached stale E1S3 and allocate E1S4: {stdout}"
+        );
+        assert!(root.join("docs/specs/stories/E1S4.md").exists());
+    }
+}
+
+/// Scenario 4: Write path (`qdev update`) on an entity in an unreadable directory exits 4
+/// (InfrastructureFailure / io_error) naming the directory, rather than reporting entity not found (exit 2).
+#[test]
+fn test_update_on_entity_in_unreadable_directory_exits_4_infrastructure_failure() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    write_story(&stories_dir, "E1S1");
+
+    // Cache E1S1
+    let mut cmd_warm = Command::cargo_bin("qdev").unwrap();
+    cmd_warm
+        .current_dir(root)
+        .args(["validate", "--json"])
+        .assert()
+        .success()
+        .code(0);
+
+    #[cfg(unix)]
+    {
+        let (unreadable, _guard) = make_dir_unreadable(&stories_dir);
+        if !unreadable {
+            eprintln!("skipping: environment allows reading 0o000 directory");
+            return;
+        }
+
+        let mut cmd = Command::cargo_bin("qdev").unwrap();
+        let assert = cmd
+            .current_dir(root)
+            .args(["update", "E1S1", "--title", "Updated Title"])
+            .assert()
+            .failure()
+            .code(4);
+
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+        let combined = format!("{stderr}\n{stdout}");
+        assert!(
+            combined.contains("io_error") || combined.contains("stories") || combined.contains("Permission denied"),
+            "error must identify directory read failure: {combined}"
+        );
+    }
+}
