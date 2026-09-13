@@ -1321,14 +1321,16 @@ pub fn upsert_cache_with_constraint(
                     )
                 })?;
             let rows = stmt
-                .query_map(
-                    rusqlite::params![entity.source_path, entity.id],
-                    |row| row.get::<_, String>(0),
-                )
+                .query_map(rusqlite::params![entity.source_path, entity.id], |row| {
+                    row.get::<_, String>(0)
+                })
                 .map_err(|e| {
                     QdevError::infrastructure_failure(
                         "sqlite_error",
-                        format!("Failed to scan for rows claiming '{}': {}", entity.source_path, e),
+                        format!(
+                            "Failed to scan for rows claiming '{}': {}",
+                            entity.source_path, e
+                        ),
                     )
                 })?;
             let mut ids = Vec::new();
@@ -3080,9 +3082,8 @@ pub fn apply_constraint_add(
         options.storage.as_ref(),
     )?;
 
-    id.parse::<Identifier>().map_err(|e| {
-        QdevError::usage_error(format!("Invalid owner identifier '{}': {}", id, e))
-    })?;
+    id.parse::<Identifier>()
+        .map_err(|e| QdevError::usage_error(format!("Invalid owner identifier '{}': {}", id, e)))?;
 
     if kind != EntityKind::Story && kind != EntityKind::Epic {
         return Err(QdevError::usage_error(format!(
@@ -3094,7 +3095,8 @@ pub fn apply_constraint_add(
     let rel_path = workspace_rel_path(&file_path, &options.workspace_root);
 
     // 2. Acquire workspace advisory write lock
-    let _lock_guard = acquire_workspace_write_lock(&options.workspace_root, options.storage.as_ref())?;
+    let _lock_guard =
+        acquire_workspace_write_lock(&options.workspace_root, options.storage.as_ref())?;
 
     // 3. Read existing file content
     let existing_content = fs::read_to_string(&file_path).map_err(|e| {
@@ -3141,7 +3143,10 @@ pub fn apply_constraint_add(
     let default_storage = StorageConfig::default();
     let st = options.storage.as_ref().unwrap_or(&default_storage);
     let cache_dir_rel = st.cache_dir.as_str();
-    let cache_db_path = options.workspace_root.join(cache_dir_rel).join("cache.sqlite");
+    let cache_db_path = options
+        .workspace_root
+        .join(cache_dir_rel)
+        .join("cache.sqlite");
     let opt_store = if cache_db_path.is_file() {
         crate::store::SqliteStore::open(&cache_db_path).ok()
     } else {
@@ -3164,7 +3169,8 @@ pub fn apply_constraint_add(
     let relative_id = format!("{}-{}", seq_kind.as_str(), seq_num);
 
     // 5. Append to constraints sequence in frontmatter
-    let mut constraints_seq: Vec<serde_yaml::Value> = match old_frontmatter_yaml.get("constraints") {
+    let mut constraints_seq: Vec<serde_yaml::Value> = match old_frontmatter_yaml.get("constraints")
+    {
         None | Some(serde_yaml::Value::Null) => Vec::new(),
         Some(serde_yaml::Value::Sequence(items)) => items.clone(),
         Some(_) => {
@@ -3340,7 +3346,8 @@ pub fn apply_constraint_remove(
     let rel_path = workspace_rel_path(&file_path, &options.workspace_root);
 
     // 2. Acquire advisory write lock
-    let _lock_guard = acquire_workspace_write_lock(&options.workspace_root, options.storage.as_ref())?;
+    let _lock_guard =
+        acquire_workspace_write_lock(&options.workspace_root, options.storage.as_ref())?;
 
     // 3. Read existing file content under lock
     let fresh_content = fs::read_to_string(&file_path).map_err(|e| {
@@ -3394,7 +3401,7 @@ pub fn apply_constraint_remove(
                 || item_id == target_canonical.as_str()
                 || item_id
                     .split_once('/')
-                    .map_or(false, |(o, r)| o == owner_id && r == target_rel)
+                    .is_some_and(|(o, r)| o == owner_id && r == target_rel)
         } else {
             false
         }
@@ -3463,7 +3470,10 @@ pub fn apply_constraint_remove(
     let default_storage = StorageConfig::default();
     let st = options.storage.as_ref().unwrap_or(&default_storage);
     let cache_dir_rel = st.cache_dir.as_str();
-    let cache_db_path = options.workspace_root.join(cache_dir_rel).join("cache.sqlite");
+    let cache_db_path = options
+        .workspace_root
+        .join(cache_dir_rel)
+        .join("cache.sqlite");
 
     let updated_frontmatter =
         crate::schema::extract_frontmatter(&patched_content).map_err(|e| {

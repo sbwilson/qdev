@@ -1,0 +1,2500 @@
+diff --git a/crates/qdev-cli/src/cli.rs b/crates/qdev-cli/src/cli.rs
+index 84d38cf..179b871 100644
+--- a/crates/qdev-cli/src/cli.rs
++++ b/crates/qdev-cli/src/cli.rs
+@@ -71,6 +71,8 @@ pub enum Commands {
+     Claim(ClaimArgs),
+     /// Release a story lease
+     Release(ReleaseArgs),
++    /// Manage story scratchpads
++    Scratch(ScratchArgs),
+ }
+ 
+ #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+@@ -455,6 +457,59 @@ pub enum ConfigCommands {
+     Show,
+ }
+ 
++#[derive(Parser, Debug, Clone, PartialEq, Eq)]
++pub struct ScratchArgs {
++    #[command(subcommand)]
++    pub command: ScratchCommands,
++}
++
++#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
++pub enum ScratchCommands {
++    /// Append an entry to a story's scratchpad
++    Append(ScratchAppendArgs),
++    /// Read a story's scratchpad entries
++    Read(ScratchReadArgs),
++}
++
++#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
++pub struct ScratchAppendArgs {
++    /// Target story identifier (e.g. "E12S4")
++    pub story: String,
++
++    /// Scratchpad entry text
++    pub text: String,
++
++    /// Scratchpad entry kind: 'note', 'decision', 'tradeoff', or 'transition'
++    #[arg(long = "kind")]
++    pub kind: Option<String>,
++
++    /// Attribution author type override ('human' or 'agent')
++    #[arg(long = "author-type")]
++    pub author_type: Option<String>,
++
++    /// Attribution developer/agent ID override
++    #[arg(long = "author-id")]
++    pub author_id: Option<String>,
++}
++
++#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
++pub struct ScratchReadArgs {
++    /// Target story identifier (e.g. "E12S4")
++    pub story: String,
++
++    /// Filter to key decisions, transitions, and recent entries
++    #[arg(long = "summary")]
++    pub summary: bool,
++
++    /// Number of recent entries to include in summary (default: 5)
++    #[arg(long = "last", requires = "summary")]
++    pub last: Option<usize>,
++
++    /// Token budget to bound output entries
++    #[arg(long = "budget")]
++    pub budget: Option<usize>,
++}
++
+ /// Helper to check whether `--json` was passed in raw command-line arguments.
+ pub fn is_json_requested(args: &[String]) -> bool {
+     args.iter()
+diff --git a/crates/qdev-cli/src/main.rs b/crates/qdev-cli/src/main.rs
+index 9badcd6..a695827 100644
+--- a/crates/qdev-cli/src/main.rs
++++ b/crates/qdev-cli/src/main.rs
+@@ -71,11 +71,80 @@ fn main() -> StdExitCode {
+     StdExitCode::from(exit_code)
+ }
+ 
++fn normalize_raw_args(raw_args: &[String]) -> Vec<String> {
++    let is_scratch_append = raw_args
++        .windows(2)
++        .any(|w| w[0] == "scratch" && w[1] == "append");
++    if !is_scratch_append {
++        return raw_args.to_vec();
++    }
++
++    let dash_dash_pos = raw_args.iter().position(|a| a == "--");
++    let dash_dash_idx = match dash_dash_pos {
++        Some(idx) => idx,
++        None => return raw_args.to_vec(),
++    };
++
++    let mut before = raw_args[..dash_dash_idx].to_vec();
++    let after = &raw_args[dash_dash_idx + 1..];
++
++    if after.is_empty() {
++        return raw_args.to_vec();
++    }
++
++    // The first token immediately following `--` is the entry text operand.
++    // Preserve it as positional text and only scan subsequent tokens for trailing flags.
++    let positional_text = &after[0];
++    let mut hoisted_flags = Vec::new();
++    let mut remaining_positional = vec![positional_text.clone()];
++
++    let mut i = 1;
++    while i < after.len() {
++        let arg = &after[i];
++        if arg == "--override" || arg == "--json" || arg == "--non-interactive" {
++            hoisted_flags.push(arg.clone());
++            i += 1;
++        } else if arg == "--justification"
++            || arg == "--kind"
++            || arg == "--author-type"
++            || arg == "--author-id"
++        {
++            hoisted_flags.push(arg.clone());
++            if i + 1 < after.len() && !after[i + 1].starts_with("--") {
++                hoisted_flags.push(after[i + 1].clone());
++                i += 2;
++            } else {
++                i += 1;
++            }
++        } else if arg.starts_with("--justification=")
++            || arg.starts_with("--kind=")
++            || arg.starts_with("--author-type=")
++            || arg.starts_with("--author-id=")
++        {
++            hoisted_flags.push(arg.clone());
++            i += 1;
++        } else {
++            remaining_positional.push(arg.clone());
++            i += 1;
++        }
++    }
++
++    if hoisted_flags.is_empty() {
++        return raw_args.to_vec();
++    }
++
++    before.extend(hoisted_flags);
++    before.push("--".to_string());
++    before.extend(remaining_positional);
++    before
++}
++
+ fn run(raw_args: &[String]) -> ExitCode {
+-    let json_mode = is_json_requested(raw_args);
++    let raw_args = normalize_raw_args(raw_args);
++    let json_mode = is_json_requested(&raw_args);
+     let output = OutputEmitter::new(json_mode);
+ 
+-    let cli = match Cli::try_parse_from(raw_args) {
++    let cli = match Cli::try_parse_from(&raw_args) {
+         Ok(cli) => cli,
+         Err(clap_err) => {
+             if clap_err.kind() == clap::error::ErrorKind::DisplayHelp {
+@@ -308,6 +377,14 @@ fn run(raw_args: &[String]) -> ExitCode {
+         Some(Commands::Release(ref release_args)) => {
+             handle_release(release_args, &annotated_config, &cli, &output, &current_dir)
+         }
++        Some(Commands::Scratch(ref scratch_args)) => handle_scratch(
++            scratch_args,
++            &annotated_config,
++            &cli,
++            &output,
++            &current_dir,
++            interactivity,
++        ),
+         Some(Commands::Init(_)) => unreachable!(),
+         Some(Commands::Schema(_)) => unreachable!(),
+     }
+@@ -390,7 +467,8 @@ fn requires_workspace(command: Option<&Commands>) -> bool {
+         | Some(Commands::Sync(_))
+         | Some(Commands::Doctor)
+         | Some(Commands::Claim(_))
+-        | Some(Commands::Release(_)) => true,
++        | Some(Commands::Release(_))
++        | Some(Commands::Scratch(_)) => true,
+     }
+ }
+ 
+@@ -4379,3 +4457,308 @@ fn handle_release(
+         }
+     }
+ }
++
++fn handle_scratch(
++    args: &cli::ScratchArgs,
++    annotated_config: &qdev_core::AnnotatedConfig,
++    cli: &Cli,
++    output: &OutputEmitter,
++    current_dir: &std::path::Path,
++    interactivity: Interactivity,
++) -> ExitCode {
++    match args.command {
++        cli::ScratchCommands::Append(ref append_args) => handle_scratch_append(
++            append_args,
++            annotated_config,
++            cli,
++            output,
++            current_dir,
++            interactivity,
++        ),
++        cli::ScratchCommands::Read(ref read_args) => {
++            handle_scratch_read(read_args, annotated_config, cli, output, current_dir)
++        }
++    }
++}
++
++fn handle_scratch_append(
++    append_args: &cli::ScratchAppendArgs,
++    annotated_config: &qdev_core::AnnotatedConfig,
++    cli: &Cli,
++    output: &OutputEmitter,
++    current_dir: &std::path::Path,
++    interactivity: Interactivity,
++) -> ExitCode {
++    let root = qdev_core::find_workspace_root(current_dir);
++
++    // 1. Resolve target story
++    let (_entity_kind, canonical_story_id, _story_path) = match qdev_core::resolve_entity_file(
++        &root,
++        Some(qdev_core::EntityKind::Story),
++        &append_args.story,
++        Some(&annotated_config.config.storage),
++    ) {
++        Ok(res) => res,
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    };
++
++    // 2. Validate kind
++    if let Some(ref k) = append_args.kind {
++        let trimmed = k.trim();
++        if !qdev_core::VALID_SCRATCH_KINDS.contains(&trimmed) {
++            let err = qdev_core::QdevError::usage_error(format!(
++                "Invalid scratchpad kind '{}', must be one of: note, decision, tradeoff, transition",
++                trimmed
++            ));
++            let _ = output.emit_error(&err);
++            return ExitCode::UsageError;
++        }
++    }
++
++    // 3. Validate text
++    if append_args.text.trim().is_empty() {
++        let err = qdev_core::QdevError::usage_error("Scratchpad text cannot be empty");
++        let _ = output.emit_error(&err);
++        return ExitCode::UsageError;
++    }
++
++    // 4. Resolve author (single resolution for lease check, override audit, and append)
++    let author = match resolve_author(
++        append_args.author_type.as_deref(),
++        append_args.author_id.as_deref(),
++        annotated_config,
++        &root,
++    ) {
++        Ok(a) => a,
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    };
++
++    // 5. Check lease authorization
++    let workspace_leases = match qdev_core::find_workspace_leases(&root) {
++        Ok(l) => l,
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    };
++
++    let has_active_lease = workspace_leases
++        .iter()
++        .any(|l| l.story_id == canonical_story_id);
++
++    let mut override_decision: Option<String> = None;
++
++    if !has_active_lease {
++        if cli.r#override {
++            let just = cli.justification.as_deref().unwrap_or("").trim();
++            if just.is_empty() {
++                let err = qdev_core::QdevError::policy_refusal(
++                    "needs_justification",
++                    "--override requires a non-empty --justification",
++                );
++                let _ = output.emit_error(&err);
++                return ExitCode::PolicyRefusal;
++            }
++            override_decision = Some(just.to_string());
++        } else if interactivity.is_non_interactive() {
++            let err = qdev_core::QdevError::policy_refusal(
++                "needs_confirmation",
++                format!(
++                    "Scratchpad append on story '{}' requires an active lease; re-run with --override --justification \"<rationale>\"",
++                    canonical_story_id
++                ),
++            );
++            let _ = output.emit_error(&err);
++            return ExitCode::PolicyRefusal;
++        } else {
++            eprintln!("⚠ Out-of-lease scratchpad append");
++            eprintln!("  Story   {}", canonical_story_id);
++            if let Some(l) = workspace_leases.first() {
++                eprintln!("  Lease   {} (held in {})", l.story_id, l.worktree_path);
++            }
++            eprintln!("  [1] Override with justification");
++            eprintln!("  [2] Abort");
++
++            let choice = match prompt_input("") {
++                Ok(c) => c,
++                Err(_) => {
++                    println!("Aborted.");
++                    return ExitCode::Success;
++                }
++            };
++
++            match choice.trim() {
++                "1" => {
++                    let just = match prompt_input("Justification: ") {
++                        Ok(j) => j,
++                        Err(_) => {
++                            let err = qdev_core::QdevError::policy_refusal(
++                                "needs_justification",
++                                "--override requires a non-empty --justification",
++                            );
++                            let _ = output.emit_error(&err);
++                            return ExitCode::PolicyRefusal;
++                        }
++                    };
++                    let trimmed_just = just.trim();
++                    if trimmed_just.is_empty() {
++                        let err = qdev_core::QdevError::policy_refusal(
++                            "needs_justification",
++                            "--override requires a non-empty --justification",
++                        );
++                        let _ = output.emit_error(&err);
++                        return ExitCode::PolicyRefusal;
++                    }
++                    override_decision = Some(trimmed_just.to_string());
++                }
++                _ => {
++                    println!("Aborted.");
++                    return ExitCode::Success;
++                }
++            }
++        }
++    }
++
++    // 6. Append scratchpad entry
++    let opt_store = open_query_store(&root, annotated_config).ok();
++    let entry = match qdev_core::append_scratch_entry(
++        &root,
++        Some(&annotated_config.config.storage),
++        &canonical_story_id,
++        append_args.kind.as_deref(),
++        &append_args.text,
++        &author,
++        opt_store.as_ref().map(|s| s as &dyn qdev_core::Store),
++    ) {
++        Ok(e) => e,
++        Err(err) => {
++            let _ = output.emit_error(&err);
++            return err.exit_code();
++        }
++    };
++
++    // 7. If an override took place, log governance decision record after append succeeded
++    if let Some(just) = override_decision {
++        if let Err(e) = qdev_core::create_governance_override_decision(
++            &root,
++            Some(&annotated_config.config.storage),
++            &canonical_story_id,
++            "lease_override",
++            &just,
++            &author,
++            Some(&format!(
++                "Scratchpad append on unleased story {} overridden by {}",
++                canonical_story_id, author.id
++            )),
++        ) {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    }
++
++    if cli.json {
++        let envelope = JsonEnvelope::new(qdev_core::ScratchAppendPayload {
++            story_id: canonical_story_id.clone(),
++            seq: entry.seq,
++            at: entry.at.clone(),
++            author: entry.author.clone(),
++            kind: entry.kind.clone(),
++            text: entry.text.clone(),
++        });
++        if let Err(e) = output.emit_envelope(&envelope) {
++            let err = QdevError::infrastructure_failure(
++                "io_error",
++                format!("Failed to emit scratchpad envelope: {}", e),
++            );
++            let _ = output.emit_error(&err);
++            return ExitCode::InfrastructureFailure;
++        }
++    } else {
++        println!(
++            "Appended entry #{} [{}] to scratchpad for {}",
++            entry.seq, entry.kind, canonical_story_id
++        );
++    }
++
++    ExitCode::Success
++}
++
++fn handle_scratch_read(
++    read_args: &cli::ScratchReadArgs,
++    annotated_config: &qdev_core::AnnotatedConfig,
++    cli: &Cli,
++    output: &OutputEmitter,
++    current_dir: &std::path::Path,
++) -> ExitCode {
++    let root = qdev_core::find_workspace_root(current_dir);
++
++    // 1. Resolve target story
++    let (_entity_kind, canonical_story_id, _story_path) = match qdev_core::resolve_entity_file(
++        &root,
++        Some(qdev_core::EntityKind::Story),
++        &read_args.story,
++        Some(&annotated_config.config.storage),
++    ) {
++        Ok(res) => res,
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    };
++
++    // 2. Read entries
++    let entries = match qdev_core::read_scratch_entries(
++        &root,
++        Some(&annotated_config.config.storage),
++        &canonical_story_id,
++    ) {
++        Ok(e) => e,
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    };
++
++    // 3. Filter entries
++    let filtered_entries = if read_args.summary {
++        let last_n = read_args.last.unwrap_or(5);
++        qdev_core::summarize_scratch_entries(&entries, last_n, read_args.budget)
++    } else if let Some(budget) = read_args.budget {
++        qdev_core::filter_scratch_entries_by_budget(&entries, budget)
++    } else {
++        entries
++    };
++
++    // 4. Output
++    if cli.json {
++        let envelope = JsonEnvelope::new(qdev_core::ScratchReadPayload {
++            story_id: canonical_story_id.clone(),
++            entries: filtered_entries,
++        });
++        if let Err(e) = output.emit_envelope(&envelope) {
++            let err = QdevError::infrastructure_failure(
++                "io_error",
++                format!("Failed to emit scratchpad envelope: {}", e),
++            );
++            let _ = output.emit_error(&err);
++            return ExitCode::InfrastructureFailure;
++        }
++    } else if filtered_entries.is_empty() {
++        println!("(empty)");
++    } else {
++        for entry in &filtered_entries {
++            println!(
++                "[{}] [{}] {}:{} {}: {}",
++                entry.seq, entry.kind, entry.author.r#type, entry.author.id, entry.at, entry.text
++            );
++        }
++    }
++
++    ExitCode::Success
++}
+diff --git a/crates/qdev-cli/tests/constraint_cli_tests.rs b/crates/qdev-cli/tests/constraint_cli_tests.rs
+index 49da542..5b2dab3 100644
+--- a/crates/qdev-cli/tests/constraint_cli_tests.rs
++++ b/crates/qdev-cli/tests/constraint_cli_tests.rs
+@@ -249,15 +249,7 @@ fn test_cli_constraint_add_empty_text() {
+ 
+     let mut cmd = Command::cargo_bin("qdev").unwrap();
+     cmd.current_dir(root)
+-        .args([
+-            "constraint",
+-            "add",
+-            "E12S4",
+-            "--kind",
+-            "no_go",
+-            "--",
+-            "   ",
+-        ])
++        .args(["constraint", "add", "E12S4", "--kind", "no_go", "--", "   "])
+         .assert()
+         .code(2);
+ }
+@@ -296,11 +288,7 @@ fn test_cli_constraint_remove_draft() {
+ 
+     let mut cmd = Command::cargo_bin("qdev").unwrap();
+     cmd.current_dir(root)
+-        .args([
+-            "constraint",
+-            "remove",
+-            "E12S4/NG-1",
+-        ])
++        .args(["constraint", "remove", "E12S4/NG-1"])
+         .assert()
+         .success();
+ 
+@@ -320,11 +308,7 @@ fn test_cli_constraint_remove_non_draft_without_justification_refused() {
+     // Refused with exit code 3 (PolicyRefusal)
+     let mut cmd = Command::cargo_bin("qdev").unwrap();
+     cmd.current_dir(root)
+-        .args([
+-            "constraint",
+-            "remove",
+-            "E12S4/NG-1",
+-        ])
++        .args(["constraint", "remove", "E12S4/NG-1"])
+         .assert()
+         .code(3);
+ 
+@@ -368,11 +352,7 @@ fn test_cli_constraint_remove_not_found() {
+ 
+     let mut cmd = Command::cargo_bin("qdev").unwrap();
+     cmd.current_dir(root)
+-        .args([
+-            "constraint",
+-            "remove",
+-            "E12S4/NG-99",
+-        ])
++        .args(["constraint", "remove", "E12S4/NG-99"])
+         .assert()
+         .code(2);
+ }
+@@ -388,12 +368,7 @@ fn test_cli_constraint_remove_json_envelope() {
+     let mut cmd = Command::cargo_bin("qdev").unwrap();
+     let assert = cmd
+         .current_dir(root)
+-        .args([
+-            "constraint",
+-            "remove",
+-            "E12S4/NG-1",
+-            "--json",
+-        ])
++        .args(["constraint", "remove", "E12S4/NG-1", "--json"])
+         .assert()
+         .success();
+ 
+@@ -412,7 +387,8 @@ fn test_cli_constraint_get_resolution_and_inheritance() {
+     setup_workspace(root);
+ 
+     // Create epic E12 with RH-1
+-    let epic_constraints = "  - id: RH-1\n    kind: rabbit_hole\n    text: len == 0 does not mean empty\n";
++    let epic_constraints =
++        "  - id: RH-1\n    kind: rabbit_hole\n    text: len == 0 does not mean empty\n";
+     create_epic(root, "E12", "active", 1, epic_constraints);
+ 
+     // Create story E12S4 with NG-1
+@@ -421,7 +397,11 @@ fn test_cli_constraint_get_resolution_and_inheritance() {
+ 
+     // Populate cache by syncing
+     let mut sync_cmd = Command::cargo_bin("qdev").unwrap();
+-    sync_cmd.current_dir(root).args(["sync", "--rebuild"]).assert().success();
++    sync_cmd
++        .current_dir(root)
++        .args(["sync", "--rebuild"])
++        .assert()
++        .success();
+ 
+     // 1. qdev get E12S4/NG-1 resolves bare constraint
+     let mut get_cmd1 = Command::cargo_bin("qdev").unwrap();
+@@ -447,11 +427,17 @@ fn test_cli_constraint_get_resolution_and_inheritance() {
+     let constraints = json2["constraints"].as_array().expect("constraints array");
+     assert_eq!(constraints.len(), 2);
+ 
+-    let own = constraints.iter().find(|c| c["id"] == "E12S4/NG-1").expect("own constraint");
++    let own = constraints
++        .iter()
++        .find(|c| c["id"] == "E12S4/NG-1")
++        .expect("own constraint");
+     assert_eq!(own["kind"], "no_go");
+     assert_eq!(own["inherited_from"], Value::Null);
+ 
+-    let inherited = constraints.iter().find(|c| c["id"] == "E12/RH-1").expect("inherited constraint");
++    let inherited = constraints
++        .iter()
++        .find(|c| c["id"] == "E12/RH-1")
++        .expect("inherited constraint");
+     assert_eq!(inherited["kind"], "rabbit_hole");
+     assert_eq!(inherited["inherited_from"], "E12");
+ }
+@@ -466,13 +452,7 @@ fn test_cli_constraint_remove_if_version_mismatch() {
+ 
+     let mut cmd = Command::cargo_bin("qdev").unwrap();
+     cmd.current_dir(root)
+-        .args([
+-            "constraint",
+-            "remove",
+-            "E12S4/NG-1",
+-            "--if-version",
+-            "1",
+-        ])
++        .args(["constraint", "remove", "E12S4/NG-1", "--if-version", "1"])
+         .assert()
+         .code(5);
+ 
+@@ -524,11 +504,7 @@ fn test_cli_appetite_constraint_remove_and_get() {
+     let mut rm_cmd = Command::cargo_bin("qdev").unwrap();
+     rm_cmd
+         .current_dir(root)
+-        .args([
+-            "constraint",
+-            "remove",
+-            "E12S4/APP-1",
+-        ])
++        .args(["constraint", "remove", "E12S4/APP-1"])
+         .assert()
+         .success();
+ 
+diff --git a/crates/qdev-cli/tests/workspace_guard_cli_tests.rs b/crates/qdev-cli/tests/workspace_guard_cli_tests.rs
+index 08d31e2..813c2d5 100644
+--- a/crates/qdev-cli/tests/workspace_guard_cli_tests.rs
++++ b/crates/qdev-cli/tests/workspace_guard_cli_tests.rs
+@@ -26,6 +26,7 @@ fn guarded_invocations() -> Vec<Vec<&'static str>> {
+         vec!["claim", "story", "E1S1"],
+         vec!["release", "story", "E1S1"],
+         vec!["constraint", "add", "E1S1", "--kind", "no_go", "text"],
++        vec!["scratch", "read", "E1S1"],
+     ]
+ }
+ 
+diff --git a/crates/qdev-core/src/id.rs b/crates/qdev-core/src/id.rs
+index ff0673b..f9f50cc 100644
+--- a/crates/qdev-core/src/id.rs
++++ b/crates/qdev-core/src/id.rs
+@@ -824,7 +824,8 @@ pub fn allocate_next_constraint_id_in(
+     {
+         if let Ok(content) = std::fs::read_to_string(&file_path) {
+             if let Ok(frontmatter) = crate::schema::extract_frontmatter(&content) {
+-                if let Some(serde_json::Value::Array(constraints)) = frontmatter.get("constraints") {
++                if let Some(serde_json::Value::Array(constraints)) = frontmatter.get("constraints")
++                {
+                     for c in constraints {
+                         if let Some(id_val) = c.get("id").and_then(|v| v.as_str()) {
+                             existing_ids.insert(id_val.to_string());
+@@ -861,4 +862,3 @@ pub fn allocate_next_constraint_id_in(
+         number: next_n,
+     })
+ }
+-
+diff --git a/crates/qdev-core/src/lib.rs b/crates/qdev-core/src/lib.rs
+index 32ad81a..0f8ddff 100644
+--- a/crates/qdev-core/src/lib.rs
++++ b/crates/qdev-core/src/lib.rs
+@@ -10,11 +10,18 @@ pub mod interactivity;
+ pub mod lease;
+ pub mod query;
+ pub mod schema;
++pub mod scratch;
+ pub mod store;
+ pub mod transition;
+ pub mod validate;
+ pub mod write;
+ 
++pub use scratch::{
++    append_scratch_entry, estimate_tokens, filter_scratch_entries_by_budget, read_scratch_entries,
++    summarize_scratch_entries, ScratchAppendPayload, ScratchReadPayload, ScratchpadAuthor,
++    ScratchpadEntry, VALID_SCRATCH_KINDS,
++};
++
+ pub use governance::{
+     add_team_to_entity_owners, canonical_team_string, classify_mutation,
+     create_governance_override_decision, extract_entity_owners, is_user_owner, normalize_team_name,
+diff --git a/crates/qdev-core/src/store/sqlite.rs b/crates/qdev-core/src/store/sqlite.rs
+index 20ae973..3f45555 100644
+--- a/crates/qdev-core/src/store/sqlite.rs
++++ b/crates/qdev-core/src/store/sqlite.rs
+@@ -4129,7 +4129,7 @@ fn file_change_stamp_from_metadata(metadata: Option<&fs::Metadata>) -> (i64, u64
+     (stamp, size)
+ }
+ 
+-fn file_change_stamp(file_path: &Path) -> (i64, u64) {
++pub fn file_change_stamp(file_path: &Path) -> (i64, u64) {
+     let metadata = fs::metadata(file_path).ok();
+     file_change_stamp_from_metadata(metadata.as_ref())
+ }
+diff --git a/crates/qdev-core/src/write.rs b/crates/qdev-core/src/write.rs
+index 5f417cd..ee48561 100644
+--- a/crates/qdev-core/src/write.rs
++++ b/crates/qdev-core/src/write.rs
+@@ -1321,14 +1321,16 @@ pub fn upsert_cache_with_constraint(
+                     )
+                 })?;
+             let rows = stmt
+-                .query_map(
+-                    rusqlite::params![entity.source_path, entity.id],
+-                    |row| row.get::<_, String>(0),
+-                )
++                .query_map(rusqlite::params![entity.source_path, entity.id], |row| {
++                    row.get::<_, String>(0)
++                })
+                 .map_err(|e| {
+                     QdevError::infrastructure_failure(
+                         "sqlite_error",
+-                        format!("Failed to scan for rows claiming '{}': {}", entity.source_path, e),
++                        format!(
++                            "Failed to scan for rows claiming '{}': {}",
++                            entity.source_path, e
++                        ),
+                     )
+                 })?;
+             let mut ids = Vec::new();
+@@ -3080,9 +3082,8 @@ pub fn apply_constraint_add(
+         options.storage.as_ref(),
+     )?;
+ 
+-    id.parse::<Identifier>().map_err(|e| {
+-        QdevError::usage_error(format!("Invalid owner identifier '{}': {}", id, e))
+-    })?;
++    id.parse::<Identifier>()
++        .map_err(|e| QdevError::usage_error(format!("Invalid owner identifier '{}': {}", id, e)))?;
+ 
+     if kind != EntityKind::Story && kind != EntityKind::Epic {
+         return Err(QdevError::usage_error(format!(
+@@ -3094,7 +3095,8 @@ pub fn apply_constraint_add(
+     let rel_path = workspace_rel_path(&file_path, &options.workspace_root);
+ 
+     // 2. Acquire workspace advisory write lock
+-    let _lock_guard = acquire_workspace_write_lock(&options.workspace_root, options.storage.as_ref())?;
++    let _lock_guard =
++        acquire_workspace_write_lock(&options.workspace_root, options.storage.as_ref())?;
+ 
+     // 3. Read existing file content
+     let existing_content = fs::read_to_string(&file_path).map_err(|e| {
+@@ -3141,7 +3143,10 @@ pub fn apply_constraint_add(
+     let default_storage = StorageConfig::default();
+     let st = options.storage.as_ref().unwrap_or(&default_storage);
+     let cache_dir_rel = st.cache_dir.as_str();
+-    let cache_db_path = options.workspace_root.join(cache_dir_rel).join("cache.sqlite");
++    let cache_db_path = options
++        .workspace_root
++        .join(cache_dir_rel)
++        .join("cache.sqlite");
+     let opt_store = if cache_db_path.is_file() {
+         crate::store::SqliteStore::open(&cache_db_path).ok()
+     } else {
+@@ -3164,7 +3169,8 @@ pub fn apply_constraint_add(
+     let relative_id = format!("{}-{}", seq_kind.as_str(), seq_num);
+ 
+     // 5. Append to constraints sequence in frontmatter
+-    let mut constraints_seq: Vec<serde_yaml::Value> = match old_frontmatter_yaml.get("constraints") {
++    let mut constraints_seq: Vec<serde_yaml::Value> = match old_frontmatter_yaml.get("constraints")
++    {
+         None | Some(serde_yaml::Value::Null) => Vec::new(),
+         Some(serde_yaml::Value::Sequence(items)) => items.clone(),
+         Some(_) => {
+@@ -3340,7 +3346,8 @@ pub fn apply_constraint_remove(
+     let rel_path = workspace_rel_path(&file_path, &options.workspace_root);
+ 
+     // 2. Acquire advisory write lock
+-    let _lock_guard = acquire_workspace_write_lock(&options.workspace_root, options.storage.as_ref())?;
++    let _lock_guard =
++        acquire_workspace_write_lock(&options.workspace_root, options.storage.as_ref())?;
+ 
+     // 3. Read existing file content under lock
+     let fresh_content = fs::read_to_string(&file_path).map_err(|e| {
+@@ -3394,7 +3401,7 @@ pub fn apply_constraint_remove(
+                 || item_id == target_canonical.as_str()
+                 || item_id
+                     .split_once('/')
+-                    .map_or(false, |(o, r)| o == owner_id && r == target_rel)
++                    .is_some_and(|(o, r)| o == owner_id && r == target_rel)
+         } else {
+             false
+         }
+@@ -3463,7 +3470,10 @@ pub fn apply_constraint_remove(
+     let default_storage = StorageConfig::default();
+     let st = options.storage.as_ref().unwrap_or(&default_storage);
+     let cache_dir_rel = st.cache_dir.as_str();
+-    let cache_db_path = options.workspace_root.join(cache_dir_rel).join("cache.sqlite");
++    let cache_db_path = options
++        .workspace_root
++        .join(cache_dir_rel)
++        .join("cache.sqlite");
+ 
+     let updated_frontmatter =
+         crate::schema::extract_frontmatter(&patched_content).map_err(|e| {
+diff --git a/crates/qdev-core/tests/constraint_tests.rs b/crates/qdev-core/tests/constraint_tests.rs
+index c486d84..5d85efa 100644
+--- a/crates/qdev-core/tests/constraint_tests.rs
++++ b/crates/qdev-core/tests/constraint_tests.rs
+@@ -5,8 +5,7 @@ use qdev_core::rusqlite;
+ use qdev_core::write::Author;
+ use qdev_core::{
+     allocate_next_constraint_id_in, apply_constraint_add, apply_constraint_remove,
+-    ConstraintAddOptions, ConstraintKind, ConstraintRemoveOptions, ExitCode,
+-    StorageConfig,
++    ConstraintAddOptions, ConstraintKind, ConstraintRemoveOptions, ExitCode, StorageConfig,
+ };
+ use tempfile::TempDir;
+ 
+@@ -88,20 +87,24 @@ fn test_constraint_id_allocation_monotonic() {
+     let st = StorageConfig::default();
+ 
+     // 1. Initial allocation for no_go should be NG-1
+-    let id1 = allocate_next_constraint_id_in(root, &st, "E12S4", ConstraintKind::NoGo, None).unwrap();
++    let id1 =
++        allocate_next_constraint_id_in(root, &st, "E12S4", ConstraintKind::NoGo, None).unwrap();
+     assert_eq!(id1.to_string(), "E12S4/NG-1");
+ 
+     // 2. Initial allocation for rabbit_hole should be RH-1
+-    let id2 = allocate_next_constraint_id_in(root, &st, "E12S4", ConstraintKind::RabbitHole, None).unwrap();
++    let id2 = allocate_next_constraint_id_in(root, &st, "E12S4", ConstraintKind::RabbitHole, None)
++        .unwrap();
+     assert_eq!(id2.to_string(), "E12S4/RH-1");
+ 
+     // 3. Initial allocation for appetite should be APP-1
+-    let id3 = allocate_next_constraint_id_in(root, &st, "E12S4", ConstraintKind::Appetite, None).unwrap();
++    let id3 =
++        allocate_next_constraint_id_in(root, &st, "E12S4", ConstraintKind::Appetite, None).unwrap();
+     assert_eq!(id3.to_string(), "E12S4/APP-1");
+ 
+     // 4. Initial allocation for Epic E12
+     setup_test_epic(root, "E12", "planning", 1, "");
+-    let id_epic = allocate_next_constraint_id_in(root, &st, "E12", ConstraintKind::RabbitHole, None).unwrap();
++    let id_epic =
++        allocate_next_constraint_id_in(root, &st, "E12", ConstraintKind::RabbitHole, None).unwrap();
+     assert_eq!(id_epic.to_string(), "E12/RH-1");
+ }
+ 
+@@ -109,14 +112,32 @@ fn test_constraint_id_allocation_monotonic() {
+ fn test_parse_constraint_seq_rejects_leading_zeroes() {
+     use qdev_core::parse_constraint_seq;
+ 
+-    assert_eq!(parse_constraint_seq("NG-1", None, ConstraintKind::NoGo), Some(1));
+-    assert_eq!(parse_constraint_seq("NG-10", None, ConstraintKind::NoGo), Some(10));
+-    assert_eq!(parse_constraint_seq("E12S4/NG-1", Some("E12S4"), ConstraintKind::NoGo), Some(1));
++    assert_eq!(
++        parse_constraint_seq("NG-1", None, ConstraintKind::NoGo),
++        Some(1)
++    );
++    assert_eq!(
++        parse_constraint_seq("NG-10", None, ConstraintKind::NoGo),
++        Some(10)
++    );
++    assert_eq!(
++        parse_constraint_seq("E12S4/NG-1", Some("E12S4"), ConstraintKind::NoGo),
++        Some(1)
++    );
+ 
+     // Rejects leading zeroes e.g. 01, 007, 0
+-    assert_eq!(parse_constraint_seq("NG-01", None, ConstraintKind::NoGo), None);
+-    assert_eq!(parse_constraint_seq("NG-0", None, ConstraintKind::NoGo), None);
+-    assert_eq!(parse_constraint_seq("E12S4/NG-05", Some("E12S4"), ConstraintKind::NoGo), None);
++    assert_eq!(
++        parse_constraint_seq("NG-01", None, ConstraintKind::NoGo),
++        None
++    );
++    assert_eq!(
++        parse_constraint_seq("NG-0", None, ConstraintKind::NoGo),
++        None
++    );
++    assert_eq!(
++        parse_constraint_seq("E12S4/NG-05", Some("E12S4"), ConstraintKind::NoGo),
++        None
++    );
+ }
+ 
+ #[test]
+@@ -151,7 +172,10 @@ fn test_apply_constraint_add_success_and_cache_sync() {
+     assert!(disk_content.contains("version: 2"));
+     assert!(disk_content.contains("id: NG-1"));
+     assert!(disk_content.contains("kind: no_go"));
+-    assert!(disk_content.contains("text: \"Do not touch frame buffers\"") || disk_content.contains("text: Do not touch frame buffers"));
++    assert!(
++        disk_content.contains("text: \"Do not touch frame buffers\"")
++            || disk_content.contains("text: Do not touch frame buffers")
++    );
+ 
+     // Check SQLite cache
+     let cache_db_path = root.join(".qdev/cache/cache.sqlite");
+@@ -187,7 +211,8 @@ fn test_apply_constraint_add_success_and_cache_sync() {
+         author: author.clone(),
+     };
+ 
+-    let res2 = apply_constraint_add(&opts2).expect("apply_constraint_add should succeed for second constraint");
++    let res2 = apply_constraint_add(&opts2)
++        .expect("apply_constraint_add should succeed for second constraint");
+     assert_eq!(res2.id, "E12S4/NG-2");
+     assert_eq!(res2.new_version, 3);
+ 
+@@ -307,7 +332,8 @@ fn test_apply_constraint_remove_draft_without_justification() {
+         author: author.clone(),
+     };
+ 
+-    let res = apply_constraint_remove(&remove_opts).expect("remove on draft should succeed without justification");
++    let res = apply_constraint_remove(&remove_opts)
++        .expect("remove on draft should succeed without justification");
+     assert_eq!(res.id, "E12S4/NG-1");
+     assert_eq!(res.owner_id, "E12S4");
+     assert_eq!(res.new_version, 3);
+@@ -392,7 +418,8 @@ fn test_apply_constraint_remove_non_draft_with_justification_succeeds() {
+         author,
+     };
+ 
+-    let res = apply_constraint_remove(&remove_opts).expect("remove on non-draft with justification should succeed");
++    let res = apply_constraint_remove(&remove_opts)
++        .expect("remove on non-draft with justification should succeed");
+     assert_eq!(res.id, "E12S4/NG-1");
+     assert_eq!(res.new_version, 2);
+ 
+--- /dev/null	2026-09-13 18:02:50
++++ crates/qdev-core/src/scratch.rs	2026-09-13 18:02:33
+@@ -0,0 +1,404 @@
++//! Scratchpad domain logic for story development reasoning, decisions, tradeoffs, and transitions.
++
++use std::collections::BTreeMap;
++use std::fs;
++use std::path::Path;
++
++use serde::{Deserialize, Serialize};
++
++use crate::config::StorageConfig;
++use crate::errors::QdevError;
++use crate::schema::EntityKind;
++use crate::store::sqlite::{file_change_stamp, SqliteStore};
++use crate::store::{ScratchpadRecord, Store};
++use crate::write::{
++    acquire_workspace_write_lock, current_iso8601, directory_for_kind, resolve_entity_file,
++    sha256_digest, write_file_atomic, Author,
++};
++
++/// Valid entry kinds for scratchpad entries.
++pub const VALID_SCRATCH_KINDS: &[&str] = &["note", "decision", "tradeoff", "transition"];
++
++/// Author attribution for a scratchpad entry.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct ScratchpadAuthor {
++    pub r#type: String,
++    pub id: String,
++}
++
++impl From<Author> for ScratchpadAuthor {
++    fn from(a: Author) -> Self {
++        Self {
++            r#type: a.author_type,
++            id: a.id,
++        }
++    }
++}
++
++impl From<&Author> for ScratchpadAuthor {
++    fn from(a: &Author) -> Self {
++        Self {
++            r#type: a.author_type.clone(),
++            id: a.id.clone(),
++        }
++    }
++}
++
++impl From<ScratchpadAuthor> for Author {
++    fn from(a: ScratchpadAuthor) -> Self {
++        Self {
++            author_type: a.r#type,
++            id: a.id,
++        }
++    }
++}
++
++/// A single entry in a story's scratchpad.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct ScratchpadEntry {
++    pub seq: u32,
++    pub at: String,
++    pub author: ScratchpadAuthor,
++    pub kind: String,
++    pub text: String,
++}
++
++impl ScratchpadEntry {
++    pub fn to_record(&self, story_id: &str) -> ScratchpadRecord {
++        ScratchpadRecord {
++            story_id: story_id.to_string(),
++            seq: self.seq,
++            at: self.at.clone(),
++            author_type: Some(self.author.r#type.clone()),
++            author_id: Some(self.author.id.clone()),
++            kind: Some(self.kind.clone()),
++            text: Some(self.text.clone()),
++        }
++    }
++
++    pub fn from_record(r: &ScratchpadRecord) -> Self {
++        Self {
++            seq: r.seq,
++            at: r.at.clone(),
++            author: ScratchpadAuthor {
++                r#type: r.author_type.clone().unwrap_or_else(|| "human".to_string()),
++                id: r.author_id.clone().unwrap_or_default(),
++            },
++            kind: r.kind.clone().unwrap_or_else(|| "note".to_string()),
++            text: r.text.clone().unwrap_or_default(),
++        }
++    }
++}
++
++/// JSON payload shape for `qdev scratch append`.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct ScratchAppendPayload {
++    pub story_id: String,
++    pub seq: u32,
++    pub at: String,
++    pub author: ScratchpadAuthor,
++    pub kind: String,
++    pub text: String,
++}
++
++/// JSON payload shape for `qdev scratch read`.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct ScratchReadPayload {
++    pub story_id: String,
++    pub entries: Vec<ScratchpadEntry>,
++}
++
++/// Computes the deterministic token estimate for `text` using `(chars + 3) / 4`.
++pub fn estimate_tokens(text: &str) -> usize {
++    text.chars().count().div_ceil(4)
++}
++
++/// Appends a new scratchpad entry for `story_id` under the workspace advisory write lock,
++/// atomically updating the JSONL file and synchronizing the SQLite cache.
++pub fn append_scratch_entry(
++    workspace_root: &Path,
++    storage: Option<&StorageConfig>,
++    story_id: &str,
++    kind: Option<&str>,
++    text: &str,
++    author: &Author,
++    store: Option<&dyn Store>,
++) -> Result<ScratchpadEntry, QdevError> {
++    // 1. Resolve and validate target story exists and is a story
++    let (_entity_kind, canonical_story_id, _story_path) =
++        resolve_entity_file(workspace_root, Some(EntityKind::Story), story_id, storage)?;
++
++    // 2. Validate entry kind
++    let resolved_kind = match kind {
++        Some(k) => {
++            let trimmed = k.trim();
++            if !VALID_SCRATCH_KINDS.contains(&trimmed) {
++                return Err(QdevError::usage_error(format!(
++                    "Invalid scratchpad kind '{}', must be one of: note, decision, tradeoff, transition",
++                    trimmed
++                )));
++            }
++            trimmed.to_string()
++        }
++        None => "note".to_string(),
++    };
++
++    // 3. Validate entry text
++    let trimmed_text = text.trim();
++    if trimmed_text.is_empty() {
++        return Err(QdevError::usage_error("Scratchpad text cannot be empty"));
++    }
++
++    // 4. Acquire workspace advisory write lock
++    let _lock = acquire_workspace_write_lock(workspace_root, storage)?;
++
++    // 5. Ensure scratchpad directory exists
++    let default_storage = StorageConfig::default();
++    let st = storage.unwrap_or(&default_storage);
++    let scratch_dir = workspace_root.join(directory_for_kind(storage, EntityKind::Scratchpad));
++    if !scratch_dir.exists() {
++        fs::create_dir_all(&scratch_dir).map_err(|e| {
++            QdevError::infrastructure_failure(
++                "io_error",
++                format!(
++                    "Failed to create scratchpad directory '{}': {}",
++                    scratch_dir.display(),
++                    e
++                ),
++            )
++        })?;
++    }
++
++    let scratch_file_path = scratch_dir.join(format!("{}.jsonl", canonical_story_id));
++
++    // 6. Compute sequence number by scanning existing entries
++    let mut max_seq: u32 = 0;
++    let mut existing_content = String::new();
++    if scratch_file_path.exists() {
++        existing_content = fs::read_to_string(&scratch_file_path).map_err(|e| {
++            QdevError::infrastructure_failure(
++                "io_error",
++                format!(
++                    "Failed to read scratchpad file '{}': {}",
++                    scratch_file_path.display(),
++                    e
++                ),
++            )
++        })?;
++
++        for (line_idx, line) in existing_content.lines().enumerate() {
++            let trimmed = line.trim();
++            if trimmed.is_empty() {
++                continue;
++            }
++            let val = serde_json::from_str::<serde_json::Value>(trimmed).map_err(|e| {
++                QdevError::logical_failure(
++                    "parse_error",
++                    format!(
++                        "Malformed scratchpad entry in '{}' at line {}: {}",
++                        scratch_file_path.display(),
++                        line_idx + 1,
++                        e
++                    ),
++                )
++            })?;
++            if let Some(s) = val.get("seq").and_then(|v| v.as_u64()) {
++                if let Ok(seq_u32) = u32::try_from(s) {
++                    max_seq = max_seq.max(seq_u32);
++                }
++            }
++        }
++    }
++
++    let new_seq = max_seq.checked_add(1).ok_or_else(|| {
++        QdevError::logical_failure(
++            "overflow",
++            format!(
++                "Scratchpad sequence overflow in '{}'",
++                scratch_file_path.display()
++            ),
++        )
++    })?;
++
++    // 7. Construct entry
++    let timestamp = current_iso8601();
++    let entry = ScratchpadEntry {
++        seq: new_seq,
++        at: timestamp,
++        author: ScratchpadAuthor::from(author),
++        kind: resolved_kind,
++        text: text.to_string(),
++    };
++
++    // 8. Atomically write updated JSONL file
++    let line_json = serde_json::to_string(&entry).map_err(|e| {
++        QdevError::infrastructure_failure(
++            "serialization_error",
++            format!("Failed to serialize scratchpad entry: {}", e),
++        )
++    })?;
++
++    let mut new_content = existing_content;
++    if !new_content.is_empty() && !new_content.ends_with('\n') {
++        new_content.push('\n');
++    }
++    new_content.push_str(&line_json);
++    new_content.push('\n');
++
++    write_file_atomic(&scratch_file_path, &new_content)?;
++
++    // 9. Synchronize SQLite cache and sync_state
++    let rel_path = relative_path(workspace_root, &scratch_file_path);
++
++    let (mtime, size) = file_change_stamp(&scratch_file_path);
++    let content_hash = sha256_digest(new_content.as_bytes());
++
++    let record = entry.to_record(&canonical_story_id);
++
++    let cache_dir_rel = st.cache_dir.as_str();
++    let cache_db_path = workspace_root.join(cache_dir_rel).join("cache.sqlite");
++
++    if let Some(s) = store {
++        s.upsert_scratchpad_entry(&record)?;
++        s.upsert_sync_state(&rel_path, mtime, size, Some(&content_hash))?;
++    } else if cache_db_path.is_file() {
++        let s = SqliteStore::open(&cache_db_path)?;
++        s.upsert_scratchpad_entry(&record)?;
++        s.upsert_sync_state(&rel_path, mtime, size, Some(&content_hash))?;
++    }
++
++    Ok(entry)
++}
++
++/// Reads all scratchpad entries for `story_id`, sorted in `seq` ascending order.
++pub fn read_scratch_entries(
++    workspace_root: &Path,
++    storage: Option<&StorageConfig>,
++    story_id: &str,
++) -> Result<Vec<ScratchpadEntry>, QdevError> {
++    // Validate target story exists
++    let (_entity_kind, canonical_story_id, _story_path) =
++        resolve_entity_file(workspace_root, Some(EntityKind::Story), story_id, storage)?;
++
++    let scratch_dir = workspace_root.join(directory_for_kind(storage, EntityKind::Scratchpad));
++    let scratch_file_path = scratch_dir.join(format!("{}.jsonl", canonical_story_id));
++
++    if !scratch_file_path.is_file() {
++        return Ok(Vec::new());
++    }
++
++    let content = fs::read_to_string(&scratch_file_path).map_err(|e| {
++        QdevError::infrastructure_failure(
++            "io_error",
++            format!(
++                "Failed to read scratchpad file '{}': {}",
++                scratch_file_path.display(),
++                e
++            ),
++        )
++    })?;
++
++    let mut entries = Vec::new();
++    for (line_idx, line) in content.lines().enumerate() {
++        let trimmed = line.trim();
++        if trimmed.is_empty() {
++            continue;
++        }
++        let entry = serde_json::from_str::<ScratchpadEntry>(trimmed).map_err(|e| {
++            QdevError::logical_failure(
++                "parse_error",
++                format!(
++                    "Malformed scratchpad entry in '{}' at line {}: {}",
++                    scratch_file_path.display(),
++                    line_idx + 1,
++                    e
++                ),
++            )
++        })?;
++        entries.push(entry);
++    }
++
++    entries.sort_by_key(|e| e.seq);
++    Ok(entries)
++}
++
++/// Summarizes scratchpad entries by including all entries of kind `decision` and `transition`
++/// plus the last `last_n` entries (deduplicated and sorted by `seq` ascending), bounded by `budget`.
++pub fn summarize_scratch_entries(
++    entries: &[ScratchpadEntry],
++    last_n: usize,
++    budget: Option<usize>,
++) -> Vec<ScratchpadEntry> {
++    let mut map = BTreeMap::new();
++    for e in entries {
++        if e.kind == "decision" || e.kind == "transition" {
++            map.insert(e.seq, e.clone());
++        }
++    }
++
++    let start = entries.len().saturating_sub(last_n);
++    for e in &entries[start..] {
++        map.insert(e.seq, e.clone());
++    }
++
++    let candidates: Vec<ScratchpadEntry> = map.into_values().collect();
++
++    if let Some(max_tokens) = budget {
++        apply_token_budget(candidates, max_tokens)
++    } else {
++        candidates
++    }
++}
++
++/// Filters any list of scratchpad entries to fit within `budget` tokens,
++/// prioritizing key decisions, transitions, and recent entries while dropping lowest-priority entries.
++pub fn filter_scratch_entries_by_budget(
++    entries: &[ScratchpadEntry],
++    budget: usize,
++) -> Vec<ScratchpadEntry> {
++    apply_token_budget(entries.to_vec(), budget)
++}
++
++/// Deterministically drops lowest-priority entries until total tokens <= `max_tokens`.
++fn apply_token_budget(
++    mut candidates: Vec<ScratchpadEntry>,
++    max_tokens: usize,
++) -> Vec<ScratchpadEntry> {
++    let mut current_tokens: usize = candidates.iter().map(|e| estimate_tokens(&e.text)).sum();
++
++    while current_tokens > max_tokens && !candidates.is_empty() {
++        // Priority hierarchy when dropping:
++        // 1. Drop non-key entries (kind != "decision" && kind != "transition") starting with lowest seq.
++        // 2. If only key entries remain, drop key entries starting with lowest seq.
++        let non_key_idx = candidates
++            .iter()
++            .enumerate()
++            .filter(|(_, e)| e.kind != "decision" && e.kind != "transition")
++            .min_by_key(|(_, e)| e.seq)
++            .map(|(idx, _)| idx);
++
++        let drop_idx = match non_key_idx {
++            Some(idx) => idx,
++            None => candidates
++                .iter()
++                .enumerate()
++                .min_by_key(|(_, e)| e.seq)
++                .map(|(idx, _)| idx)
++                .unwrap_or(0),
++        };
++
++        let dropped = candidates.remove(drop_idx);
++        current_tokens = current_tokens.saturating_sub(estimate_tokens(&dropped.text));
++    }
++
++    candidates.sort_by_key(|e| e.seq);
++    candidates
++}
++
++fn relative_path(workspace_root: &Path, file_path: &Path) -> String {
++    file_path
++        .strip_prefix(workspace_root)
++        .unwrap_or(file_path)
++        .to_string_lossy()
++        .replace('\\', "/")
++}
+--- /dev/null	2026-09-13 18:02:50
++++ crates/qdev-core/tests/scratch_tests.rs	2026-09-13 17:47:20
+@@ -0,0 +1,453 @@
++#![allow(clippy::disallowed_methods)]
++
++use std::fs;
++use std::path::Path;
++
++use qdev_core::scratch::{
++    append_scratch_entry, estimate_tokens, filter_scratch_entries_by_budget, read_scratch_entries,
++    summarize_scratch_entries, ScratchpadAuthor, ScratchpadEntry,
++};
++use qdev_core::store::{SqliteStore, Store};
++use qdev_core::{ensure_cache, Author, StorageConfig};
++use tempfile::TempDir;
++
++fn setup_test_workspace(root: &Path) {
++    let qdev_toml = root.join("qdev.toml");
++    fs::write(
++        qdev_toml,
++        r#"
++[project]
++name = "TestProject"
++
++[identity]
++developer_id = "simon"
++teams = ["core-platform"]
++
++[storage]
++specs_dir = "docs/specs"
++state_dir = "docs/state"
++cache_dir = ".qdev/cache"
++"#,
++    )
++    .unwrap();
++
++    let stories_dir = root.join("docs/specs/stories");
++    fs::create_dir_all(&stories_dir).unwrap();
++    let cache_dir = root.join(".qdev/cache");
++    fs::create_dir_all(&cache_dir).unwrap();
++    let scratch_dir = root.join("docs/state/scratch");
++    fs::create_dir_all(&scratch_dir).unwrap();
++
++    ensure_cache(root, &StorageConfig::default()).unwrap();
++}
++
++fn write_story_file(root: &Path, id: &str, title: &str) -> String {
++    let story_content = format!(
++        r#"---
++id: {id}
++title: "{title}"
++status: ready
++version: 1
++created_by:
++  type: human
++  id: simon
++updated_by:
++  type: human
++  id: simon
++---
++
++## Acceptance Criteria
++- Spec content for story {id}.
++"#
++    );
++    let path = root.join("docs/specs/stories").join(format!("{}.md", id));
++    fs::write(&path, &story_content).unwrap();
++    story_content
++}
++
++#[test]
++fn test_scratch_append_sequencing_and_atomic_file_write() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++    write_story_file(root, "E12S4", "Story 4");
++
++    let author = Author::new("human", "simon");
++
++    // 1. Append first entry with explicit kind
++    let entry1 = append_scratch_entry(
++        root,
++        None,
++        "E12S4",
++        Some("tradeoff"),
++        "AtomicBool over Mutex on frame drop latch",
++        &author,
++        None,
++    )
++    .unwrap();
++
++    assert_eq!(entry1.seq, 1);
++    assert_eq!(entry1.kind, "tradeoff");
++    assert_eq!(entry1.text, "AtomicBool over Mutex on frame drop latch");
++    assert_eq!(entry1.author.r#type, "human");
++    assert_eq!(entry1.author.id, "simon");
++
++    let scratch_file = root.join("docs/state/scratch/E12S4.jsonl");
++    assert!(scratch_file.is_file());
++
++    let lines: Vec<String> = fs::read_to_string(&scratch_file)
++        .unwrap()
++        .lines()
++        .filter(|l| !l.trim().is_empty())
++        .map(|l| l.to_string())
++        .collect();
++    assert_eq!(lines.len(), 1);
++
++    // 2. Append second entry with default kind (None -> "note")
++    let entry2 = append_scratch_entry(
++        root,
++        None,
++        "E12S4",
++        None,
++        "Checked frame latch",
++        &author,
++        None,
++    )
++    .unwrap();
++
++    assert_eq!(entry2.seq, 2);
++    assert_eq!(entry2.kind, "note");
++    assert_eq!(entry2.text, "Checked frame latch");
++
++    let lines: Vec<String> = fs::read_to_string(&scratch_file)
++        .unwrap()
++        .lines()
++        .filter(|l| !l.trim().is_empty())
++        .map(|l| l.to_string())
++        .collect();
++    assert_eq!(lines.len(), 2);
++
++    // 3. Append third entry with kind "decision"
++    let entry3 = append_scratch_entry(
++        root,
++        None,
++        "E12S4",
++        Some("decision"),
++        "Adopted AtomicBool",
++        &author,
++        None,
++    )
++    .unwrap();
++
++    assert_eq!(entry3.seq, 3);
++    assert_eq!(entry3.kind, "decision");
++    assert_eq!(entry3.text, "Adopted AtomicBool");
++
++    let lines: Vec<String> = fs::read_to_string(&scratch_file)
++        .unwrap()
++        .lines()
++        .filter(|l| !l.trim().is_empty())
++        .map(|l| l.to_string())
++        .collect();
++    assert_eq!(lines.len(), 3);
++}
++
++#[test]
++fn test_scratch_append_syncs_sqlite_cache_and_sync_state() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++    write_story_file(root, "E12S4", "Story 4");
++
++    let author = Author::new("agent", "claude-code");
++
++    let entry = append_scratch_entry(
++        root,
++        None,
++        "E12S4",
++        Some("transition"),
++        "Transitioned to review",
++        &author,
++        None,
++    )
++    .unwrap();
++
++    assert_eq!(entry.seq, 1);
++
++    // Inspect SQLite cache
++    let cache_db = root.join(".qdev/cache/cache.sqlite");
++    let store = SqliteStore::open(&cache_db).unwrap();
++
++    let rows = store.get_scratchpad_entries("E12S4").unwrap();
++    assert_eq!(rows.len(), 1);
++    assert_eq!(rows[0].story_id, "E12S4");
++    assert_eq!(rows[0].seq, 1);
++    assert_eq!(rows[0].kind.as_deref(), Some("transition"));
++    assert_eq!(rows[0].text.as_deref(), Some("Transitioned to review"));
++    assert_eq!(rows[0].author_type.as_deref(), Some("agent"));
++    assert_eq!(rows[0].author_id.as_deref(), Some("claude-code"));
++
++    // Inspect sync_state
++    let sync_state = store
++        .get_sync_state("docs/state/scratch/E12S4.jsonl")
++        .unwrap();
++    assert!(sync_state.is_some());
++    let ss = sync_state.unwrap();
++    assert!(ss.mtime > 0);
++    assert!(ss.size > 0);
++    assert!(ss.content_hash.is_some());
++}
++
++#[test]
++fn test_story_specification_markdown_immutability() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++    let original_content = write_story_file(root, "E12S4", "Story 4");
++    let story_path = root.join("docs/specs/stories/E12S4.md");
++
++    let meta_before = fs::metadata(&story_path).unwrap();
++    let mtime_before = meta_before.modified().unwrap();
++
++    let author = Author::new("human", "simon");
++
++    for i in 1..=5 {
++        append_scratch_entry(
++            root,
++            None,
++            "E12S4",
++            Some("note"),
++            &format!("Note {}", i),
++            &author,
++            None,
++        )
++        .unwrap();
++    }
++
++    let _entries = read_scratch_entries(root, None, "E12S4").unwrap();
++
++    let content_after = fs::read_to_string(&story_path).unwrap();
++    let meta_after = fs::metadata(&story_path).unwrap();
++    let mtime_after = meta_after.modified().unwrap();
++
++    assert_eq!(
++        original_content, content_after,
++        "Story specification markdown must never be modified by scratchpad operations"
++    );
++    assert_eq!(
++        mtime_before, mtime_after,
++        "Story specification file mtime must not change"
++    );
++}
++
++#[test]
++fn test_scratch_read_all_entries() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++    write_story_file(root, "E12S4", "Story 4");
++
++    let author = Author::new("human", "simon");
++
++    append_scratch_entry(root, None, "E12S4", Some("note"), "First", &author, None).unwrap();
++    append_scratch_entry(
++        root,
++        None,
++        "E12S4",
++        Some("decision"),
++        "Second",
++        &author,
++        None,
++    )
++    .unwrap();
++    append_scratch_entry(
++        root,
++        None,
++        "E12S4",
++        Some("tradeoff"),
++        "Third",
++        &author,
++        None,
++    )
++    .unwrap();
++
++    let entries = read_scratch_entries(root, None, "E12S4").unwrap();
++    assert_eq!(entries.len(), 3);
++    assert_eq!(entries[0].seq, 1);
++    assert_eq!(entries[0].text, "First");
++    assert_eq!(entries[1].seq, 2);
++    assert_eq!(entries[1].text, "Second");
++    assert_eq!(entries[2].seq, 3);
++    assert_eq!(entries[2].text, "Third");
++}
++
++#[test]
++fn test_scratch_read_empty_scratchpad() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++    write_story_file(root, "E12S4", "Story 4");
++
++    let entries = read_scratch_entries(root, None, "E12S4").unwrap();
++    assert!(entries.is_empty());
++}
++
++#[test]
++fn test_scratch_read_nonexistent_story() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++
++    let err = read_scratch_entries(root, None, "E99S99").unwrap_err();
++    assert_eq!(err.code(), "usage_error");
++    assert!(err.message().contains("Entity file not found"));
++    assert_eq!(err.exit_code(), qdev_core::ExitCode::UsageError);
++}
++
++#[test]
++fn test_scratch_append_nonexistent_story() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++
++    let author = Author::new("human", "simon");
++    let err = append_scratch_entry(root, None, "E99S99", Some("note"), "Note", &author, None)
++        .unwrap_err();
++    assert_eq!(err.code(), "usage_error");
++    assert!(err.message().contains("Entity file not found"));
++    assert_eq!(err.exit_code(), qdev_core::ExitCode::UsageError);
++}
++
++#[test]
++fn test_scratch_append_empty_text_refused() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++    write_story_file(root, "E12S4", "Story 4");
++
++    let author = Author::new("human", "simon");
++    let err =
++        append_scratch_entry(root, None, "E12S4", Some("note"), "   ", &author, None).unwrap_err();
++    assert_eq!(err.code(), "usage_error");
++    assert_eq!(err.exit_code(), qdev_core::ExitCode::UsageError);
++}
++
++#[test]
++fn test_scratch_append_invalid_kind_refused() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++    write_story_file(root, "E12S4", "Story 4");
++
++    let author = Author::new("human", "simon");
++    let err = append_scratch_entry(root, None, "E12S4", Some("bogus"), "Text", &author, None)
++        .unwrap_err();
++    assert_eq!(err.code(), "usage_error");
++    assert_eq!(err.exit_code(), qdev_core::ExitCode::UsageError);
++    assert!(err
++        .message()
++        .contains("note, decision, tradeoff, transition"));
++}
++
++#[test]
++fn test_summarize_scratch_entries_selection_and_deduplication() {
++    let author = ScratchpadAuthor {
++        r#type: "human".to_string(),
++        id: "simon".to_string(),
++    };
++
++    let mut entries = Vec::new();
++    for i in 1..=20 {
++        let kind = match i {
++            2 | 18 => "decision",
++            10 => "transition",
++            5 => "tradeoff",
++            _ => "note",
++        };
++        entries.push(ScratchpadEntry {
++            seq: i,
++            at: "2026-09-13T12:00:00Z".to_string(),
++            author: author.clone(),
++            kind: kind.to_string(),
++            text: format!("Entry {}", i),
++        });
++    }
++
++    // With last_n = 5, we expect:
++    // - Decisions: seq 2, 18
++    // - Transitions: seq 10
++    // - Last 5: seq 16, 17, 18, 19, 20
++    // Deduplicated: 2, 10, 16, 17, 18, 19, 20 (7 entries total)
++    let summary = summarize_scratch_entries(&entries, 5, None);
++    let seqs: Vec<u32> = summary.iter().map(|e| e.seq).collect();
++    assert_eq!(seqs, vec![2, 10, 16, 17, 18, 19, 20]);
++}
++
++#[test]
++fn test_token_estimator_and_budget_truncation() {
++    // 1. Token estimator: (chars + 3) / 4
++    assert_eq!(estimate_tokens(""), 0);
++    assert_eq!(estimate_tokens("a"), 1);
++    assert_eq!(estimate_tokens("ab"), 1);
++    assert_eq!(estimate_tokens("abc"), 1);
++    assert_eq!(estimate_tokens("abcd"), 1);
++    assert_eq!(estimate_tokens("abcde"), 2);
++    assert_eq!(estimate_tokens(&"x".repeat(100)), 25);
++    assert_eq!(estimate_tokens(&"x".repeat(400)), 100);
++
++    // 2. Budget truncation prioritizing key decisions and transitions
++    let author = ScratchpadAuthor {
++        r#type: "human".to_string(),
++        id: "simon".to_string(),
++    };
++
++    let entries = vec![
++        ScratchpadEntry {
++            seq: 1,
++            at: "2026-09-13T12:00:00Z".to_string(),
++            author: author.clone(),
++            kind: "decision".to_string(),
++            text: "x".repeat(40), // 10 tokens
++        },
++        ScratchpadEntry {
++            seq: 2,
++            at: "2026-09-13T12:00:00Z".to_string(),
++            author: author.clone(),
++            kind: "note".to_string(),
++            text: "x".repeat(40), // 10 tokens
++        },
++        ScratchpadEntry {
++            seq: 3,
++            at: "2026-09-13T12:00:00Z".to_string(),
++            author: author.clone(),
++            kind: "transition".to_string(),
++            text: "x".repeat(40), // 10 tokens
++        },
++        ScratchpadEntry {
++            seq: 4,
++            at: "2026-09-13T12:00:00Z".to_string(),
++            author: author.clone(),
++            kind: "note".to_string(),
++            text: "x".repeat(40), // 10 tokens
++        },
++    ];
++
++    // Total = 40 tokens.
++    // With budget 30 tokens: the lowest-priority non-key entry with smallest seq (seq 2 note) is dropped.
++    // Remaining: seq 1 (decision), seq 3 (transition), seq 4 (note). Total = 30 tokens.
++    let bounded = filter_scratch_entries_by_budget(&entries, 30);
++    let seqs: Vec<u32> = bounded.iter().map(|e| e.seq).collect();
++    assert_eq!(seqs, vec![1, 3, 4]);
++
++    // With budget 20 tokens: seq 2 note and seq 4 note are both dropped.
++    // Remaining: seq 1 (decision), seq 3 (transition). Total = 20 tokens.
++    let bounded2 = filter_scratch_entries_by_budget(&entries, 20);
++    let seqs2: Vec<u32> = bounded2.iter().map(|e| e.seq).collect();
++    assert_eq!(seqs2, vec![1, 3]);
++
++    // With budget 10 tokens: older key entry (seq 1 decision) dropped before newer key entry (seq 3 transition).
++    // Remaining: seq 3 (transition). Total = 10 tokens.
++    let bounded3 = filter_scratch_entries_by_budget(&entries, 10);
++    let seqs3: Vec<u32> = bounded3.iter().map(|e| e.seq).collect();
++    assert_eq!(seqs3, vec![3]);
++}
+--- /dev/null	2026-09-13 18:02:50
++++ crates/qdev-cli/tests/scratch_cli_tests.rs	2026-09-13 18:02:33
+@@ -0,0 +1,703 @@
++use std::fs;
++use std::path::Path;
++
++use assert_cmd::Command;
++use serde_json::Value;
++use tempfile::TempDir;
++
++fn setup_workspace(root: &Path) {
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "init",
++            "--non-interactive",
++            "--name",
++            "TestProject",
++            "--developer",
++            "simon",
++            "--team",
++            "core-platform",
++        ])
++        .assert()
++        .success();
++}
++
++fn create_story(root: &Path, id: &str, status: &str) {
++    let dir = root.join("docs/specs/stories");
++    fs::create_dir_all(&dir).unwrap();
++    fs::write(
++        dir.join(format!("{id}.md")),
++        format!(
++            r#"---
++id: {id}
++title: "Story {id}"
++status: {status}
++version: 1
++owners:
++  - simon
++created_by:
++  type: human
++  id: simon
++updated_by:
++  type: human
++  id: simon
++---
++
++## Acceptance Criteria
++- Verify scratchpad behavior.
++"#
++        ),
++    )
++    .unwrap();
++}
++
++#[test]
++fn test_scratch_append_with_held_lease_happy_path() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "in-progress");
++
++    // 1. Claim story lease
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    // 2. Append tradeoff entry
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "scratch",
++            "append",
++            "E12S4",
++            "--kind",
++            "tradeoff",
++            "--",
++            "AtomicBool over Mutex on frame drop latch",
++        ])
++        .assert()
++        .success();
++
++    // Verify JSONL file content
++    let scratch_file = root.join("docs/state/scratch/E12S4.jsonl");
++    assert!(scratch_file.is_file());
++    let content = fs::read_to_string(&scratch_file).unwrap();
++    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
++    assert_eq!(lines.len(), 1);
++
++    let val: Value = serde_json::from_str(lines[0]).unwrap();
++    assert_eq!(val["seq"], 1);
++    assert_eq!(val["kind"], "tradeoff");
++    assert_eq!(val["text"], "AtomicBool over Mutex on frame drop latch");
++    assert_eq!(val["author"]["id"], "simon");
++    assert!(val["at"].as_str().is_some());
++}
++
++#[test]
++fn test_scratch_append_second_entry_default_kind() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "in-progress");
++
++    // Claim lease
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    // First entry
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args([
++            "scratch", "append", "E12S4", "--kind", "tradeoff", "--", "First",
++        ])
++        .assert()
++        .success();
++
++    // Second entry with default kind
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args(["scratch", "append", "E12S4", "--", "Checked frame latch"])
++        .assert()
++        .success();
++
++    let scratch_file = root.join("docs/state/scratch/E12S4.jsonl");
++    let content = fs::read_to_string(&scratch_file).unwrap();
++    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
++    assert_eq!(lines.len(), 2);
++
++    let val2: Value = serde_json::from_str(lines[1]).unwrap();
++    assert_eq!(val2["seq"], 2);
++    assert_eq!(val2["kind"], "note");
++    assert_eq!(val2["text"], "Checked frame latch");
++}
++
++#[test]
++fn test_scratch_append_without_lease_non_interactive() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "in-progress");
++
++    // No lease held, non-interactive append should fail with exit code 3
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "--non-interactive",
++            "--json",
++            "scratch",
++            "append",
++            "E12S4",
++            "--",
++            "Unleased note",
++        ])
++        .assert()
++        .failure()
++        .code(3);
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert_eq!(val["error"]["code"], "needs_confirmation");
++    assert!(val["error"]["message"]
++        .as_str()
++        .unwrap()
++        .contains("--override --justification"));
++}
++
++#[test]
++fn test_scratch_append_with_wrong_lease_non_interactive() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    create_story(root, "E12S3", "in-progress");
++    create_story(root, "E12S4", "in-progress");
++
++    // Claim lease on E12S3
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args(["claim", "story", "E12S3"])
++        .assert()
++        .success();
++
++    // Try to append to E12S4
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "--non-interactive",
++            "--json",
++            "scratch",
++            "append",
++            "E12S4",
++            "--",
++            "Wrong lease note",
++        ])
++        .assert()
++        .failure()
++        .code(3);
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert_eq!(val["error"]["code"], "needs_confirmation");
++}
++
++#[test]
++fn test_scratch_append_with_override_and_justification() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "in-progress");
++
++    // No lease held, but --override and --justification provided
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "--override",
++            "--justification",
++            "Lead signoff for emergency note",
++            "scratch",
++            "append",
++            "E12S4",
++            "--",
++            "Emergency note",
++        ])
++        .assert()
++        .success();
++
++    let scratch_file = root.join("docs/state/scratch/E12S4.jsonl");
++    assert!(scratch_file.is_file());
++
++    // Verify a DEC- record was logged in docs/state/decisions/
++    let dec_dir = root.join("docs/state/decisions");
++    let mut dec_files = Vec::new();
++    if dec_dir.is_dir() {
++        for entry in fs::read_dir(&dec_dir).unwrap().flatten() {
++            let path = entry.path();
++            if path.extension().and_then(|s| s.to_str()) == Some("md") {
++                dec_files.push(path);
++            }
++        }
++    }
++    assert_eq!(dec_files.len(), 1, "Expected one override decision record");
++    let dec_content = fs::read_to_string(&dec_files[0]).unwrap();
++    assert!(dec_content.contains("type: lease_override"));
++    assert!(dec_content.contains("Lead signoff for emergency note"));
++}
++
++#[test]
++fn test_scratch_append_with_override_missing_justification() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "in-progress");
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "--override",
++            "--json",
++            "scratch",
++            "append",
++            "E12S4",
++            "--",
++            "Note",
++        ])
++        .assert()
++        .failure()
++        .code(3);
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert_eq!(val["error"]["code"], "needs_justification");
++}
++
++#[test]
++fn test_scratch_append_invalid_kind() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "in-progress");
++
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "--json",
++            "scratch",
++            "append",
++            "E12S4",
++            "--kind",
++            "invalid_kind",
++            "--",
++            "Text",
++        ])
++        .assert()
++        .failure()
++        .code(2);
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert_eq!(val["error"]["code"], "usage_error");
++    assert!(val["error"]["message"]
++        .as_str()
++        .unwrap()
++        .contains("Invalid scratchpad kind"));
++}
++
++#[test]
++fn test_scratch_append_empty_text() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "in-progress");
++
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "--json", "scratch", "append", "E12S4", "--kind", "note", "--", "   ",
++        ])
++        .assert()
++        .failure()
++        .code(2);
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert_eq!(val["error"]["code"], "usage_error");
++}
++
++#[test]
++fn test_scratch_append_nonexistent_story() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "--override",
++            "--justification",
++            "Override",
++            "scratch",
++            "append",
++            "E99S99",
++            "--",
++            "Note",
++        ])
++        .assert()
++        .failure()
++        .code(2);
++}
++
++#[test]
++fn test_scratch_read_all_entries_and_empty() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "in-progress");
++
++    // 1. Read empty scratchpad
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["scratch", "read", "E12S4"])
++        .assert()
++        .success();
++    let out = String::from_utf8_lossy(&assert.get_output().stdout);
++    assert!(out.contains("(empty)"));
++
++    // Read empty scratchpad with JSON
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["--json", "scratch", "read", "E12S4"])
++        .assert()
++        .success();
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert_eq!(val["story_id"], "E12S4");
++    assert_eq!(val["entries"].as_array().unwrap().len(), 0);
++
++    // Claim and append 3 entries
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args([
++            "scratch",
++            "append",
++            "E12S4",
++            "--kind",
++            "note",
++            "--",
++            "First note",
++        ])
++        .assert()
++        .success();
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args([
++            "scratch",
++            "append",
++            "E12S4",
++            "--kind",
++            "decision",
++            "--",
++            "Design decision",
++        ])
++        .assert()
++        .success();
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args([
++            "scratch",
++            "append",
++            "E12S4",
++            "--kind",
++            "tradeoff",
++            "--",
++            "Tradeoff text",
++        ])
++        .assert()
++        .success();
++
++    // Read all entries
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["--json", "scratch", "read", "E12S4"])
++        .assert()
++        .success();
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    let entries = val["entries"].as_array().unwrap();
++    assert_eq!(entries.len(), 3);
++    assert_eq!(entries[0]["seq"], 1);
++    assert_eq!(entries[0]["kind"], "note");
++    assert_eq!(entries[1]["seq"], 2);
++    assert_eq!(entries[1]["kind"], "decision");
++    assert_eq!(entries[2]["seq"], 3);
++    assert_eq!(entries[2]["kind"], "tradeoff");
++}
++
++#[test]
++fn test_scratch_read_summary_and_budget() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "in-progress");
++
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    // Append 8 entries:
++    // 1: note
++    // 2: decision
++    // 3: note
++    // 4: note
++    // 5: note
++    // 6: transition
++    // 7: note
++    // 8: note
++    for (k, t) in [
++        ("note", "Note 1"),
++        ("decision", "Crucial Decision 2"),
++        ("note", "Note 3"),
++        ("note", "Note 4"),
++        ("note", "Note 5"),
++        ("transition", "Transition 6"),
++        ("note", "Note 7"),
++        ("note", "Note 8"),
++    ] {
++        Command::cargo_bin("qdev")
++            .unwrap()
++            .current_dir(root)
++            .args(["scratch", "append", "E12S4", "--kind", k, "--", t])
++            .assert()
++            .success();
++    }
++
++    // Read summary (default last 5 entries [4, 5, 6, 7, 8] + decisions [2] + transitions [6])
++    // Result should contain seqs: 2, 4, 5, 6, 7, 8
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["--json", "scratch", "read", "E12S4", "--summary"])
++        .assert()
++        .success();
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    let entries = val["entries"].as_array().unwrap();
++    let seqs: Vec<u64> = entries.iter().map(|e| e["seq"].as_u64().unwrap()).collect();
++    assert_eq!(seqs, vec![2, 4, 5, 6, 7, 8]);
++
++    // Read summary with budget limit
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "--json",
++            "scratch",
++            "read",
++            "E12S4",
++            "--summary",
++            "--budget",
++            "12",
++        ])
++        .assert()
++        .success();
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    let budget_entries = val["entries"].as_array().unwrap();
++    assert!(budget_entries.len() < seqs.len());
++    // Key decision/transition are prioritized
++    let budget_seqs: Vec<u64> = budget_entries
++        .iter()
++        .map(|e| e["seq"].as_u64().unwrap())
++        .collect();
++    assert!(budget_seqs.contains(&2) || budget_seqs.contains(&6));
++}
++
++#[test]
++fn test_story_spec_file_is_never_modified() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "in-progress");
++
++    let story_path = root.join("docs/specs/stories/E12S4.md");
++    let original_content = fs::read_to_string(&story_path).unwrap();
++
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args([
++            "scratch",
++            "append",
++            "E12S4",
++            "--kind",
++            "tradeoff",
++            "--",
++            "Tradeoff text",
++        ])
++        .assert()
++        .success();
++
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args(["scratch", "read", "E12S4", "--summary"])
++        .assert()
++        .success();
++
++    let post_content = fs::read_to_string(&story_path).unwrap();
++    assert_eq!(
++        original_content, post_content,
++        "Story spec file must never be modified by scratch operations"
++    );
++}
++
++#[test]
++fn test_scratch_append_success_json_envelope() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "in-progress");
++
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "--json",
++            "scratch",
++            "append",
++            "E12S4",
++            "--kind",
++            "decision",
++            "--",
++            "Envelope test note",
++        ])
++        .assert()
++        .success();
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert_eq!(val["schema_version"], "1");
++    assert_eq!(val["story_id"], "E12S4");
++    assert_eq!(val["seq"], 1);
++    assert_eq!(val["kind"], "decision");
++    assert_eq!(val["text"], "Envelope test note");
++    assert_eq!(val["author"]["type"], "human");
++    assert_eq!(val["author"]["id"], "simon");
++    assert!(val["at"].as_str().is_some());
++}
++
++#[test]
++fn test_scratch_append_with_trailing_flags_after_separator() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "in-progress");
++
++    // Without lease, pass --override and --justification AFTER `-- <text>`
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "scratch",
++            "append",
++            "E12S4",
++            "--",
++            "Emergency note",
++            "--override",
++            "--justification",
++            "Lead signoff",
++        ])
++        .assert()
++        .success();
++
++    // Verify entry was appended
++    let scratch_file = root.join("docs/state/scratch/E12S4.jsonl");
++    assert!(scratch_file.is_file());
++    let content = fs::read_to_string(&scratch_file).unwrap();
++    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
++    assert_eq!(lines.len(), 1);
++    let val: Value = serde_json::from_str(lines[0]).unwrap();
++    assert_eq!(val["text"], "Emergency note");
++
++    // Also verify note text containing literal flag-like string e.g. "--override" is not eaten
++    let mut cmd2 = Command::cargo_bin("qdev").unwrap();
++    cmd2.current_dir(root)
++        .args([
++            "scratch",
++            "append",
++            "E12S4",
++            "--",
++            "--override in note text",
++            "--override",
++            "--justification",
++            "Lead signoff 2",
++        ])
++        .assert()
++        .success();
++
++    let content2 = fs::read_to_string(&scratch_file).unwrap();
++    let lines2: Vec<&str> = content2.lines().filter(|l| !l.trim().is_empty()).collect();
++    assert_eq!(lines2.len(), 2);
++    let val2: Value = serde_json::from_str(lines2[1]).unwrap();
++    assert_eq!(val2["text"], "--override in note text");
++}
++
++#[test]
++fn test_scratch_read_last_without_summary_fails() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "in-progress");
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args(["scratch", "read", "E12S4", "--last", "3"])
++        .assert()
++        .failure()
++        .code(2);
++}

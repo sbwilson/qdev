@@ -5,8 +5,7 @@ use qdev_core::rusqlite;
 use qdev_core::write::Author;
 use qdev_core::{
     allocate_next_constraint_id_in, apply_constraint_add, apply_constraint_remove,
-    ConstraintAddOptions, ConstraintKind, ConstraintRemoveOptions, ExitCode,
-    StorageConfig,
+    ConstraintAddOptions, ConstraintKind, ConstraintRemoveOptions, ExitCode, StorageConfig,
 };
 use tempfile::TempDir;
 
@@ -88,20 +87,24 @@ fn test_constraint_id_allocation_monotonic() {
     let st = StorageConfig::default();
 
     // 1. Initial allocation for no_go should be NG-1
-    let id1 = allocate_next_constraint_id_in(root, &st, "E12S4", ConstraintKind::NoGo, None).unwrap();
+    let id1 =
+        allocate_next_constraint_id_in(root, &st, "E12S4", ConstraintKind::NoGo, None).unwrap();
     assert_eq!(id1.to_string(), "E12S4/NG-1");
 
     // 2. Initial allocation for rabbit_hole should be RH-1
-    let id2 = allocate_next_constraint_id_in(root, &st, "E12S4", ConstraintKind::RabbitHole, None).unwrap();
+    let id2 = allocate_next_constraint_id_in(root, &st, "E12S4", ConstraintKind::RabbitHole, None)
+        .unwrap();
     assert_eq!(id2.to_string(), "E12S4/RH-1");
 
     // 3. Initial allocation for appetite should be APP-1
-    let id3 = allocate_next_constraint_id_in(root, &st, "E12S4", ConstraintKind::Appetite, None).unwrap();
+    let id3 =
+        allocate_next_constraint_id_in(root, &st, "E12S4", ConstraintKind::Appetite, None).unwrap();
     assert_eq!(id3.to_string(), "E12S4/APP-1");
 
     // 4. Initial allocation for Epic E12
     setup_test_epic(root, "E12", "planning", 1, "");
-    let id_epic = allocate_next_constraint_id_in(root, &st, "E12", ConstraintKind::RabbitHole, None).unwrap();
+    let id_epic =
+        allocate_next_constraint_id_in(root, &st, "E12", ConstraintKind::RabbitHole, None).unwrap();
     assert_eq!(id_epic.to_string(), "E12/RH-1");
 }
 
@@ -109,14 +112,32 @@ fn test_constraint_id_allocation_monotonic() {
 fn test_parse_constraint_seq_rejects_leading_zeroes() {
     use qdev_core::parse_constraint_seq;
 
-    assert_eq!(parse_constraint_seq("NG-1", None, ConstraintKind::NoGo), Some(1));
-    assert_eq!(parse_constraint_seq("NG-10", None, ConstraintKind::NoGo), Some(10));
-    assert_eq!(parse_constraint_seq("E12S4/NG-1", Some("E12S4"), ConstraintKind::NoGo), Some(1));
+    assert_eq!(
+        parse_constraint_seq("NG-1", None, ConstraintKind::NoGo),
+        Some(1)
+    );
+    assert_eq!(
+        parse_constraint_seq("NG-10", None, ConstraintKind::NoGo),
+        Some(10)
+    );
+    assert_eq!(
+        parse_constraint_seq("E12S4/NG-1", Some("E12S4"), ConstraintKind::NoGo),
+        Some(1)
+    );
 
     // Rejects leading zeroes e.g. 01, 007, 0
-    assert_eq!(parse_constraint_seq("NG-01", None, ConstraintKind::NoGo), None);
-    assert_eq!(parse_constraint_seq("NG-0", None, ConstraintKind::NoGo), None);
-    assert_eq!(parse_constraint_seq("E12S4/NG-05", Some("E12S4"), ConstraintKind::NoGo), None);
+    assert_eq!(
+        parse_constraint_seq("NG-01", None, ConstraintKind::NoGo),
+        None
+    );
+    assert_eq!(
+        parse_constraint_seq("NG-0", None, ConstraintKind::NoGo),
+        None
+    );
+    assert_eq!(
+        parse_constraint_seq("E12S4/NG-05", Some("E12S4"), ConstraintKind::NoGo),
+        None
+    );
 }
 
 #[test]
@@ -151,7 +172,10 @@ fn test_apply_constraint_add_success_and_cache_sync() {
     assert!(disk_content.contains("version: 2"));
     assert!(disk_content.contains("id: NG-1"));
     assert!(disk_content.contains("kind: no_go"));
-    assert!(disk_content.contains("text: \"Do not touch frame buffers\"") || disk_content.contains("text: Do not touch frame buffers"));
+    assert!(
+        disk_content.contains("text: \"Do not touch frame buffers\"")
+            || disk_content.contains("text: Do not touch frame buffers")
+    );
 
     // Check SQLite cache
     let cache_db_path = root.join(".qdev/cache/cache.sqlite");
@@ -187,7 +211,8 @@ fn test_apply_constraint_add_success_and_cache_sync() {
         author: author.clone(),
     };
 
-    let res2 = apply_constraint_add(&opts2).expect("apply_constraint_add should succeed for second constraint");
+    let res2 = apply_constraint_add(&opts2)
+        .expect("apply_constraint_add should succeed for second constraint");
     assert_eq!(res2.id, "E12S4/NG-2");
     assert_eq!(res2.new_version, 3);
 
@@ -307,7 +332,8 @@ fn test_apply_constraint_remove_draft_without_justification() {
         author: author.clone(),
     };
 
-    let res = apply_constraint_remove(&remove_opts).expect("remove on draft should succeed without justification");
+    let res = apply_constraint_remove(&remove_opts)
+        .expect("remove on draft should succeed without justification");
     assert_eq!(res.id, "E12S4/NG-1");
     assert_eq!(res.owner_id, "E12S4");
     assert_eq!(res.new_version, 3);
@@ -392,7 +418,8 @@ fn test_apply_constraint_remove_non_draft_with_justification_succeeds() {
         author,
     };
 
-    let res = apply_constraint_remove(&remove_opts).expect("remove on non-draft with justification should succeed");
+    let res = apply_constraint_remove(&remove_opts)
+        .expect("remove on non-draft with justification should succeed");
     assert_eq!(res.id, "E12S4/NG-1");
     assert_eq!(res.new_version, 2);
 

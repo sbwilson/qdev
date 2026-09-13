@@ -71,11 +71,80 @@ fn main() -> StdExitCode {
     StdExitCode::from(exit_code)
 }
 
+fn normalize_raw_args(raw_args: &[String]) -> Vec<String> {
+    let is_scratch_append = raw_args
+        .windows(2)
+        .any(|w| w[0] == "scratch" && w[1] == "append");
+    if !is_scratch_append {
+        return raw_args.to_vec();
+    }
+
+    let dash_dash_pos = raw_args.iter().position(|a| a == "--");
+    let dash_dash_idx = match dash_dash_pos {
+        Some(idx) => idx,
+        None => return raw_args.to_vec(),
+    };
+
+    let mut before = raw_args[..dash_dash_idx].to_vec();
+    let after = &raw_args[dash_dash_idx + 1..];
+
+    if after.is_empty() {
+        return raw_args.to_vec();
+    }
+
+    // The first token immediately following `--` is the entry text operand.
+    // Preserve it as positional text and only scan subsequent tokens for trailing flags.
+    let positional_text = &after[0];
+    let mut hoisted_flags = Vec::new();
+    let mut remaining_positional = vec![positional_text.clone()];
+
+    let mut i = 1;
+    while i < after.len() {
+        let arg = &after[i];
+        if arg == "--override" || arg == "--json" || arg == "--non-interactive" {
+            hoisted_flags.push(arg.clone());
+            i += 1;
+        } else if arg == "--justification"
+            || arg == "--kind"
+            || arg == "--author-type"
+            || arg == "--author-id"
+        {
+            hoisted_flags.push(arg.clone());
+            if i + 1 < after.len() && !after[i + 1].starts_with("--") {
+                hoisted_flags.push(after[i + 1].clone());
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else if arg.starts_with("--justification=")
+            || arg.starts_with("--kind=")
+            || arg.starts_with("--author-type=")
+            || arg.starts_with("--author-id=")
+        {
+            hoisted_flags.push(arg.clone());
+            i += 1;
+        } else {
+            remaining_positional.push(arg.clone());
+            i += 1;
+        }
+    }
+
+    if hoisted_flags.is_empty() {
+        return raw_args.to_vec();
+    }
+
+    before.extend(hoisted_flags);
+    before.push("--".to_string());
+    before.extend(remaining_positional);
+    before
+}
+
 fn run(raw_args: &[String]) -> ExitCode {
-    let json_mode = is_json_requested(raw_args);
+    let raw_args = normalize_raw_args(raw_args);
+    let json_mode = is_json_requested(&raw_args);
     let output = OutputEmitter::new(json_mode);
 
-    let cli = match Cli::try_parse_from(raw_args) {
+    let cli = match Cli::try_parse_from(&raw_args) {
         Ok(cli) => cli,
         Err(clap_err) => {
             if clap_err.kind() == clap::error::ErrorKind::DisplayHelp {
@@ -308,6 +377,14 @@ fn run(raw_args: &[String]) -> ExitCode {
         Some(Commands::Release(ref release_args)) => {
             handle_release(release_args, &annotated_config, &cli, &output, &current_dir)
         }
+        Some(Commands::Scratch(ref scratch_args)) => handle_scratch(
+            scratch_args,
+            &annotated_config,
+            &cli,
+            &output,
+            &current_dir,
+            interactivity,
+        ),
         Some(Commands::Init(_)) => unreachable!(),
         Some(Commands::Schema(_)) => unreachable!(),
     }
@@ -390,7 +467,8 @@ fn requires_workspace(command: Option<&Commands>) -> bool {
         | Some(Commands::Sync(_))
         | Some(Commands::Doctor)
         | Some(Commands::Claim(_))
-        | Some(Commands::Release(_)) => true,
+        | Some(Commands::Release(_))
+        | Some(Commands::Scratch(_)) => true,
     }
 }
 
@@ -4378,4 +4456,309 @@ fn handle_release(
             e.exit_code()
         }
     }
+}
+
+fn handle_scratch(
+    args: &cli::ScratchArgs,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+    interactivity: Interactivity,
+) -> ExitCode {
+    match args.command {
+        cli::ScratchCommands::Append(ref append_args) => handle_scratch_append(
+            append_args,
+            annotated_config,
+            cli,
+            output,
+            current_dir,
+            interactivity,
+        ),
+        cli::ScratchCommands::Read(ref read_args) => {
+            handle_scratch_read(read_args, annotated_config, cli, output, current_dir)
+        }
+    }
+}
+
+fn handle_scratch_append(
+    append_args: &cli::ScratchAppendArgs,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+    interactivity: Interactivity,
+) -> ExitCode {
+    let root = qdev_core::find_workspace_root(current_dir);
+
+    // 1. Resolve target story
+    let (_entity_kind, canonical_story_id, _story_path) = match qdev_core::resolve_entity_file(
+        &root,
+        Some(qdev_core::EntityKind::Story),
+        &append_args.story,
+        Some(&annotated_config.config.storage),
+    ) {
+        Ok(res) => res,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    // 2. Validate kind
+    if let Some(ref k) = append_args.kind {
+        let trimmed = k.trim();
+        if !qdev_core::VALID_SCRATCH_KINDS.contains(&trimmed) {
+            let err = qdev_core::QdevError::usage_error(format!(
+                "Invalid scratchpad kind '{}', must be one of: note, decision, tradeoff, transition",
+                trimmed
+            ));
+            let _ = output.emit_error(&err);
+            return ExitCode::UsageError;
+        }
+    }
+
+    // 3. Validate text
+    if append_args.text.trim().is_empty() {
+        let err = qdev_core::QdevError::usage_error("Scratchpad text cannot be empty");
+        let _ = output.emit_error(&err);
+        return ExitCode::UsageError;
+    }
+
+    // 4. Resolve author (single resolution for lease check, override audit, and append)
+    let author = match resolve_author(
+        append_args.author_type.as_deref(),
+        append_args.author_id.as_deref(),
+        annotated_config,
+        &root,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    // 5. Check lease authorization
+    let workspace_leases = match qdev_core::find_workspace_leases(&root) {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let has_active_lease = workspace_leases
+        .iter()
+        .any(|l| l.story_id == canonical_story_id);
+
+    let mut override_decision: Option<String> = None;
+
+    if !has_active_lease {
+        if cli.r#override {
+            let just = cli.justification.as_deref().unwrap_or("").trim();
+            if just.is_empty() {
+                let err = qdev_core::QdevError::policy_refusal(
+                    "needs_justification",
+                    "--override requires a non-empty --justification",
+                );
+                let _ = output.emit_error(&err);
+                return ExitCode::PolicyRefusal;
+            }
+            override_decision = Some(just.to_string());
+        } else if interactivity.is_non_interactive() {
+            let err = qdev_core::QdevError::policy_refusal(
+                "needs_confirmation",
+                format!(
+                    "Scratchpad append on story '{}' requires an active lease; re-run with --override --justification \"<rationale>\"",
+                    canonical_story_id
+                ),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::PolicyRefusal;
+        } else {
+            eprintln!("⚠ Out-of-lease scratchpad append");
+            eprintln!("  Story   {}", canonical_story_id);
+            if let Some(l) = workspace_leases.first() {
+                eprintln!("  Lease   {} (held in {})", l.story_id, l.worktree_path);
+            }
+            eprintln!("  [1] Override with justification");
+            eprintln!("  [2] Abort");
+
+            let choice = match prompt_input("") {
+                Ok(c) => c,
+                Err(_) => {
+                    println!("Aborted.");
+                    return ExitCode::Success;
+                }
+            };
+
+            match choice.trim() {
+                "1" => {
+                    let just = match prompt_input("Justification: ") {
+                        Ok(j) => j,
+                        Err(_) => {
+                            let err = qdev_core::QdevError::policy_refusal(
+                                "needs_justification",
+                                "--override requires a non-empty --justification",
+                            );
+                            let _ = output.emit_error(&err);
+                            return ExitCode::PolicyRefusal;
+                        }
+                    };
+                    let trimmed_just = just.trim();
+                    if trimmed_just.is_empty() {
+                        let err = qdev_core::QdevError::policy_refusal(
+                            "needs_justification",
+                            "--override requires a non-empty --justification",
+                        );
+                        let _ = output.emit_error(&err);
+                        return ExitCode::PolicyRefusal;
+                    }
+                    override_decision = Some(trimmed_just.to_string());
+                }
+                _ => {
+                    println!("Aborted.");
+                    return ExitCode::Success;
+                }
+            }
+        }
+    }
+
+    // 6. Append scratchpad entry
+    let opt_store = open_query_store(&root, annotated_config).ok();
+    let entry = match qdev_core::append_scratch_entry(
+        &root,
+        Some(&annotated_config.config.storage),
+        &canonical_story_id,
+        append_args.kind.as_deref(),
+        &append_args.text,
+        &author,
+        opt_store.as_ref().map(|s| s as &dyn qdev_core::Store),
+    ) {
+        Ok(e) => e,
+        Err(err) => {
+            let _ = output.emit_error(&err);
+            return err.exit_code();
+        }
+    };
+
+    // 7. If an override took place, log governance decision record after append succeeded
+    if let Some(just) = override_decision {
+        if let Err(e) = qdev_core::create_governance_override_decision(
+            &root,
+            Some(&annotated_config.config.storage),
+            &canonical_story_id,
+            "lease_override",
+            &just,
+            &author,
+            Some(&format!(
+                "Scratchpad append on unleased story {} overridden by {}",
+                canonical_story_id, author.id
+            )),
+        ) {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    }
+
+    if cli.json {
+        let envelope = JsonEnvelope::new(qdev_core::ScratchAppendPayload {
+            story_id: canonical_story_id.clone(),
+            seq: entry.seq,
+            at: entry.at.clone(),
+            author: entry.author.clone(),
+            kind: entry.kind.clone(),
+            text: entry.text.clone(),
+        });
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit scratchpad envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else {
+        println!(
+            "Appended entry #{} [{}] to scratchpad for {}",
+            entry.seq, entry.kind, canonical_story_id
+        );
+    }
+
+    ExitCode::Success
+}
+
+fn handle_scratch_read(
+    read_args: &cli::ScratchReadArgs,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+) -> ExitCode {
+    let root = qdev_core::find_workspace_root(current_dir);
+
+    // 1. Resolve target story
+    let (_entity_kind, canonical_story_id, _story_path) = match qdev_core::resolve_entity_file(
+        &root,
+        Some(qdev_core::EntityKind::Story),
+        &read_args.story,
+        Some(&annotated_config.config.storage),
+    ) {
+        Ok(res) => res,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    // 2. Read entries
+    let entries = match qdev_core::read_scratch_entries(
+        &root,
+        Some(&annotated_config.config.storage),
+        &canonical_story_id,
+    ) {
+        Ok(e) => e,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    // 3. Filter entries
+    let filtered_entries = if read_args.summary {
+        let last_n = read_args.last.unwrap_or(5);
+        qdev_core::summarize_scratch_entries(&entries, last_n, read_args.budget)
+    } else if let Some(budget) = read_args.budget {
+        qdev_core::filter_scratch_entries_by_budget(&entries, budget)
+    } else {
+        entries
+    };
+
+    // 4. Output
+    if cli.json {
+        let envelope = JsonEnvelope::new(qdev_core::ScratchReadPayload {
+            story_id: canonical_story_id.clone(),
+            entries: filtered_entries,
+        });
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit scratchpad envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else if filtered_entries.is_empty() {
+        println!("(empty)");
+    } else {
+        for entry in &filtered_entries {
+            println!(
+                "[{}] [{}] {}:{} {}: {}",
+                entry.seq, entry.kind, entry.author.r#type, entry.author.id, entry.at, entry.text
+            );
+        }
+    }
+
+    ExitCode::Success
 }

@@ -71,6 +71,8 @@ pub enum Commands {
     Claim(ClaimArgs),
     /// Release a story lease
     Release(ReleaseArgs),
+    /// Manage story scratchpads
+    Scratch(ScratchArgs),
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
@@ -453,6 +455,59 @@ pub struct ConfigArgs {
 pub enum ConfigCommands {
     /// Show effective merged configuration
     Show,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct ScratchArgs {
+    #[command(subcommand)]
+    pub command: ScratchCommands,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum ScratchCommands {
+    /// Append an entry to a story's scratchpad
+    Append(ScratchAppendArgs),
+    /// Read a story's scratchpad entries
+    Read(ScratchReadArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScratchAppendArgs {
+    /// Target story identifier (e.g. "E12S4")
+    pub story: String,
+
+    /// Scratchpad entry text
+    pub text: String,
+
+    /// Scratchpad entry kind: 'note', 'decision', 'tradeoff', or 'transition'
+    #[arg(long = "kind")]
+    pub kind: Option<String>,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScratchReadArgs {
+    /// Target story identifier (e.g. "E12S4")
+    pub story: String,
+
+    /// Filter to key decisions, transitions, and recent entries
+    #[arg(long = "summary")]
+    pub summary: bool,
+
+    /// Number of recent entries to include in summary (default: 5)
+    #[arg(long = "last", requires = "summary")]
+    pub last: Option<usize>,
+
+    /// Token budget to bound output entries
+    #[arg(long = "budget")]
+    pub budget: Option<usize>,
 }
 
 /// Helper to check whether `--json` was passed in raw command-line arguments.

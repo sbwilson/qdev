@@ -26,6 +26,7 @@ fn guarded_invocations() -> Vec<Vec<&'static str>> {
         vec!["claim", "story", "E1S1"],
         vec!["release", "story", "E1S1"],
         vec!["constraint", "add", "E1S1", "--kind", "no_go", "text"],
+        vec!["scratch", "read", "E1S1"],
     ]
 }
 

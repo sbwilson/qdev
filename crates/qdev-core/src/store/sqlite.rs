@@ -4129,7 +4129,7 @@ fn file_change_stamp_from_metadata(metadata: Option<&fs::Metadata>) -> (i64, u64
     (stamp, size)
 }
 
-fn file_change_stamp(file_path: &Path) -> (i64, u64) {
+pub fn file_change_stamp(file_path: &Path) -> (i64, u64) {
     let metadata = fs::metadata(file_path).ok();
     file_change_stamp_from_metadata(metadata.as_ref())
 }

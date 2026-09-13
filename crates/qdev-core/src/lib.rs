@@ -10,10 +10,17 @@ pub mod interactivity;
 pub mod lease;
 pub mod query;
 pub mod schema;
+pub mod scratch;
 pub mod store;
 pub mod transition;
 pub mod validate;
 pub mod write;
+
+pub use scratch::{
+    append_scratch_entry, estimate_tokens, filter_scratch_entries_by_budget, read_scratch_entries,
+    summarize_scratch_entries, ScratchAppendPayload, ScratchReadPayload, ScratchpadAuthor,
+    ScratchpadEntry, VALID_SCRATCH_KINDS,
+};
 
 pub use governance::{
     add_team_to_entity_owners, canonical_team_string, classify_mutation,

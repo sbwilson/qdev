@@ -249,15 +249,7 @@ fn test_cli_constraint_add_empty_text() {
 
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     cmd.current_dir(root)
-        .args([
-            "constraint",
-            "add",
-            "E12S4",
-            "--kind",
-            "no_go",
-            "--",
-            "   ",
-        ])
+        .args(["constraint", "add", "E12S4", "--kind", "no_go", "--", "   "])
         .assert()
         .code(2);
 }
@@ -296,11 +288,7 @@ fn test_cli_constraint_remove_draft() {
 
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     cmd.current_dir(root)
-        .args([
-            "constraint",
-            "remove",
-            "E12S4/NG-1",
-        ])
+        .args(["constraint", "remove", "E12S4/NG-1"])
         .assert()
         .success();
 
@@ -320,11 +308,7 @@ fn test_cli_constraint_remove_non_draft_without_justification_refused() {
     // Refused with exit code 3 (PolicyRefusal)
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     cmd.current_dir(root)
-        .args([
-            "constraint",
-            "remove",
-            "E12S4/NG-1",
-        ])
+        .args(["constraint", "remove", "E12S4/NG-1"])
         .assert()
         .code(3);
 
@@ -368,11 +352,7 @@ fn test_cli_constraint_remove_not_found() {
 
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     cmd.current_dir(root)
-        .args([
-            "constraint",
-            "remove",
-            "E12S4/NG-99",
-        ])
+        .args(["constraint", "remove", "E12S4/NG-99"])
         .assert()
         .code(2);
 }
@@ -388,12 +368,7 @@ fn test_cli_constraint_remove_json_envelope() {
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     let assert = cmd
         .current_dir(root)
-        .args([
-            "constraint",
-            "remove",
-            "E12S4/NG-1",
-            "--json",
-        ])
+        .args(["constraint", "remove", "E12S4/NG-1", "--json"])
         .assert()
         .success();
 
@@ -412,7 +387,8 @@ fn test_cli_constraint_get_resolution_and_inheritance() {
     setup_workspace(root);
 
     // Create epic E12 with RH-1
-    let epic_constraints = "  - id: RH-1\n    kind: rabbit_hole\n    text: len == 0 does not mean empty\n";
+    let epic_constraints =
+        "  - id: RH-1\n    kind: rabbit_hole\n    text: len == 0 does not mean empty\n";
     create_epic(root, "E12", "active", 1, epic_constraints);
 
     // Create story E12S4 with NG-1
@@ -421,7 +397,11 @@ fn test_cli_constraint_get_resolution_and_inheritance() {
 
     // Populate cache by syncing
     let mut sync_cmd = Command::cargo_bin("qdev").unwrap();
-    sync_cmd.current_dir(root).args(["sync", "--rebuild"]).assert().success();
+    sync_cmd
+        .current_dir(root)
+        .args(["sync", "--rebuild"])
+        .assert()
+        .success();
 
     // 1. qdev get E12S4/NG-1 resolves bare constraint
     let mut get_cmd1 = Command::cargo_bin("qdev").unwrap();
@@ -447,11 +427,17 @@ fn test_cli_constraint_get_resolution_and_inheritance() {
     let constraints = json2["constraints"].as_array().expect("constraints array");
     assert_eq!(constraints.len(), 2);
 
-    let own = constraints.iter().find(|c| c["id"] == "E12S4/NG-1").expect("own constraint");
+    let own = constraints
+        .iter()
+        .find(|c| c["id"] == "E12S4/NG-1")
+        .expect("own constraint");
     assert_eq!(own["kind"], "no_go");
     assert_eq!(own["inherited_from"], Value::Null);
 
-    let inherited = constraints.iter().find(|c| c["id"] == "E12/RH-1").expect("inherited constraint");
+    let inherited = constraints
+        .iter()
+        .find(|c| c["id"] == "E12/RH-1")
+        .expect("inherited constraint");
     assert_eq!(inherited["kind"], "rabbit_hole");
     assert_eq!(inherited["inherited_from"], "E12");
 }
@@ -466,13 +452,7 @@ fn test_cli_constraint_remove_if_version_mismatch() {
 
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     cmd.current_dir(root)
-        .args([
-            "constraint",
-            "remove",
-            "E12S4/NG-1",
-            "--if-version",
-            "1",
-        ])
+        .args(["constraint", "remove", "E12S4/NG-1", "--if-version", "1"])
         .assert()
         .code(5);
 
@@ -524,11 +504,7 @@ fn test_cli_appetite_constraint_remove_and_get() {
     let mut rm_cmd = Command::cargo_bin("qdev").unwrap();
     rm_cmd
         .current_dir(root)
-        .args([
-            "constraint",
-            "remove",
-            "E12S4/APP-1",
-        ])
+        .args(["constraint", "remove", "E12S4/APP-1"])
         .assert()
         .success();
 

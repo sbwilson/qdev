@@ -824,7 +824,8 @@ pub fn allocate_next_constraint_id_in(
     {
         if let Ok(content) = std::fs::read_to_string(&file_path) {
             if let Ok(frontmatter) = crate::schema::extract_frontmatter(&content) {
-                if let Some(serde_json::Value::Array(constraints)) = frontmatter.get("constraints") {
+                if let Some(serde_json::Value::Array(constraints)) = frontmatter.get("constraints")
+                {
                     for c in constraints {
                         if let Some(id_val) = c.get("id").and_then(|v| v.as_str()) {
                             existing_ids.insert(id_val.to_string());
@@ -861,4 +862,3 @@ pub fn allocate_next_constraint_id_in(
         number: next_n,
     })
 }
-
