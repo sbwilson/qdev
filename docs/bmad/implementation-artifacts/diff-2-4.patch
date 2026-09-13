@@ -1,0 +1,2967 @@
+diff --git a/crates/qdev-cli/src/cli.rs b/crates/qdev-cli/src/cli.rs
+index 1d32b2e..648e541 100644
+--- a/crates/qdev-cli/src/cli.rs
++++ b/crates/qdev-cli/src/cli.rs
+@@ -20,6 +20,14 @@ pub struct Cli {
+     #[arg(long, global = true)]
+     pub non_interactive: bool,
+ 
++    /// Override scope lease or cross-team mutation restrictions
++    #[arg(long = "override", global = true)]
++    pub r#override: bool,
++
++    /// Justification for override
++    #[arg(long, global = true)]
++    pub justification: Option<String>,
++
+     #[command(subcommand)]
+     pub command: Option<Commands>,
+ }
+@@ -92,10 +100,6 @@ pub struct ReleaseArgs {
+     #[arg(long = "force")]
+     pub force: bool,
+ 
+-    /// Justification for breaking a lease with --force
+-    #[arg(long = "justification")]
+-    pub justification: Option<String>,
+-
+     /// Attribution author type override ('human' or 'agent')
+     #[arg(long = "author-type")]
+     pub author_type: Option<String>,
+@@ -283,10 +287,6 @@ pub struct TransitionArgs {
+     /// Target status to transition to
+     pub target_status: String,
+ 
+-    /// Justification for terminal (superseded/abandoned) or backward transitions
+-    #[arg(long = "justification")]
+-    pub justification: Option<String>,
+-
+     /// Attribution author type override ('human' or 'agent')
+     #[arg(long = "author-type")]
+     pub author_type: Option<String>,
+diff --git a/crates/qdev-cli/src/main.rs b/crates/qdev-cli/src/main.rs
+index c46a453..a710458 100644
+--- a/crates/qdev-cli/src/main.rs
++++ b/crates/qdev-cli/src/main.rs
+@@ -2,6 +2,7 @@ mod cli;
+ mod output;
+ 
+ use std::collections::BTreeMap;
++use std::fs;
+ use std::io::IsTerminal;
+ use std::panic;
+ use std::process::ExitCode as StdExitCode;
+@@ -241,7 +242,14 @@ fn run(raw_args: &[String]) -> ExitCode {
+             }
+         },
+         Some(Commands::Update(ref update_args)) => {
+-            handle_update(update_args, &annotated_config, &cli, &output, &current_dir)
++            handle_update(
++                update_args,
++                &annotated_config,
++                &cli,
++                &output,
++                &current_dir,
++                interactivity,
++            )
+         }
+         Some(Commands::Transition(ref transition_args)) => handle_transition(
+             transition_args,
+@@ -249,6 +257,7 @@ fn run(raw_args: &[String]) -> ExitCode {
+             &cli,
+             &output,
+             &current_dir,
++            interactivity,
+         ),
+         Some(Commands::Get(ref get_args)) => {
+             handle_get(get_args, &annotated_config, &cli, &output, &current_dir)
+@@ -257,7 +266,14 @@ fn run(raw_args: &[String]) -> ExitCode {
+             handle_list(list_args, &annotated_config, &cli, &output, &current_dir)
+         }
+         Some(Commands::Relate(ref relate_args)) => {
+-            handle_relate(relate_args, &annotated_config, &cli, &output, &current_dir)
++            handle_relate(
++                relate_args,
++                &annotated_config,
++                &cli,
++                &output,
++                &current_dir,
++                interactivity,
++            )
+         }
+         Some(Commands::Unrelate(ref unrelate_args)) => handle_unrelate(
+             unrelate_args,
+@@ -265,6 +281,7 @@ fn run(raw_args: &[String]) -> ExitCode {
+             &cli,
+             &output,
+             &current_dir,
++            interactivity,
+         ),
+         Some(Commands::Graph(ref graph_args)) => {
+             handle_graph(graph_args, &annotated_config, &cli, &output, &current_dir)
+@@ -761,6 +778,308 @@ fn prompt_input(prompt: &str) -> std::io::Result<String> {
+     Ok(input.trim().to_string())
+ }
+ 
++enum GovernanceOutcome {
++    Proceed {
++        justification: Option<String>,
++        override_decision: Option<(String, String)>,
++    },
++    Aborted,
++}
++
++fn check_governance_gate(
++    root: &std::path::Path,
++    target_id: &str,
++    target_kind: Option<qdev_core::EntityKind>,
++    author: &qdev_core::Author,
++    annotated_config: &qdev_core::AnnotatedConfig,
++    interactivity: Interactivity,
++    cli: &Cli,
++    output: &OutputEmitter,
++    if_version: &mut Option<u64>,
++) -> Result<GovernanceOutcome, ExitCode> {
++    let opt_store = open_query_store(root, annotated_config).ok();
++    let classification = match qdev_core::classify_mutation(
++        root,
++        target_id,
++        target_kind,
++        author,
++        &annotated_config.config,
++        opt_store.as_ref().map(|s| s as &dyn qdev_core::Store),
++    ) {
++        Ok(c) => c,
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            return Err(e.exit_code());
++        }
++    };
++
++    if !classification.is_out_of_lease && !classification.is_cross_team {
++        return Ok(GovernanceOutcome::Proceed {
++            justification: None,
++            override_decision: None,
++        });
++    }
++
++    if cli.r#override {
++        let just = cli.justification.as_deref().unwrap_or("").trim();
++        if just.is_empty() {
++            let err = qdev_core::QdevError::policy_refusal(
++                "needs_justification",
++                "--override requires a non-empty --justification",
++            );
++            let _ = output.emit_error(&err);
++            return Err(ExitCode::PolicyRefusal);
++        }
++
++        let decision_type = if classification.is_cross_team {
++            "cross_team_override"
++        } else {
++            "lease_override"
++        };
++
++        return Ok(GovernanceOutcome::Proceed {
++            justification: Some(just.to_string()),
++            override_decision: Some((decision_type.to_string(), just.to_string())),
++        });
++    }
++
++    if interactivity.is_non_interactive() {
++        let msg = if classification.is_cross_team && classification.is_out_of_lease {
++            format!(
++                "Mutation on entity '{}' is out-of-lease and cross-team; re-run with --override --justification \"<rationale>\"",
++                target_id
++            )
++        } else if classification.is_cross_team {
++            format!(
++                "Cross-team mutation on entity '{}' requires confirmation; re-run with --override --justification \"<rationale>\"",
++                target_id
++            )
++        } else {
++            format!(
++                "Out-of-lease mutation on entity '{}' requires confirmation; re-run with --override --justification \"<rationale>\"",
++                target_id
++            )
++        };
++        let err = qdev_core::QdevError::policy_refusal("needs_confirmation", msg);
++        let _ = output.emit_error(&err);
++        return Err(ExitCode::PolicyRefusal);
++    }
++
++    // Interactive TTY flow
++    let entity_title = opt_store
++        .as_ref()
++        .and_then(|s| s.get_entity(target_id).ok().flatten())
++        .and_then(|e| e.title)
++        .unwrap_or_else(|| {
++            if let Ok((_, _, path)) = qdev_core::resolve_entity_file(
++                root,
++                None,
++                target_id,
++                Some(&annotated_config.config.storage),
++            ) {
++                if let Ok(content) = fs::read_to_string(&path) {
++                    if let Ok(fm) = qdev_core::extract_frontmatter(&content) {
++                        return fm
++                            .get("title")
++                            .and_then(|v| v.as_str())
++                            .unwrap_or("")
++                            .to_string();
++                    }
++                }
++            }
++            String::new()
++        });
++
++    if classification.is_cross_team {
++        let owners_str = if classification.target_owners.is_empty() {
++            "none".to_string()
++        } else {
++            classification.target_owners.join(", ")
++        };
++        let user_teams_str = if classification.user_teams.is_empty() {
++            String::new()
++        } else {
++            format!(
++                " ({})",
++                classification
++                    .user_teams
++                    .iter()
++                    .map(|t| qdev_core::canonical_team_string(t))
++                    .collect::<Vec<_>>()
++                    .join(", ")
++            )
++        };
++
++        let team_to_add = if let Some(team) = classification.user_teams.first() {
++            qdev_core::canonical_team_string(team)
++        } else {
++            author.id.clone()
++        };
++
++        eprintln!("⚠ Cross-team edit");
++        eprintln!(
++            "  Entity  {} \"{}\"   owners: {}",
++            target_id, entity_title, owners_str
++        );
++        eprintln!("  You     {}{}", author.id, user_teams_str);
++        eprintln!("  [1] Override with justification (logged as DEC cross_team_override)");
++        eprintln!(
++            "  [2] Add {} to owners (requires an existing owner's lease or override)",
++            team_to_add
++        );
++        eprintln!("  [3] Abort");
++
++        let choice = match prompt_input("") {
++            Ok(c) => c,
++            Err(_) => {
++                println!("Aborted.");
++                return Ok(GovernanceOutcome::Aborted);
++            }
++        };
++
++        match choice.trim() {
++            "1" => {
++                let just = match prompt_input("Justification: ") {
++                    Ok(j) => j,
++                    Err(_) => {
++                        let err = qdev_core::QdevError::policy_refusal(
++                            "needs_justification",
++                            "--override requires a non-empty --justification",
++                        );
++                        let _ = output.emit_error(&err);
++                        return Err(ExitCode::PolicyRefusal);
++                    }
++                };
++                let trimmed_just = just.trim();
++                if trimmed_just.is_empty() {
++                    let err = qdev_core::QdevError::policy_refusal(
++                        "needs_justification",
++                        "--override requires a non-empty --justification",
++                    );
++                    let _ = output.emit_error(&err);
++                    return Err(ExitCode::PolicyRefusal);
++                }
++
++                Ok(GovernanceOutcome::Proceed {
++                    justification: Some(trimmed_just.to_string()),
++                    override_decision: Some((
++                        "cross_team_override".to_string(),
++                        trimmed_just.to_string(),
++                    )),
++                })
++            }
++            "2" => {
++                let just = match prompt_input("Justification: ") {
++                    Ok(j) => j,
++                    Err(_) => {
++                        let err = qdev_core::QdevError::policy_refusal(
++                            "needs_justification",
++                            "--override requires a non-empty --justification",
++                        );
++                        let _ = output.emit_error(&err);
++                        return Err(ExitCode::PolicyRefusal);
++                    }
++                };
++                let trimmed_just = just.trim();
++                if trimmed_just.is_empty() {
++                    let err = qdev_core::QdevError::policy_refusal(
++                        "needs_justification",
++                        "--override requires a non-empty --justification",
++                    );
++                    let _ = output.emit_error(&err);
++                    return Err(ExitCode::PolicyRefusal);
++                }
++
++                if let Err(e) = qdev_core::add_team_to_entity_owners(
++                    root,
++                    Some(&annotated_config.config.storage),
++                    target_id,
++                    &team_to_add,
++                    author,
++                    *if_version,
++                ) {
++                    let _ = output.emit_error(&e);
++                    return Err(e.exit_code());
++                }
++
++                if let Some(v) = *if_version {
++                    *if_version = Some(v + 1);
++                }
++
++                Ok(GovernanceOutcome::Proceed {
++                    justification: Some(trimmed_just.to_string()),
++                    override_decision: Some((
++                        "cross_team_override".to_string(),
++                        trimmed_just.to_string(),
++                    )),
++                })
++            }
++            "3" => {
++                println!("Aborted.");
++                Ok(GovernanceOutcome::Aborted)
++            }
++            _ => {
++                println!("Aborted.");
++                Ok(GovernanceOutcome::Aborted)
++            }
++        }
++    } else {
++        eprintln!("⚠ Out-of-lease edit");
++        eprintln!("  Entity  {} \"{}\"", target_id, entity_title);
++        if let Some(ref l) = classification.active_lease {
++            eprintln!("  Lease   {} (held in {})", l.story_id, l.worktree_path);
++        }
++        eprintln!("  [1] Override with justification (logged as DEC lease_override)");
++        eprintln!("  [3] Abort");
++
++        let choice = match prompt_input("") {
++            Ok(c) => c,
++            Err(_) => {
++                println!("Aborted.");
++                return Ok(GovernanceOutcome::Aborted);
++            }
++        };
++
++        match choice.trim() {
++            "1" => {
++                let just = match prompt_input("Justification: ") {
++                    Ok(j) => j,
++                    Err(_) => {
++                        let err = qdev_core::QdevError::policy_refusal(
++                            "needs_justification",
++                            "--override requires a non-empty --justification",
++                        );
++                        let _ = output.emit_error(&err);
++                        return Err(ExitCode::PolicyRefusal);
++                    }
++                };
++                let trimmed_just = just.trim();
++                if trimmed_just.is_empty() {
++                    let err = qdev_core::QdevError::policy_refusal(
++                        "needs_justification",
++                        "--override requires a non-empty --justification",
++                    );
++                    let _ = output.emit_error(&err);
++                    return Err(ExitCode::PolicyRefusal);
++                }
++
++                Ok(GovernanceOutcome::Proceed {
++                    justification: Some(trimmed_just.to_string()),
++                    override_decision: Some((
++                        "lease_override".to_string(),
++                        trimmed_just.to_string(),
++                    )),
++                })
++            }
++            _ => {
++                println!("Aborted.");
++                Ok(GovernanceOutcome::Aborted)
++            }
++        }
++    }
++}
++
++
+ /// Argument parsing, id allocation, author resolution and output rendering — the write itself
+ /// belongs to `qdev_core::create_story`, which takes the advisory lock, validates the generated
+ /// frontmatter against the story schema, writes atomically and syncs the cache. Per AD-2 the CLI
+@@ -897,6 +1216,7 @@ fn handle_update(
+     cli: &Cli,
+     output: &OutputEmitter,
+     current_dir: &std::path::Path,
++    interactivity: Interactivity,
+ ) -> ExitCode {
+     let root = qdev_core::find_workspace_root(current_dir);
+ 
+@@ -1129,6 +1449,26 @@ fn handle_update(
+             return e.exit_code();
+         }
+     };
++ 
++    let mut if_version = update_args.if_version;
++    let (_gov_just, override_decision) = match check_governance_gate(
++        &root,
++        &entity_id,
++        entity_kind,
++        &author,
++        annotated_config,
++        interactivity,
++        cli,
++        output,
++        &mut if_version,
++    ) {
++        Ok(GovernanceOutcome::Proceed {
++            justification,
++            override_decision,
++        }) => (justification, override_decision),
++        Ok(GovernanceOutcome::Aborted) => return ExitCode::Success,
++        Err(code) => return code,
++    };
+ 
+     // Resolve section file path if provided
+     let section_file = update_args.file.as_ref().map(|f| {
+@@ -1141,17 +1481,17 @@ fn handle_update(
+     });
+ 
+     let update_opts = qdev_core::EntityUpdateOptions {
+-        workspace_root: root,
++        workspace_root: root.clone(),
+         storage: Some(annotated_config.config.storage.clone()),
+         entity_kind,
+-        entity_id,
++        entity_id: entity_id.clone(),
+         status: update_args.status.clone(),
+         title: update_args.title.clone(),
+         custom_fields,
+         section: update_args.section.clone(),
+         section_file,
+-        if_version: update_args.if_version,
+-        author,
++        if_version,
++        author: author.clone(),
+     };
+ 
+     let res = match qdev_core::apply_entity_update(&update_opts) {
+@@ -1162,6 +1502,21 @@ fn handle_update(
+         }
+     };
+ 
++    if let Some((dec_type, dec_just)) = override_decision {
++        if let Err(e) = qdev_core::create_governance_override_decision(
++            &root,
++            Some(&annotated_config.config.storage),
++            &entity_id,
++            &dec_type,
++            &dec_just,
++            &author,
++            None,
++        ) {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    }
++
+     if cli.json {
+         let envelope = JsonEnvelope::new(res.updated_frontmatter);
+         if let Err(e) = output.emit_envelope(&envelope) {
+@@ -1188,6 +1543,7 @@ fn handle_transition(
+     cli: &Cli,
+     output: &OutputEmitter,
+     current_dir: &std::path::Path,
++    interactivity: Interactivity,
+ ) -> ExitCode {
+     let root = qdev_core::find_workspace_root(current_dir);
+ 
+@@ -1221,15 +1577,37 @@ fn handle_transition(
+         }
+     };
+ 
++    let mut if_version = transition_args.if_version;
++    let (gov_just, override_decision) = match check_governance_gate(
++        &root,
++        &transition_args.id,
++        Some(qdev_core::EntityKind::Story),
++        &author,
++        annotated_config,
++        interactivity,
++        cli,
++        output,
++        &mut if_version,
++    ) {
++        Ok(GovernanceOutcome::Proceed {
++            justification,
++            override_decision,
++        }) => (justification, override_decision),
++        Ok(GovernanceOutcome::Aborted) => return ExitCode::Success,
++        Err(code) => return code,
++    };
++
++    let effective_justification = cli.justification.clone().or(gov_just);
++
+     let options = qdev_core::TransitionOptions {
+-        workspace_root: root,
++        workspace_root: root.clone(),
+         storage: Some(annotated_config.config.storage.clone()),
+         entity_kind: transition_args.kind.clone(),
+         story_id: transition_args.id.clone(),
+         target_status: transition_args.target_status.clone(),
+-        justification: transition_args.justification.clone(),
+-        author,
+-        if_version: transition_args.if_version,
++        justification: effective_justification,
++        author: author.clone(),
++        if_version,
+     };
+ 
+     let engine = qdev_core::TransitionEngine::new();
+@@ -1241,6 +1619,21 @@ fn handle_transition(
+         }
+     };
+ 
++    if let Some((dec_type, dec_just)) = override_decision {
++        if let Err(e) = qdev_core::create_governance_override_decision(
++            &root,
++            Some(&annotated_config.config.storage),
++            &transition_args.id,
++            &dec_type,
++            &dec_just,
++            &author,
++            None,
++        ) {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    }
++
+     if cli.json {
+         let envelope = JsonEnvelope::new(res);
+         if let Err(e) = output.emit_envelope(&envelope) {
+@@ -1791,6 +2184,7 @@ fn handle_relate(
+     cli: &Cli,
+     output: &OutputEmitter,
+     current_dir: &std::path::Path,
++    interactivity: Interactivity,
+ ) -> ExitCode {
+     let root = qdev_core::find_workspace_root(current_dir);
+ 
+@@ -1865,8 +2259,28 @@ fn handle_relate(
+         }
+     };
+ 
++    let mut if_version = relate_args.if_version;
++    let (_gov_just, override_decision) = match check_governance_gate(
++        &root,
++        &source.id,
++        Some(source.kind),
++        &author,
++        annotated_config,
++        interactivity,
++        cli,
++        output,
++        &mut if_version,
++    ) {
++        Ok(GovernanceOutcome::Proceed {
++            justification,
++            override_decision,
++        }) => (justification, override_decision),
++        Ok(GovernanceOutcome::Aborted) => return ExitCode::Success,
++        Err(code) => return code,
++    };
++
+     let opts = qdev_core::RelationChangeOptions {
+-        workspace_root: root,
++        workspace_root: root.clone(),
+         storage: Some(annotated_config.config.storage.clone()),
+         entity_kind: None,
+         // Both ids as the cache stores them, which is what the kind-pair and cycle pre-checks
+@@ -1877,8 +2291,8 @@ fn handle_relate(
+         relation: relate_args.relation.clone(),
+         target_id: target_id.clone(),
+         add: true,
+-        if_version: relate_args.if_version,
+-        author,
++        if_version,
++        author: author.clone(),
+     };
+ 
+     let res = match qdev_core::apply_relation_change(&opts) {
+@@ -1889,6 +2303,21 @@ fn handle_relate(
+         }
+     };
+ 
++    if let Some((dec_type, dec_just)) = override_decision {
++        if let Err(e) = qdev_core::create_governance_override_decision(
++            &root,
++            Some(&annotated_config.config.storage),
++            &source.id,
++            &dec_type,
++            &dec_just,
++            &author,
++            None,
++        ) {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    }
++
+     if cli.json {
+         let envelope = JsonEnvelope::new(RelatePayload {
+             id: res.id.clone(),
+@@ -1927,6 +2356,7 @@ fn handle_unrelate(
+     cli: &Cli,
+     output: &OutputEmitter,
+     current_dir: &std::path::Path,
++    interactivity: Interactivity,
+ ) -> ExitCode {
+     let root = qdev_core::find_workspace_root(current_dir);
+ 
+@@ -1950,16 +2380,36 @@ fn handle_unrelate(
+         }
+     };
+ 
++    let mut if_version = unrelate_args.if_version;
++    let (_gov_just, override_decision) = match check_governance_gate(
++        &root,
++        &unrelate_args.source_id,
++        None,
++        &author,
++        annotated_config,
++        interactivity,
++        cli,
++        output,
++        &mut if_version,
++    ) {
++        Ok(GovernanceOutcome::Proceed {
++            justification,
++            override_decision,
++        }) => (justification, override_decision),
++        Ok(GovernanceOutcome::Aborted) => return ExitCode::Success,
++        Err(code) => return code,
++    };
++
+     let opts = qdev_core::RelationChangeOptions {
+-        workspace_root: root,
++        workspace_root: root.clone(),
+         storage: Some(annotated_config.config.storage.clone()),
+         entity_kind: None,
+         entity_id: unrelate_args.source_id.clone(),
+         relation: unrelate_args.relation.clone(),
+         target_id: unrelate_args.target_id.clone(),
+         add: false,
+-        if_version: unrelate_args.if_version,
+-        author,
++        if_version,
++        author: author.clone(),
+     };
+ 
+     // Unrelating an absent entry, with a relation name that exists, is an idempotent no-op
+@@ -1974,6 +2424,21 @@ fn handle_unrelate(
+         }
+     };
+ 
++    if let Some((dec_type, dec_just)) = override_decision {
++        if let Err(e) = qdev_core::create_governance_override_decision(
++            &root,
++            Some(&annotated_config.config.storage),
++            &unrelate_args.source_id,
++            &dec_type,
++            &dec_just,
++            &author,
++            None,
++        ) {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    }
++
+     if cli.json {
+         let envelope = JsonEnvelope::new(RelatePayload {
+             id: res.id.clone(),
+@@ -3585,7 +4050,7 @@ fn handle_release(
+         &story_id,
+         &author,
+         args.force,
+-        args.justification.as_deref(),
++        cli.justification.as_deref(),
+         Some(&annotated_config.config.storage),
+         opt_store.as_ref().map(|s| s as &dyn qdev_core::Store),
+     ) {
+diff --git a/crates/qdev-cli/tests/scope_cli_tests.rs b/crates/qdev-cli/tests/scope_cli_tests.rs
+new file mode 100644
+index 0000000..a648396
+--- /dev/null
++++ b/crates/qdev-cli/tests/scope_cli_tests.rs
+@@ -0,0 +1,815 @@
++//! CLI integration tests for scope enforcement and cross-team overrides (Story 2.4).
++
++use std::fs;
++use std::path::Path;
++
++use assert_cmd::Command;
++use serde_json::Value;
++use tempfile::TempDir;
++
++fn setup_workspace(root: &Path) {
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "init",
++            "--non-interactive",
++            "--name",
++            "TestProject",
++            "--developer",
++            "sally",
++            "--team",
++            "ui-shell",
++        ])
++        .assert()
++        .success();
++
++    // Update config to declare teams
++    let config_path = root.join("qdev.toml");
++    let mut config_content = fs::read_to_string(&config_path).unwrap();
++    config_content.push_str("core-platform = [\"alice\", \"bob\"]\n");
++    fs::write(&config_path, config_content).unwrap();
++
++    // Rebuild cache
++    let mut sync_cmd = Command::cargo_bin("qdev").unwrap();
++    sync_cmd
++        .current_dir(root)
++        .args(["sync", "--rebuild"])
++        .assert()
++        .success();
++}
++
++fn write_story(root: &Path, id: &str, title: &str, status: &str, owners: &[&str]) {
++    let stories_dir = root.join("docs/specs/stories");
++    fs::create_dir_all(&stories_dir).unwrap();
++    let owners_yaml = if owners.is_empty() {
++        String::new()
++    } else {
++        format!(
++            "owners:\n{}",
++            owners
++                .iter()
++                .map(|o| format!("  - \"{}\"", o))
++                .collect::<Vec<_>>()
++                .join("\n")
++        )
++    };
++
++    fs::write(
++        stories_dir.join(format!("{}.md", id)),
++        format!(
++            r#"---
++id: {id}
++title: "{title}"
++status: {status}
++version: 1
++created_by:
++  type: human
++  id: sally
++updated_by:
++  type: human
++  id: sally
++{owners_yaml}
++---
++
++## Acceptance Criteria
++- AC1.
++"#
++        ),
++    )
++    .unwrap();
++}
++
++fn write_epic(root: &Path, id: &str, title: &str, owners: &[&str]) {
++    let epics_dir = root.join("docs/specs/epics");
++    fs::create_dir_all(&epics_dir).unwrap();
++    let owners_yaml = if owners.is_empty() {
++        String::new()
++    } else {
++        format!(
++            "owners:\n{}",
++            owners
++                .iter()
++                .map(|o| format!("  - \"{}\"", o))
++                .collect::<Vec<_>>()
++                .join("\n")
++        )
++    };
++
++    fs::write(
++        epics_dir.join(format!("{}.md", id)),
++        format!(
++            r#"---
++id: {id}
++title: "{title}"
++status: in-progress
++version: 1
++created_by:
++  type: human
++  id: alice
++updated_by:
++  type: human
++  id: alice
++{owners_yaml}
++---
++
++# Epic
++"#
++        ),
++    )
++    .unwrap();
++}
++
++#[test]
++fn test_cli_update_in_lease_owned_story_succeeds_without_override() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++
++    // Claim lease on E12S4
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    // Update E12S4 while holding lease
++    let mut update_cmd = Command::cargo_bin("qdev").unwrap();
++    update_cmd
++        .current_dir(root)
++        .args(["update", "E12S4", "--title", "Updated Title"])
++        .assert()
++        .success()
++        .code(0);
++
++    // Verify file updated
++    let content = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
++    assert!(
++        content.contains("title: Updated Title")
++            || content.contains("title: \"Updated Title\"")
++    );
++
++    // Verify no DEC files created
++    let dec_files: Vec<_> = fs::read_dir(root.join("docs/state/decisions"))
++        .unwrap()
++        .filter_map(|e| e.ok())
++        .collect();
++    assert!(dec_files.is_empty());
++}
++
++#[test]
++fn test_cli_update_out_of_lease_and_cross_team_non_interactive_refusal() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++    write_epic(root, "E12", "Epic 12", &["team:core-platform"]);
++
++    // Claim lease on E12S4
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    // Attempting update on E12 non-interactively must exit 3 (policy_refusal)
++    let mut update_cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = update_cmd
++        .current_dir(root)
++        .args(["update", "E12", "--title", "New Title", "--non-interactive"])
++        .assert()
++        .failure()
++        .code(3);
++
++    let output = assert.get_output();
++    let stderr = std::str::from_utf8(&output.stderr).unwrap();
++    assert!(stderr.contains("--override"));
++    assert!(stderr.contains("--justification"));
++}
++
++#[test]
++fn test_cli_update_non_interactive_json_refusal() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++    write_epic(root, "E12", "Epic 12", &["team:core-platform"]);
++
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    let mut update_cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = update_cmd
++        .current_dir(root)
++        .args([
++            "update",
++            "E12",
++            "--title",
++            "New Title",
++            "--non-interactive",
++            "--json",
++        ])
++        .assert()
++        .failure()
++        .code(3);
++
++    let output = assert.get_output();
++    let stdout = std::str::from_utf8(&output.stdout).unwrap();
++    let parsed: Value = serde_json::from_str(stdout).unwrap();
++    assert_eq!(parsed["error"]["code"], "needs_confirmation");
++    let msg = parsed["error"]["message"].as_str().unwrap();
++    assert!(msg.contains("--override"));
++    assert!(msg.contains("--justification"));
++}
++
++#[test]
++fn test_cli_update_with_override_and_justification_creates_cross_team_dec() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++    write_epic(root, "E12", "Epic 12", &["team:core-platform"]);
++
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    let mut update_cmd = Command::cargo_bin("qdev").unwrap();
++    update_cmd
++        .current_dir(root)
++        .args([
++            "update",
++            "E12",
++            "--title",
++            "Updated Epic Title",
++            "--override",
++            "--justification",
++            "Architect signed off on cross-team dependency",
++            "--non-interactive",
++        ])
++        .assert()
++        .success()
++        .code(0);
++
++    // Verify epic updated
++    let content = fs::read_to_string(root.join("docs/specs/epics/E12.md")).unwrap();
++    assert!(
++        content.contains("title: Updated Epic Title")
++            || content.contains("title: \"Updated Epic Title\"")
++    );
++
++    // Verify DEC record created
++    let dec_files: Vec<_> = fs::read_dir(root.join("docs/state/decisions"))
++        .unwrap()
++        .filter_map(|e| e.ok())
++        .collect();
++    assert_eq!(dec_files.len(), 1);
++    let dec_content = fs::read_to_string(dec_files[0].path()).unwrap();
++    assert!(dec_content.contains("decision_type: cross_team_override"));
++    assert!(dec_content.contains("subject_id: E12"));
++    assert!(dec_content.contains("ruling: Architect signed off on cross-team dependency"));
++}
++
++#[test]
++fn test_cli_update_with_override_empty_justification_refusal() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++    write_epic(root, "E12", "Epic 12", &["team:core-platform"]);
++
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    let mut update_cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = update_cmd
++        .current_dir(root)
++        .args([
++            "update",
++            "E12",
++            "--title",
++            "New Title",
++            "--override",
++            "--justification",
++            "   ",
++            "--non-interactive",
++        ])
++        .assert()
++        .failure()
++        .code(3);
++
++    let output = assert.get_output();
++    let stderr = std::str::from_utf8(&output.stderr).unwrap();
++    assert!(stderr.contains("needs_justification"));
++}
++
++#[test]
++fn test_cli_update_out_of_lease_same_team_creates_lease_override_dec() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++    write_epic(root, "E12", "Epic 12", &["team:ui-shell"]);
++
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    let mut update_cmd = Command::cargo_bin("qdev").unwrap();
++    update_cmd
++        .current_dir(root)
++        .args([
++            "update",
++            "E12",
++            "--title",
++            "Same Team Updated Epic",
++            "--override",
++            "--justification",
++            "Lead signoff for epic change during story work",
++            "--non-interactive",
++        ])
++        .assert()
++        .success()
++        .code(0);
++
++    let dec_files: Vec<_> = fs::read_dir(root.join("docs/state/decisions"))
++        .unwrap()
++        .filter_map(|e| e.ok())
++        .collect();
++    assert_eq!(dec_files.len(), 1);
++    let dec_content = fs::read_to_string(dec_files[0].path()).unwrap();
++    assert!(dec_content.contains("decision_type: lease_override"));
++    assert!(dec_content.contains("subject_id: E12"));
++}
++
++#[test]
++fn test_cli_transition_scope_enforcement() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++    write_story(root, "E12S5", "Story 5", "ready", &["team:ui-shell"]);
++
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    // Transitioning sibling story E12S5 refuses without override
++    let mut trans_cmd = Command::cargo_bin("qdev").unwrap();
++    trans_cmd
++        .current_dir(root)
++        .args(["transition", "story", "E12S5", "in-progress", "--non-interactive"])
++        .assert()
++        .failure()
++        .code(3);
++
++    // With override and justification, succeeds and logs DEC
++    let mut trans_ok = Command::cargo_bin("qdev").unwrap();
++    trans_ok
++        .current_dir(root)
++        .args([
++            "transition",
++            "story",
++            "E12S5",
++            "in-progress",
++            "--override",
++            "--justification",
++            "Emergency transition approved by PM",
++            "--non-interactive",
++        ])
++        .assert()
++        .success()
++        .code(0);
++
++    let dec_files: Vec<_> = fs::read_dir(root.join("docs/state/decisions"))
++        .unwrap()
++        .filter_map(|e| e.ok())
++        .collect();
++    assert_eq!(dec_files.len(), 1);
++    let dec_content = fs::read_to_string(dec_files[0].path()).unwrap();
++    assert!(dec_content.contains("decision_type: lease_override"));
++    assert!(dec_content.contains("subject_id: E12S5"));
++}
++
++#[test]
++fn test_cli_relate_scope_enforcement() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++    write_epic(root, "E12", "Epic 12", &["team:core-platform"]);
++    write_epic(root, "E13", "Epic 13", &["team:core-platform"]);
++
++    // Sync cache so relate knows about entities
++    let mut sync_cmd = Command::cargo_bin("qdev").unwrap();
++    sync_cmd.current_dir(root).args(["sync", "--rebuild"]).assert().success();
++
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    // Relate on out-of-lease & cross-team entity E12 refuses
++    let mut relate_cmd = Command::cargo_bin("qdev").unwrap();
++    relate_cmd
++        .current_dir(root)
++        .args(["relate", "E12", "supersedes", "E13", "--non-interactive"])
++        .assert()
++        .failure()
++        .code(3);
++
++    // Relate with override succeeds
++    let mut relate_ok = Command::cargo_bin("qdev").unwrap();
++    relate_ok
++        .current_dir(root)
++        .args([
++            "relate",
++            "E12",
++            "supersedes",
++            "E13",
++            "--override",
++            "--justification",
++            "Cross-epic link approved",
++            "--non-interactive",
++        ])
++        .assert()
++        .success()
++        .code(0);
++
++    let dec_files: Vec<_> = fs::read_dir(root.join("docs/state/decisions"))
++        .unwrap()
++        .filter_map(|e| e.ok())
++        .collect();
++    assert_eq!(dec_files.len(), 1);
++}
++
++#[test]
++fn test_cli_cross_team_interactive_option_1_override() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++    write_epic(root, "E12", "Epic 12", &["team:core-platform"]);
++
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .env("_QDEV_MOCK_TTY", "1")
++        .args(["update", "E12", "--title", "Interactive Updated Epic"])
++        .write_stdin("1\nArchitect approval\n")
++        .assert()
++        .success()
++        .code(0);
++
++    // Verify epic updated
++    let content = fs::read_to_string(root.join("docs/specs/epics/E12.md")).unwrap();
++    assert!(
++        content.contains("title: Interactive Updated Epic")
++            || content.contains("title: \"Interactive Updated Epic\"")
++    );
++
++    // Verify DEC record
++    let dec_files: Vec<_> = fs::read_dir(root.join("docs/state/decisions"))
++        .unwrap()
++        .filter_map(|e| e.ok())
++        .collect();
++    assert_eq!(dec_files.len(), 1);
++    let dec_content = fs::read_to_string(dec_files[0].path()).unwrap();
++    assert!(dec_content.contains("decision_type: cross_team_override"));
++    assert!(dec_content.contains("ruling: Architect approval"));
++}
++
++#[test]
++fn test_cli_cross_team_interactive_option_2_add_team_to_owners() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++    write_epic(root, "E12", "Epic 12", &["team:core-platform"]);
++
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .env("_QDEV_MOCK_TTY", "1")
++        .args(["update", "E12", "--title", "Co-owned Epic Title"])
++        .write_stdin("2\nTransferring component\n")
++        .assert()
++        .success()
++        .code(0);
++
++    // Verify epic updated and owner appended
++    let content = fs::read_to_string(root.join("docs/specs/epics/E12.md")).unwrap();
++    assert!(
++        content.contains("title: Co-owned Epic Title")
++            || content.contains("title: \"Co-owned Epic Title\"")
++    );
++    assert!(content.contains("team:ui-shell"));
++
++    // Verify DEC record created
++    let dec_files: Vec<_> = fs::read_dir(root.join("docs/state/decisions"))
++        .unwrap()
++        .filter_map(|e| e.ok())
++        .collect();
++    assert_eq!(dec_files.len(), 1);
++    let dec_content = fs::read_to_string(dec_files[0].path()).unwrap();
++    assert!(dec_content.contains("decision_type: cross_team_override"));
++    assert!(dec_content.contains("ruling: Transferring component"));
++}
++
++#[test]
++fn test_cli_cross_team_interactive_option_3_abort() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++    write_epic(root, "E12", "Epic 12", &["team:core-platform"]);
++
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .env("_QDEV_MOCK_TTY", "1")
++        .args(["update", "E12", "--title", "Should Not Change"])
++        .write_stdin("3\n")
++        .assert()
++        .success()
++        .code(0);
++
++    let output = assert.get_output();
++    let stdout = std::str::from_utf8(&output.stdout).unwrap();
++    assert!(stdout.contains("Aborted."));
++
++    // Verify epic NOT updated
++    let content = fs::read_to_string(root.join("docs/specs/epics/E12.md")).unwrap();
++    assert!(!content.contains("Should Not Change"));
++
++    // Verify NO DEC record created
++    let dec_files: Vec<_> = fs::read_dir(root.join("docs/state/decisions"))
++        .unwrap()
++        .filter_map(|e| e.ok())
++        .collect();
++    assert!(dec_files.is_empty());
++}
++
++#[test]
++fn test_cli_unrelate_scope_enforcement() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++    write_epic(root, "E12", "Epic 12", &["team:core-platform"]);
++    write_epic(root, "E13", "Epic 13", &["team:core-platform"]);
++
++    // First, relate E12 supersedes E13 with override
++    let mut sync_cmd = Command::cargo_bin("qdev").unwrap();
++    sync_cmd.current_dir(root).args(["sync", "--rebuild"]).assert().success();
++
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    let mut relate_cmd = Command::cargo_bin("qdev").unwrap();
++    relate_cmd
++        .current_dir(root)
++        .args([
++            "relate",
++            "E12",
++            "supersedes",
++            "E13",
++            "--override",
++            "--justification",
++            "Setup relation",
++            "--non-interactive",
++        ])
++        .assert()
++        .success();
++
++    // Now, attempting unrelate on out-of-lease & cross-team entity E12 without override must refuse
++    let mut unrelate_cmd = Command::cargo_bin("qdev").unwrap();
++    unrelate_cmd
++        .current_dir(root)
++        .args(["unrelate", "E12", "supersedes", "E13", "--non-interactive"])
++        .assert()
++        .failure()
++        .code(3);
++
++    // Unrelate with override succeeds
++    let mut unrelate_ok = Command::cargo_bin("qdev").unwrap();
++    unrelate_ok
++        .current_dir(root)
++        .args([
++            "unrelate",
++            "E12",
++            "supersedes",
++            "E13",
++            "--override",
++            "--justification",
++            "Unrelate approved",
++            "--non-interactive",
++        ])
++        .assert()
++        .success()
++        .code(0);
++
++    // Verify 2 DEC files created (one for relate, one for unrelate)
++    let dec_files: Vec<_> = fs::read_dir(root.join("docs/state/decisions"))
++        .unwrap()
++        .filter_map(|e| e.ok())
++        .collect();
++    assert_eq!(dec_files.len(), 2);
++
++    // Verify E12 relations no longer contain supersedes
++    let e12_content = fs::read_to_string(root.join("docs/specs/epics/E12.md")).unwrap();
++    assert!(!e12_content.contains("supersedes"));
++}
++
++#[test]
++fn test_cli_exempt_decision_entity() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++
++    // Create a DEC file
++    let dec_dir = root.join("docs/state/decisions");
++    fs::create_dir_all(&dec_dir).unwrap();
++    fs::write(
++        dec_dir.join("DEC-01a2.md"),
++        r#"---
++id: DEC-01a2
++title: "Exempt Decision"
++status: active
++version: 1
++created_by:
++  type: human
++  id: sally
++updated_by:
++  type: human
++  id: sally
++decision_type: human_ruling
++ruling: Original ruling
++context: Original context
++---
++
++# Decision
++"#,
++    )
++    .unwrap();
++
++    let mut sync_cmd = Command::cargo_bin("qdev").unwrap();
++    sync_cmd.current_dir(root).args(["sync", "--rebuild"]).assert().success();
++
++    // Claim lease on E12S4
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    // Updating DEC-01a2 is exempt from lease override and must succeed without --override
++    let mut update_cmd = Command::cargo_bin("qdev").unwrap();
++    update_cmd
++        .current_dir(root)
++        .args([
++            "update",
++            "DEC-01a2",
++            "--title",
++            "Updated Decision Title",
++            "--non-interactive",
++        ])
++        .assert()
++        .success()
++        .code(0);
++
++    let content = fs::read_to_string(dec_dir.join("DEC-01a2.md")).unwrap();
++    assert!(
++        content.contains("title: Updated Decision Title")
++            || content.contains("title: \"Updated Decision Title\"")
++    );
++}
++
++#[test]
++fn test_cli_out_of_lease_same_team_interactive_option_1_override() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++    write_epic(root, "E12", "Epic 12", &["team:ui-shell"]);
++
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .env("_QDEV_MOCK_TTY", "1")
++        .args(["update", "E12", "--title", "Interactive Same Team Epic"])
++        .write_stdin("1\nTeam approved epic change\n")
++        .assert()
++        .success()
++        .code(0);
++
++    // Verify epic updated
++    let content = fs::read_to_string(root.join("docs/specs/epics/E12.md")).unwrap();
++    assert!(
++        content.contains("title: Interactive Same Team Epic")
++            || content.contains("title: \"Interactive Same Team Epic\"")
++    );
++
++    // Verify DEC record logged with lease_override
++    let dec_files: Vec<_> = fs::read_dir(root.join("docs/state/decisions"))
++        .unwrap()
++        .filter_map(|e| e.ok())
++        .collect();
++    assert_eq!(dec_files.len(), 1);
++    let dec_content = fs::read_to_string(dec_files[0].path()).unwrap();
++    assert!(dec_content.contains("decision_type: lease_override"));
++    assert!(dec_content.contains("ruling: Team approved epic change"));
++}
++
++#[test]
++fn test_cli_out_of_lease_same_team_interactive_option_3_abort() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++    write_epic(root, "E12", "Epic 12", &["team:ui-shell"]);
++
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .env("_QDEV_MOCK_TTY", "1")
++        .args(["update", "E12", "--title", "Should Not Change Same Team"])
++        .write_stdin("3\n")
++        .assert()
++        .success()
++        .code(0);
++
++    let output = assert.get_output();
++    let stdout = std::str::from_utf8(&output.stdout).unwrap();
++    assert!(stdout.contains("Aborted."));
++
++    // Verify epic NOT updated
++    let content = fs::read_to_string(root.join("docs/specs/epics/E12.md")).unwrap();
++    assert!(!content.contains("Should Not Change Same Team"));
++
++    // Verify NO DEC record created
++    let dec_files: Vec<_> = fs::read_dir(root.join("docs/state/decisions"))
++        .unwrap()
++        .filter_map(|e| e.ok())
++        .collect();
++    assert!(dec_files.is_empty());
++}
+diff --git a/crates/qdev-core/src/governance.rs b/crates/qdev-core/src/governance.rs
+new file mode 100644
+index 0000000..b3f4512
+--- /dev/null
++++ b/crates/qdev-core/src/governance.rs
+@@ -0,0 +1,681 @@
++use std::collections::HashSet;
++use std::fs;
++use std::path::Path;
++
++use serde::{Deserialize, Serialize};
++
++use crate::config::{Config, StorageConfig};
++use crate::errors::QdevError;
++use crate::id::{allocate_decision_id_in_with_rng, Identifier};
++use crate::lease::{find_workspace_leases, get_lease, StoryLease};
++use crate::schema::{extract_frontmatter, validate_frontmatter, validate_value_detailed, EntityKind};
++use crate::store::{DecisionRecord, EntityRecord, SqliteStore, Store};
++use crate::write::{
++    acquire_workspace_write_lock, canonical_file_name, current_iso8601, directory_for_kind,
++    kind_for_write, patch_frontmatter, resolve_entity_file, sha256_digest, story_detail_fields,
++    upsert_cache_and_mark_dirty, workspace_rel_path, write_file_atomic, Author,
++    FrontmatterPatchOptions,
++};
++
++/// Scope and governance classification result for an entity mutation.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct ScopeClassification {
++    pub is_out_of_lease: bool,
++    pub is_cross_team: bool,
++    pub active_lease: Option<StoryLease>,
++    pub target_owners: Vec<String>,
++    pub user_teams: Vec<String>,
++    pub is_exempt: bool,
++}
++
++/// Normalizes an owner or team string by trimming and stripping the "team:" prefix case-insensitively.
++pub fn normalize_team_name(team: &str) -> String {
++    let trimmed = team.trim();
++    if trimmed.len() >= 5 && trimmed[..5].eq_ignore_ascii_case("team:") {
++        trimmed[5..].trim().to_string()
++    } else {
++        trimmed.to_string()
++    }
++}
++
++/// Normalizes a team name to canonical "team:<name>" form.
++pub fn canonical_team_string(team: &str) -> String {
++    let norm = normalize_team_name(team);
++    format!("team:{}", norm)
++}
++
++/// Extracts declared owners from an entity's SQLite record or frontmatter file.
++/// If target_id is a child constraint (e.g. E12S4/NG-1) with no direct owners,
++/// falls back to its parent entity's owners.
++pub fn extract_entity_owners(
++    workspace_root: &Path,
++    target_id: &str,
++    storage: Option<&StorageConfig>,
++    opt_store: Option<&dyn Store>,
++) -> Vec<String> {
++    if let Some(store) = opt_store {
++        if let Ok(Some(record)) = store.get_entity(target_id) {
++            if !record.stale {
++                if let Some(ref owners_json) = record.owners {
++                    if let Ok(owners) = serde_json::from_str::<Vec<String>>(owners_json) {
++                        if !owners.is_empty() {
++                            return owners;
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    if let Ok((_kind, _id, file_path)) =
++        resolve_entity_file(workspace_root, None, target_id, storage)
++    {
++        if let Ok(content) = fs::read_to_string(&file_path) {
++            if let Ok(frontmatter) = extract_frontmatter(&content) {
++                if let Some(owners_val) = frontmatter.get("owners") {
++                    if let Some(arr) = owners_val.as_array() {
++                        let owners: Vec<String> = arr
++                            .iter()
++                            .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
++                            .filter(|s| !s.is_empty())
++                            .collect();
++                        if !owners.is_empty() {
++                            return owners;
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    // Fallback: child entity inherits parent owners
++    if target_id.contains('/') {
++        let parent_id = target_id.split('/').next().unwrap_or(target_id);
++        if parent_id != target_id {
++            return extract_entity_owners(workspace_root, parent_id, storage, opt_store);
++        }
++    }
++
++    Vec::new()
++}
++
++/// Resolves effective teams for the current user combining identity teams and project teams mapping.
++pub fn resolve_user_teams(
++    author: &Author,
++    config: &Config,
++    workspace_root: Option<&Path>,
++) -> Vec<String> {
++    let mut teams = Vec::new();
++    let mut seen = HashSet::new();
++
++    // 1. Direct identity teams
++    for t in &config.identity.teams {
++        let norm = normalize_team_name(t);
++        if !norm.is_empty() && seen.insert(norm.clone()) {
++            teams.push(norm);
++        }
++    }
++
++    // 2. Candidate user IDs
++    let mut user_ids = Vec::new();
++    if !author.id.trim().is_empty() {
++        user_ids.push(author.id.trim().to_string());
++    }
++    if !config.identity.developer_id.trim().is_empty() {
++        user_ids.push(config.identity.developer_id.trim().to_string());
++    }
++    if let Some(root) = workspace_root {
++        if let Some(email) = crate::config::resolve_git_email(Some(root)) {
++            let email_trimmed = email.trim().to_string();
++            if !email_trimmed.is_empty() {
++                user_ids.push(email_trimmed);
++            }
++        }
++    }
++
++    // 3. Match user IDs in config [teams] mapping
++    for (team_name, members) in &config.teams.teams {
++        let norm = normalize_team_name(team_name);
++        let is_member = members.iter().any(|m| {
++            let m_trimmed = m.trim();
++            user_ids
++                .iter()
++                .any(|uid| uid.eq_ignore_ascii_case(m_trimmed))
++        });
++        if is_member && seen.insert(norm.clone()) {
++            teams.push(norm);
++        }
++    }
++
++    teams
++}
++
++/// Checks whether the author/user or any of their teams match the entity's owners.
++pub fn is_user_owner(
++    author: &Author,
++    config: &Config,
++    owners: &[String],
++    workspace_root: Option<&Path>,
++) -> bool {
++    if owners.is_empty() {
++        return true;
++    }
++
++    let mut user_ids = Vec::new();
++    if !author.id.trim().is_empty() {
++        user_ids.push(author.id.trim().to_string());
++    }
++    if !config.identity.developer_id.trim().is_empty() {
++        user_ids.push(config.identity.developer_id.trim().to_string());
++    }
++    if let Some(root) = workspace_root {
++        if let Some(email) = crate::config::resolve_git_email(Some(root)) {
++            let email_trimmed = email.trim().to_string();
++            if !email_trimmed.is_empty() {
++                user_ids.push(email_trimmed);
++            }
++        }
++    }
++
++    let user_teams = resolve_user_teams(author, config, workspace_root);
++
++    for owner in owners {
++        let owner_trimmed = owner.trim();
++        let owner_norm = normalize_team_name(owner_trimmed);
++
++        // Check user ID match
++        for uid in &user_ids {
++            if uid.eq_ignore_ascii_case(owner_trimmed) || uid.eq_ignore_ascii_case(&owner_norm) {
++                return true;
++            }
++        }
++
++        // Check user team match
++        for team in &user_teams {
++            if team.eq_ignore_ascii_case(&owner_norm) {
++                return true;
++            }
++        }
++    }
++
++    false
++}
++
++/// Checks whether an entity is exempt from lease override restrictions.
++fn is_exempt_from_lease(
++    workspace_root: &Path,
++    target_id: &str,
++    target_kind: Option<EntityKind>,
++    workspace_leases: &[StoryLease],
++    storage: Option<&StorageConfig>,
++    opt_store: Option<&dyn Store>,
++) -> bool {
++    // 1. Decisions are always exempt from lease overrides
++    if target_kind == Some(EntityKind::Decision) || target_id.starts_with("DEC-") {
++        return true;
++    }
++
++    if workspace_leases.is_empty() {
++        return false;
++    }
++
++    // 2. Currently leased story itself
++    if workspace_leases.iter().any(|l| l.story_id == target_id) {
++        return true;
++    }
++
++    // 3. Child constraints of the leased story: {story_id}/...
++    if target_id.contains('/') {
++        let parts: Vec<&str> = target_id.split('/').collect();
++        if parts.len() == 2 && workspace_leases.iter().any(|l| l.story_id == parts[0]) {
++            return true;
++        }
++    }
++
++    // 4. Scratchpads of the leased story
++    if target_kind == Some(EntityKind::Scratchpad) {
++        if workspace_leases.iter().any(|l| {
++            l.story_id == target_id
++                || target_id.starts_with(&format!("{}.", l.story_id))
++                || target_id.starts_with(&format!("{}/", l.story_id))
++        }) {
++            return true;
++        }
++    }
++
++    // 5. Deferred work originating from the leased story
++    let is_dw = target_kind == Some(EntityKind::DeferredWork) || target_id.starts_with("DW-");
++    if is_dw {
++        let origin_story_id = if let Some(store) = opt_store {
++            store
++                .get_deferred_work(target_id)
++                .ok()
++                .flatten()
++                .and_then(|dw| dw.origin_story_id)
++        } else {
++            None
++        };
++
++        let origin_story_id = origin_story_id.or_else(|| {
++            if let Ok((_, _, path)) = resolve_entity_file(
++                workspace_root,
++                Some(EntityKind::DeferredWork),
++                target_id,
++                storage,
++            ) {
++                if let Ok(content) = fs::read_to_string(&path) {
++                    if let Ok(fm) = extract_frontmatter(&content) {
++                        return fm
++                            .get("origin_story_id")
++                            .and_then(|v| v.as_str())
++                            .map(str::to_string);
++                    }
++                }
++            }
++            None
++        });
++
++        if let Some(origin) = origin_story_id {
++            if workspace_leases.iter().any(|l| l.story_id == origin) {
++                return true;
++            }
++        }
++    }
++
++    false
++}
++
++/// Classifies an entity mutation against workspace leases and declared team ownership.
++pub fn classify_mutation(
++    workspace_root: &Path,
++    target_id: &str,
++    target_kind: Option<EntityKind>,
++    author: &Author,
++    config: &Config,
++    opt_store: Option<&dyn Store>,
++) -> Result<ScopeClassification, QdevError> {
++    let workspace_leases = find_workspace_leases(workspace_root).unwrap_or_default();
++    let target_owners =
++        extract_entity_owners(workspace_root, target_id, Some(&config.storage), opt_store);
++    let user_teams = resolve_user_teams(author, config, Some(workspace_root));
++
++    let resolved_kind = target_kind.or_else(|| {
++        if let Some(store) = opt_store {
++            if let Ok(Some(record)) = store.get_entity(target_id) {
++                return Some(record.kind);
++            }
++        }
++        if let Ok((k, _, _)) =
++            resolve_entity_file(workspace_root, None, target_id, Some(&config.storage))
++        {
++            return Some(k);
++        }
++        if let Ok(ident) = target_id.parse::<Identifier>() {
++            match ident.kind() {
++                crate::id::IdentifierKind::Prd => Some(EntityKind::Prd),
++                crate::id::IdentifierKind::FunctionalRequirement
++                | crate::id::IdentifierKind::NonFunctionalRequirement => {
++                    Some(EntityKind::Requirement)
++                }
++                crate::id::IdentifierKind::Epic => Some(EntityKind::Epic),
++                crate::id::IdentifierKind::Story => Some(EntityKind::Story),
++                crate::id::IdentifierKind::Adr => Some(EntityKind::Adr),
++                crate::id::IdentifierKind::Hazard => Some(EntityKind::Hazard),
++                crate::id::IdentifierKind::DeferredWork => Some(EntityKind::DeferredWork),
++                crate::id::IdentifierKind::Decision => Some(EntityKind::Decision),
++                crate::id::IdentifierKind::Constraint => None,
++            }
++        } else {
++            None
++        }
++    });
++
++    let is_exempt = is_exempt_from_lease(
++        workspace_root,
++        target_id,
++        resolved_kind,
++        &workspace_leases,
++        Some(&config.storage),
++        opt_store,
++    );
++
++    let (is_out_of_lease, active_lease) = if is_exempt {
++        (false, workspace_leases.first().cloned())
++    } else if !workspace_leases.is_empty() {
++        (true, workspace_leases.first().cloned())
++    } else {
++        let story_to_check = if target_id.contains('/') {
++            target_id.split('/').next().unwrap_or(target_id)
++        } else {
++            target_id
++        };
++        if let Some(other_lease) = get_lease(workspace_root, story_to_check) {
++            (true, Some(other_lease))
++        } else {
++            (false, None)
++        }
++    };
++
++    let is_cross_team = if target_owners.is_empty() {
++        false
++    } else {
++        !is_user_owner(author, config, &target_owners, Some(workspace_root))
++    };
++
++    Ok(ScopeClassification {
++        is_out_of_lease,
++        is_cross_team,
++        active_lease,
++        target_owners,
++        user_teams,
++        is_exempt,
++    })
++}
++
++/// Logs a committed `DEC-` record with `decision_type` (`cross_team_override` or `lease_override`).
++pub fn create_governance_override_decision(
++    workspace_root: &Path,
++    storage: Option<&StorageConfig>,
++    target_id: &str,
++    decision_type: &str,
++    justification: &str,
++    author: &Author,
++    context_override: Option<&str>,
++) -> Result<String, QdevError> {
++    author.validate()?;
++
++    let trimmed_just = justification.trim();
++    if trimmed_just.is_empty() {
++        return Err(QdevError::policy_refusal(
++            "needs_justification",
++            "--override requires a non-empty --justification",
++        ));
++    }
++
++    let _lock_guard = acquire_workspace_write_lock(workspace_root, storage)?;
++
++    let default_storage = StorageConfig::default();
++    let st = storage.unwrap_or(&default_storage);
++    let cache_dir_rel = st.cache_dir.as_str();
++    let cache_db_path = workspace_root.join(cache_dir_rel).join("cache.sqlite");
++    let opt_store = if cache_db_path.is_file() {
++        Some(SqliteStore::open(&cache_db_path)?)
++    } else {
++        None
++    };
++
++    let mut rng = rand::rng();
++    let dec_ident = allocate_decision_id_in_with_rng(
++        workspace_root,
++        st,
++        &mut rng,
++        opt_store.as_ref().map(|s| s as &dyn Store),
++    )?;
++    let dec_id = dec_ident.to_string();
++
++    let title = match decision_type {
++        "cross_team_override" => format!("Cross-team override on {}", target_id),
++        "lease_override" => format!("Lease override on {}", target_id),
++        other => format!("Governance override ({}) on {}", other, target_id),
++    };
++
++    let context_desc = match context_override {
++        Some(c) => c.to_string(),
++        None => match decision_type {
++            "cross_team_override" => format!(
++                "Cross-team mutation on entity {} overridden by {}",
++                target_id, author.id
++            ),
++            "lease_override" => format!(
++                "Out-of-lease mutation on entity {} overridden by {}",
++                target_id, author.id
++            ),
++            other => format!(
++                "Governance override ({}) on entity {} overridden by {}",
++                other, target_id, author.id
++            ),
++        },
++    };
++
++    let timestamp = current_iso8601();
++
++    let frontmatter_json = serde_json::json!({
++        "id": dec_id,
++        "title": title,
++        "status": "active",
++        "version": 1,
++        "created_by": {
++            "type": author.author_type,
++            "id": author.id,
++        },
++        "updated_by": {
++            "type": author.author_type,
++            "id": author.id,
++        },
++        "subject_id": target_id,
++        "decision_type": decision_type,
++        "context": context_desc,
++        "ruling": trimmed_just,
++        "created_at": timestamp,
++    });
++
++    validate_value_detailed(EntityKind::Decision, &frontmatter_json).map_err(|errs| {
++        QdevError::logical_failure(
++            "schema_violation",
++            format!(
++                "Decision frontmatter schema validation failed: {}",
++                errs.iter()
++                    .map(|e| e.to_string())
++                    .collect::<Vec<_>>()
++                    .join("; ")
++            ),
++        )
++    })?;
++
++    let frontmatter_yaml = serde_yaml::to_string(&frontmatter_json).map_err(|e| {
++        QdevError::infrastructure_failure(
++            "serialization_error",
++            format!("Failed to serialize decision frontmatter: {}", e),
++        )
++    })?;
++
++    let dec_content = format!(
++        "---\n{}---\n\n# {}\n\nContext: {}\n\n{}\n",
++        frontmatter_yaml, title, context_desc, trimmed_just
++    );
++
++    let rel_dir = directory_for_kind(storage, EntityKind::Decision);
++    let file_name = canonical_file_name(&dec_id);
++    let dec_file_path = workspace_root.join(&rel_dir).join(&file_name);
++
++    write_file_atomic(&dec_file_path, &dec_content)?;
++
++    if let Some(ref store) = opt_store {
++        let rel_source_path = workspace_rel_path(&dec_file_path, workspace_root);
++        let content_hash = sha256_digest(dec_content.as_bytes());
++
++        let decision_entity_record = EntityRecord {
++            id: dec_id.clone(),
++            kind: EntityKind::Decision,
++            title: Some(title),
++            status: Some("active".to_string()),
++            owners: None,
++            source_path: rel_source_path,
++            content_hash,
++            version: 1,
++            created_by: Some(author.clone()),
++            updated_by: Some(author.clone()),
++            updated_at: timestamp.to_string(),
++            stale: false,
++            epic_id: None,
++            seq: None,
++            appetite: None,
++            safety_class: None,
++            target_modules: None,
++        };
++        upsert_cache_and_mark_dirty(&cache_db_path, &decision_entity_record)?;
++
++        let decision_record = DecisionRecord {
++            id: dec_id.clone(),
++            subject_id: target_id.to_string(),
++            decision_type: Some(decision_type.to_string()),
++            topic: None,
++            context: Some(context_desc),
++            ruling: Some(trimmed_just.to_string()),
++            author_type: Some(author.author_type.clone()),
++            author_id: Some(author.id.clone()),
++            created_at: Some(timestamp.to_string()),
++        };
++        store.upsert_decision(&decision_record)?;
++    }
++
++    Ok(dec_id)
++}
++
++/// Appends a user's team to an entity's `owners` list in frontmatter and updates the cache.
++pub fn add_team_to_entity_owners(
++    workspace_root: &Path,
++    storage: Option<&StorageConfig>,
++    entity_id: &str,
++    team: &str,
++    author: &Author,
++    if_version: Option<u64>,
++) -> Result<Vec<String>, QdevError> {
++    author.validate()?;
++
++    let trimmed_team = team.trim();
++    if trimmed_team.is_empty() {
++        return Err(QdevError::usage_error("Team name cannot be empty"));
++    }
++    let team_to_add = if trimmed_team.len() >= 5 && trimmed_team[..5].eq_ignore_ascii_case("team:")
++    {
++        canonical_team_string(trimmed_team)
++    } else {
++        trimmed_team.to_string()
++    };
++
++    let (kind, id, file_path) =
++        resolve_entity_file(workspace_root, None, entity_id, storage)?;
++
++    let _lock_guard = acquire_workspace_write_lock(workspace_root, storage)?;
++
++    let existing_content = fs::read_to_string(&file_path).map_err(|e| {
++        QdevError::infrastructure_failure(
++            "io_error",
++            format!(
++                "Failed to read entity file '{}': {}",
++                file_path.display(),
++                e
++            ),
++        )
++    })?;
++
++    let frontmatter = extract_frontmatter(&existing_content).map_err(|e| {
++        QdevError::infrastructure_failure(
++            "parse_error",
++            format!("Failed to parse entity frontmatter: {}", e),
++        )
++    })?;
++    let mut current_owners: Vec<String> = frontmatter
++        .get("owners")
++        .and_then(|v| v.as_array())
++        .map(|arr| {
++            arr.iter()
++                .filter_map(|item| item.as_str().map(|s| s.trim().to_string()))
++                .filter(|s| !s.is_empty())
++                .collect()
++        })
++        .unwrap_or_default();
++
++    let team_norm = normalize_team_name(&team_to_add);
++    let already_present = current_owners.iter().any(|o| {
++        let o_norm = normalize_team_name(o);
++        o == &team_to_add || o_norm == team_norm
++    });
++
++    if already_present {
++        return Ok(current_owners);
++    }
++
++    current_owners.push(team_to_add);
++
++    let owners_yaml = serde_yaml::Value::Sequence(
++        current_owners
++            .iter()
++            .map(|s| serde_yaml::Value::String(s.clone()))
++            .collect(),
++    );
++
++    let patch_opts = FrontmatterPatchOptions {
++        status: None,
++        title: None,
++        custom_fields: vec![("owners".to_string(), owners_yaml)],
++        author: Some(author.clone()),
++        if_version,
++    };
++
++    let (patched_content, new_version) = patch_frontmatter(&existing_content, &patch_opts)?;
++
++    let write_kind = kind_for_write(&file_path, &patched_content, kind);
++    validate_frontmatter(write_kind, &patched_content).map_err(|errs| {
++        QdevError::logical_failure(
++            "schema_validation_failed",
++            format!("Updated frontmatter failed schema validation: {:?}", errs),
++        )
++    })?;
++
++    write_file_atomic(&file_path, &patched_content)?;
++
++    // Update cache if database exists
++    let default_storage = StorageConfig::default();
++    let st = storage.unwrap_or(&default_storage);
++    let cache_dir_rel = st.cache_dir.as_str();
++    let cache_db_path = workspace_root.join(cache_dir_rel).join("cache.sqlite");
++    if cache_db_path.is_file() {
++        let content_hash = sha256_digest(patched_content.as_bytes());
++        let updated_frontmatter = extract_frontmatter(&patched_content).map_err(|e| {
++            QdevError::infrastructure_failure(
++                "parse_error",
++                format!("Failed to parse updated frontmatter: {}", e),
++            )
++        })?;
++        let title_val = updated_frontmatter
++            .get("title")
++            .and_then(|v| v.as_str())
++            .map(str::to_string);
++        let status_val = updated_frontmatter
++            .get("status")
++            .and_then(|v| v.as_str())
++            .map(str::to_string);
++        let owners_val = updated_frontmatter.get("owners").map(|v| v.to_string());
++        let c_author = updated_frontmatter
++            .get("created_by")
++            .and_then(|v| serde_json::from_value::<Author>(v.clone()).ok());
++        let u_author = Some(author.clone());
++        let (epic_id, seq, appetite, safety_class, target_modules) =
++            story_detail_fields(write_kind, &id, &updated_frontmatter);
++        let rel_path = workspace_rel_path(&file_path, workspace_root);
++        let record = EntityRecord {
++            id: id.clone(),
++            kind: write_kind,
++            title: title_val,
++            status: status_val,
++            owners: owners_val,
++            source_path: rel_path,
++            content_hash,
++            version: new_version,
++            created_by: c_author,
++            updated_by: u_author,
++            updated_at: current_iso8601(),
++            stale: false,
++            epic_id,
++            seq,
++            appetite,
++            safety_class,
++            target_modules,
++        };
++        upsert_cache_and_mark_dirty(&cache_db_path, &record)?;
++    }
++
++    Ok(current_owners)
++}
+diff --git a/crates/qdev-core/src/lib.rs b/crates/qdev-core/src/lib.rs
+index 5f4ac95..c248f35 100644
+--- a/crates/qdev-core/src/lib.rs
++++ b/crates/qdev-core/src/lib.rs
+@@ -3,6 +3,7 @@ pub mod dag;
+ pub mod doctor;
+ pub mod envelope;
+ pub mod errors;
++pub mod governance;
+ pub mod id;
+ pub mod init;
+ pub mod interactivity;
+@@ -14,6 +15,12 @@ pub mod transition;
+ pub mod validate;
+ pub mod write;
+ 
++pub use governance::{
++    add_team_to_entity_owners, canonical_team_string, classify_mutation,
++    create_governance_override_decision, extract_entity_owners, is_user_owner,
++    normalize_team_name, resolve_user_teams, ScopeClassification,
++};
++
+ pub use lease::{
+     auto_release_lease, claim_story, create_lease_override_decision, discover_git_branch,
+     discover_git_common_dir, find_active_lease, find_workspace_leases, generate_session_token,
+diff --git a/crates/qdev-core/src/write.rs b/crates/qdev-core/src/write.rs
+index 704e90a..67b2c4e 100644
+--- a/crates/qdev-core/src/write.rs
++++ b/crates/qdev-core/src/write.rs
+@@ -1874,7 +1874,7 @@ type StoryDetailFields = (
+     Option<String>,
+ );
+ 
+-fn story_detail_fields(
++pub(crate) fn story_detail_fields(
+     kind: EntityKind,
+     canonical_id: &str,
+     updated_frontmatter: &serde_json::Value,
+diff --git a/crates/qdev-core/tests/architecture_tests.rs b/crates/qdev-core/tests/architecture_tests.rs
+index b46ae25..977568e 100644
+--- a/crates/qdev-core/tests/architecture_tests.rs
++++ b/crates/qdev-core/tests/architecture_tests.rs
+@@ -177,6 +177,12 @@ const IDENTITY_RULE_SITES: &[(&str, &str, &str)] = &[
+         "`create_lease_override_decision` joins the directory the rule gives to the name \
+          `canonical_file_name` gives — the rule spelled once, not a second answer",
+     ),
++    (
++        "qdev-core/src/governance.rs",
++        "let dec_file_path = workspace_root.join(&rel_dir).join(&file_name);",
++        "`create_governance_override_decision` joins the directory the rule gives to the name \
++         `canonical_file_name` gives — the rule spelled once, not a second answer",
++    ),
+ ];
+ 
+ /// The rule's own helpers. A binding assigned from one of them holds an entity file name, so
+diff --git a/crates/qdev-core/tests/governance_tests.rs b/crates/qdev-core/tests/governance_tests.rs
+new file mode 100644
+index 0000000..1c46637
+--- /dev/null
++++ b/crates/qdev-core/tests/governance_tests.rs
+@@ -0,0 +1,548 @@
++use std::fs;
++use std::path::Path;
++
++use qdev_core::config::Config;
++use qdev_core::governance::{
++    add_team_to_entity_owners, canonical_team_string, classify_mutation,
++    create_governance_override_decision, extract_entity_owners, is_user_owner,
++    normalize_team_name, resolve_user_teams,
++};
++use qdev_core::lease::claim_story;
++use qdev_core::schema::EntityKind;
++use qdev_core::store::sqlite::SqliteStore;
++use qdev_core::store::Store;
++use qdev_core::write::Author;
++use tempfile::TempDir;
++
++fn setup_workspace(root: &Path) {
++    let stories_dir = root.join("docs/specs/stories");
++    let epics_dir = root.join("docs/specs/epics");
++    let decisions_dir = root.join("docs/state/decisions");
++    let dw_dir = root.join("docs/state/deferred-work");
++
++    fs::create_dir_all(&stories_dir).unwrap();
++    fs::create_dir_all(&epics_dir).unwrap();
++    fs::create_dir_all(&decisions_dir).unwrap();
++    fs::create_dir_all(&dw_dir).unwrap();
++    fs::create_dir_all(root.join(".qdev/cache")).unwrap();
++
++    fs::write(
++        root.join("qdev.toml"),
++        r#"[project]
++name = "test"
++
++[storage]
++specs_dir = "docs/specs"
++state_dir = "docs/state"
++cache_dir = ".qdev/cache"
++
++[identity]
++developer_id = "sally"
++teams = ["ui-shell"]
++
++[teams]
++ui-shell = ["sally", "sally@example.com"]
++core-platform = ["alice", "bob"]
++"#,
++    )
++    .unwrap();
++
++    let cache_db = root.join(".qdev/cache/cache.sqlite");
++    let conn = qdev_core::rusqlite::Connection::open(&cache_db).unwrap();
++    qdev_core::create_schema(&conn).unwrap();
++    qdev_core::stamp_cache_version(&conn).unwrap();
++}
++
++fn write_story_with_owners(
++    root: &Path,
++    story_id: &str,
++    title: &str,
++    status: &str,
++    owners: &[&str],
++) {
++    let stories_dir = root.join("docs/specs/stories");
++    fs::create_dir_all(&stories_dir).unwrap();
++    let owners_yaml = if owners.is_empty() {
++        String::new()
++    } else {
++        format!(
++            "owners:\n{}",
++            owners
++                .iter()
++                .map(|o| format!("  - \"{}\"", o))
++                .collect::<Vec<_>>()
++                .join("\n")
++        )
++    };
++
++    let content = format!(
++        r#"---
++id: {story_id}
++title: "{title}"
++status: {status}
++version: 1
++created_by:
++  type: human
++  id: sally
++updated_by:
++  type: human
++  id: sally
++{owners_yaml}
++---
++
++## Acceptance Criteria
++- AC1.
++"#
++    );
++    fs::write(stories_dir.join(format!("{}.md", story_id)), content).unwrap();
++}
++
++fn write_epic_with_owners(root: &Path, epic_id: &str, title: &str, owners: &[&str]) {
++    let epics_dir = root.join("docs/specs/epics");
++    fs::create_dir_all(&epics_dir).unwrap();
++    let owners_yaml = if owners.is_empty() {
++        String::new()
++    } else {
++        format!(
++            "owners:\n{}",
++            owners
++                .iter()
++                .map(|o| format!("  - \"{}\"", o))
++                .collect::<Vec<_>>()
++                .join("\n")
++        )
++    };
++
++    let content = format!(
++        r#"---
++id: {epic_id}
++title: "{title}"
++status: in-progress
++version: 1
++created_by:
++  type: human
++  id: alice
++updated_by:
++  type: human
++  id: alice
++{owners_yaml}
++---
++
++# Epic
++"#
++    );
++    fs::write(epics_dir.join(format!("{}.md", epic_id)), content).unwrap();
++}
++
++#[test]
++fn test_team_normalization_and_canonical() {
++    assert_eq!(normalize_team_name("ui-shell"), "ui-shell");
++    assert_eq!(normalize_team_name("team:ui-shell"), "ui-shell");
++    assert_eq!(normalize_team_name("TEAM:core-platform "), "core-platform");
++    assert_eq!(canonical_team_string("ui-shell"), "team:ui-shell");
++    assert_eq!(canonical_team_string("team:ui-shell"), "team:ui-shell");
++}
++
++#[test]
++fn test_resolve_user_teams() {
++    let mut config = Config::default();
++    config.identity.developer_id = "sally".to_string();
++    config.identity.teams = vec!["team:ui-shell".to_string()];
++    config.teams.teams.insert(
++        "frontend".to_string(),
++        vec!["sally".to_string(), "john".to_string()],
++    );
++    config
++        .teams
++        .teams
++        .insert("backend".to_string(), vec!["alice".to_string()]);
++
++    let author = Author::new("human", "sally");
++    let teams = resolve_user_teams(&author, &config, None);
++    assert!(teams.contains(&"ui-shell".to_string()));
++    assert!(teams.contains(&"frontend".to_string()));
++    assert!(!teams.contains(&"backend".to_string()));
++}
++
++#[test]
++fn test_is_user_owner() {
++    let mut config = Config::default();
++    config.identity.developer_id = "sally".to_string();
++    config.identity.teams = vec!["ui-shell".to_string()];
++
++    let author = Author::new("human", "sally");
++
++    // Empty owners -> anyone can edit
++    assert!(is_user_owner(&author, &config, &[], None));
++
++    // Direct developer match
++    assert!(is_user_owner(
++        &author,
++        &config,
++        &["sally".to_string()],
++        None
++    ));
++    assert!(!is_user_owner(
++        &author,
++        &config,
++        &["alice".to_string()],
++        None
++    ));
++
++    // Team match with team: prefix
++    assert!(is_user_owner(
++        &author,
++        &config,
++        &["team:ui-shell".to_string()],
++        None
++    ));
++    assert!(is_user_owner(
++        &author,
++        &config,
++        &["ui-shell".to_string()],
++        None
++    ));
++    assert!(!is_user_owner(
++        &author,
++        &config,
++        &["team:core-platform".to_string()],
++        None
++    ));
++}
++
++#[test]
++fn test_classify_in_lease_mutation() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story_with_owners(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++
++    fs::create_dir_all(root.join(".git")).unwrap();
++    let author = Author::new("human", "sally");
++    claim_story(root, "E12S4", &author, None, None).unwrap();
++
++    let config = qdev_core::load_config(root).unwrap().config;
++    let classification = classify_mutation(
++        root,
++        "E12S4",
++        Some(EntityKind::Story),
++        &author,
++        &config,
++        None,
++    )
++    .unwrap();
++
++    assert!(!classification.is_out_of_lease);
++    assert!(!classification.is_cross_team);
++    assert!(classification.is_exempt);
++}
++
++#[test]
++fn test_classify_out_of_lease_and_cross_team() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story_with_owners(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++    write_epic_with_owners(root, "E12", "Epic 12", &["team:core-platform"]);
++
++    fs::create_dir_all(root.join(".git")).unwrap();
++    let author = Author::new("human", "sally");
++    claim_story(root, "E12S4", &author, None, None).unwrap();
++
++    let config = qdev_core::load_config(root).unwrap().config;
++    let classification = classify_mutation(
++        root,
++        "E12",
++        Some(EntityKind::Epic),
++        &author,
++        &config,
++        None,
++    )
++    .unwrap();
++
++    assert!(classification.is_out_of_lease);
++    assert!(classification.is_cross_team);
++    assert!(!classification.is_exempt);
++    assert_eq!(
++        classification.active_lease.as_ref().map(|l| l.story_id.as_str()),
++        Some("E12S4")
++    );
++}
++
++#[test]
++fn test_classify_out_of_lease_same_team() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story_with_owners(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++    write_epic_with_owners(root, "E12", "Epic 12", &["team:ui-shell"]);
++
++    fs::create_dir_all(root.join(".git")).unwrap();
++    let author = Author::new("human", "sally");
++    claim_story(root, "E12S4", &author, None, None).unwrap();
++
++    let config = qdev_core::load_config(root).unwrap().config;
++    let classification = classify_mutation(
++        root,
++        "E12",
++        Some(EntityKind::Epic),
++        &author,
++        &config,
++        None,
++    )
++    .unwrap();
++
++    assert!(classification.is_out_of_lease);
++    assert!(!classification.is_cross_team);
++}
++
++#[test]
++fn test_classify_exempt_entities() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story_with_owners(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++
++    fs::create_dir_all(root.join(".git")).unwrap();
++    let author = Author::new("human", "sally");
++    claim_story(root, "E12S4", &author, None, None).unwrap();
++
++    let config = qdev_core::load_config(root).unwrap().config;
++
++    // 1. Decision is exempt from lease
++    let dec_class = classify_mutation(
++        root,
++        "DEC-01a2",
++        Some(EntityKind::Decision),
++        &author,
++        &config,
++        None,
++    )
++    .unwrap();
++    assert!(!dec_class.is_out_of_lease);
++    assert!(dec_class.is_exempt);
++
++    // 2. Child constraint of leased story is exempt
++    let constraint_class = classify_mutation(
++        root,
++        "E12S4/C1",
++        None,
++        &author,
++        &config,
++        None,
++    )
++    .unwrap();
++    assert!(!constraint_class.is_out_of_lease);
++    assert!(constraint_class.is_exempt);
++
++    // 3. Child constraint of OTHER story is NOT exempt
++    let other_constraint_class = classify_mutation(
++        root,
++        "E12S5/C1",
++        None,
++        &author,
++        &config,
++        None,
++    )
++    .unwrap();
++    assert!(other_constraint_class.is_out_of_lease);
++    assert!(!other_constraint_class.is_exempt);
++}
++
++#[test]
++fn test_create_governance_override_decision() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let author = Author::new("human", "sally");
++
++    // Empty justification rejected
++    let err = create_governance_override_decision(
++        root,
++        None,
++        "E12",
++        "cross_team_override",
++        "   ",
++        &author,
++        None,
++    )
++    .unwrap_err();
++    assert_eq!(err.code(), "needs_justification");
++
++    // Valid override creates DEC record
++    let dec_id = create_governance_override_decision(
++        root,
++        None,
++        "E12",
++        "cross_team_override",
++        "Architect approved cross-boundary update",
++        &author,
++        None,
++    )
++    .unwrap();
++
++    assert!(dec_id.starts_with("DEC-"));
++
++    // Verify DEC file written to state/decisions
++    let dec_file = root.join(format!("docs/state/decisions/{}.md", dec_id));
++    assert!(dec_file.is_file());
++    let content = fs::read_to_string(&dec_file).unwrap();
++    assert!(content.contains("decision_type: cross_team_override"));
++    assert!(content.contains("subject_id: E12"));
++    assert!(content.contains("ruling: Architect approved cross-boundary update"));
++
++    // Verify decision indexed in SQLite cache
++    let cache_db = root.join(".qdev/cache/cache.sqlite");
++    let store = SqliteStore::open(&cache_db).unwrap();
++    let dec_record = store.get_decision(&dec_id).unwrap().expect("decision indexed");
++    assert_eq!(dec_record.subject_id, "E12");
++    assert_eq!(
++        dec_record.decision_type.as_deref(),
++        Some("cross_team_override")
++    );
++    assert_eq!(
++        dec_record.ruling.as_deref(),
++        Some("Architect approved cross-boundary update")
++    );
++}
++
++#[test]
++fn test_add_team_to_entity_owners() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_epic_with_owners(root, "E12", "Epic 12", &["team:core-platform"]);
++
++    let author = Author::new("human", "sally");
++
++    // Fails with version_mismatch if if_version doesn't match current version 1
++    let conflict_err = add_team_to_entity_owners(root, None, "E12", "team:ui-shell", &author, Some(999)).unwrap_err();
++    assert_eq!(conflict_err.code, "version_mismatch");
++
++    let new_owners = add_team_to_entity_owners(root, None, "E12", "team:ui-shell", &author, Some(1)).unwrap();
++    assert_eq!(new_owners, vec!["team:core-platform", "team:ui-shell"]);
++
++    // Check frontmatter updated and version bumped to 2
++    let epic_file = root.join("docs/specs/epics/E12.md");
++    let content = fs::read_to_string(&epic_file).unwrap();
++    assert!(content.contains("version: 2"));
++    assert!(content.contains("team:ui-shell"));
++
++    // Check extraction
++    let extracted = extract_entity_owners(root, "E12", None, None);
++    assert_eq!(extracted, vec!["team:core-platform", "team:ui-shell"]);
++
++    // Adding an individual user without team: prefix
++    let user_owners = add_team_to_entity_owners(root, None, "E12", "bob", &author, Some(2)).unwrap();
++    assert_eq!(user_owners, vec!["team:core-platform", "team:ui-shell", "bob"]);
++
++    // Adding same team again is idempotent and does not error
++    let idempotent_owners =
++        add_team_to_entity_owners(root, None, "E12", "team:ui-shell", &author, None).unwrap();
++    assert_eq!(
++        idempotent_owners,
++        vec!["team:core-platform", "team:ui-shell", "bob"]
++    );
++}
++
++fn write_dw(root: &Path, id: &str, origin_story_id: &str) {
++    let dw_dir = root.join("docs/state/dw");
++    fs::create_dir_all(&dw_dir).unwrap();
++    let content = format!(
++        r#"---
++id: {id}
++title: "Deferred work {id}"
++status: open
++version: 1
++created_by:
++  type: human
++  id: sally
++updated_by:
++  type: human
++  id: sally
++origin_story_id: {origin_story_id}
++target_module: "crates/qdev-core"
++safety_risk: low
++rationale: "Testing exemption"
++gate: "manual"
++---
++
++# Details
++"#
++    );
++    fs::write(dw_dir.join(format!("{}.md", id)), content).unwrap();
++}
++
++#[test]
++fn test_originating_deferred_work_exemption() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story_with_owners(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++
++    let author = Author::new("human", "sally");
++    claim_story(root, "E12S4", &author, None, None).unwrap();
++
++    // Write DW originating from leased story
++    write_dw(root, "DW-001", "E12S4");
++    // Write DW originating from another story
++    write_dw(root, "DW-002", "E12S5");
++
++    let cfg = Config::default();
++
++    // DW originating from leased story is exempt
++    let c1 = classify_mutation(root, "DW-001", Some(EntityKind::DeferredWork), &author, &cfg, None).unwrap();
++    assert!(c1.is_exempt);
++    assert!(!c1.is_out_of_lease);
++
++    // DW originating from another story is not exempt
++    let c2 = classify_mutation(root, "DW-002", Some(EntityKind::DeferredWork), &author, &cfg, None).unwrap();
++    assert!(!c2.is_exempt);
++    assert!(c2.is_out_of_lease);
++}
++
++#[test]
++fn test_cross_worktree_lease_detection() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story_with_owners(root, "E12S5", "Story 5", "ready", &["team:ui-shell"]);
++
++    // Create .git/qdev/leases/E12S5.json simulating another worktree's lease
++    let lease_dir = root.join(".git/qdev/leases");
++    fs::create_dir_all(&lease_dir).unwrap();
++    let lease = qdev_core::lease::StoryLease {
++        story_id: "E12S5".to_string(),
++        holder: "foreign-dev".to_string(),
++        author_type: "human".to_string(),
++        worktree_path: "/path/to/foreign-worktree".to_string(),
++        branch: "foreign-branch".to_string(),
++        started_at: "2026-09-13T00:00:00Z".to_string(),
++        session_token: "tok123".to_string(),
++    };
++    fs::write(lease_dir.join("E12S5.json"), serde_json::to_string(&lease).unwrap()).unwrap();
++
++    let author = Author::new("human", "sally");
++    let cfg = Config::default();
++
++    // Current workspace holds no lease, but E12S5 is leased by foreign worktree
++    let c = classify_mutation(root, "E12S5", Some(EntityKind::Story), &author, &cfg, None).unwrap();
++    assert!(c.is_out_of_lease);
++    assert_eq!(
++        c.active_lease.as_ref().map(|l| l.worktree_path.as_str()),
++        Some("/path/to/foreign-worktree")
++    );
++}
++
++#[test]
++fn test_child_constraint_owner_inheritance() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story_with_owners(root, "E12S4", "Story 4", "in-progress", &["team:ui-shell"]);
++
++    // Direct constraint identifier E12S4/NG-1 has no file or owners of its own, inherits from parent E12S4
++    let owners = extract_entity_owners(root, "E12S4/NG-1", None, None);
++    assert_eq!(owners, vec!["team:ui-shell"]);
++}
+diff --git a/docs/bmad/implementation-artifacts/spec-2-4-scope-enforcement-cross-team-overrides.md b/docs/bmad/implementation-artifacts/spec-2-4-scope-enforcement-cross-team-overrides.md
+new file mode 100644
+index 0000000..8db11a2
+--- /dev/null
++++ b/docs/bmad/implementation-artifacts/spec-2-4-scope-enforcement-cross-team-overrides.md
+@@ -0,0 +1,111 @@
++---
++title: 'Story 2.4: Scope Enforcement & Cross-Team Overrides'
++type: 'feature'
++created: '2026-09-13'
++status: 'done'
++baseline_commit: 'f4c35b9e823dd64d4c85422144c5af8e5c6be9ee'
++route: 'dispatch'
++review_loop_iteration: 0
++context: []
++---
++
++<frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
++
++## Intent
++
++**Problem:** Autonomous agents and developers operating under a story lease or within a team boundary risk mutating unleased epics, sibling stories, or foreign-team assets without authorization or audit trails, enabling accidental scope creep and silent requirement drift.
++
++**Approach:** Implement a scope and governance classification engine that verifies active leases and team ownership before executing entity mutations, enforcing policy refusal (exit 3 `needs_confirmation` naming `--override --justification`) in non-interactive environments, providing interactive TTY choice prompts, logging structured `DEC-` audit records (`cross_team_override` or `lease_override`) upon justified override, while exempting decisions, scratchpad entries, constraints, and originating deferred work.
++
++## Boundaries & Constraints
++
++**Always:**
++- Classify entity mutations against active story leases in the workspace and declared team ownership before executing writes in `update`, `transition`, `relate`, and `unrelate`.
++- Refuse unauthorized cross-team or out-of-lease mutations in non-interactive mode with exit code 3 (`policy_refusal`, code `needs_confirmation`) naming `--override --justification`.
++- On interactive TTYs, present the 3-option menu from `docs/governance-and-teams.md` §3: [1] Override with justification, [2] Add user's team to owners, [3] Abort.
++- Require non-empty `--justification` when `--override` is supplied; refuse missing or whitespace-only justification with exit code 3 (`needs_justification`).
++- Create and cache a committed `DEC-` record of type `cross_team_override` (for cross-team edits) or `lease_override` (for scope-only edits) with subject, author, ruling, and context when an override is executed.
++- Exempt decisions (`DEC-`), scratchpads of the leased story, constraints of the leased story, and deferred work originating from the leased story from requiring lease overrides.
++- Preserve entity file formatting, frontmatter ordering, and atomic write-lock semantics during all mutation and decision-recording operations.
++
++**Never:**
++- Never allow an out-of-lease or cross-team mutation to proceed without an explicit override and justification or interactive confirmation.
++- Never require an override when mutating the currently leased story itself (unless owned exclusively by another team).
++- Never fail or corrupt existing entity files when an override is refused or aborted.
++- Never bypass the workspace advisory write lock when writing override decision records or updating entity owners.
++
++## I/O & Edge-Case Matrix
++
++| Scenario | Input / State | Expected Output / Behavior | Error Handling |
++|----------|--------------|---------------------------|----------------|
++| Mutate owned, leased story | `qdev update E12S4 --title "New"` while holding lease on E12S4 as owner | Updates entity without prompt or decision, exit 0 | Standard update errors |
++| Out-of-lease & cross-team non-interactive | `qdev update E12 --title "New"` while holding lease on E12S4 (team ui-shell) targeting E12 (owned by core-platform) | Refuses with exit 3 `needs_confirmation`, stderr/json names `--override --justification` | Exit 3 `needs_confirmation` |
++| Out-of-lease with override & justification | `qdev update E12 --title "New" --override --justification "Approved"` | Creates `DEC-` record of type `cross_team_override`, updates E12, exit 0 | Exit 3 `needs_justification` if justification empty |
++| Out-of-lease only (same team) | `qdev update E12 --title "New" --override --justification "Lead signoff"` when E12 owned by user's team but lease is on E12S4 | Creates `DEC-` record of type `lease_override`, updates E12, exit 0 | Exit 3 `needs_justification` if justification empty |
++| Cross-team interactive option 1 | `qdev update E12 ...` on TTY, user selects `1` and inputs `"Architect approval"` | Logs `DEC-` record of type `cross_team_override`, applies update, exit 0 | Exit 3 if input justification empty |
++| Cross-team interactive option 2 | `qdev update E12 ...` on TTY, user selects `2` and inputs `"Transferring component"` | Appends user's team to E12 `owners`, logs `DEC-` record, applies update, exit 0 | Exit 3 if input justification empty |
++| Cross-team interactive option 3 (abort) | `qdev update E12 ...` on TTY, user selects `3` | Prints `Aborted.`, does not modify E12 or create decision, exit 0 | N/A |
++| Exempt entities | `qdev relate E12S4 depends_on DEC-01a2` or updating scratchpad on leased story | Proceeds without lease override prompt or refusal, exit 0 | Standard relate errors |
++
++</frozen-after-approval>
++
++## Code Map
++
++- `crates/qdev-core/src/governance.rs` -- New module implementing `ScopeClassification`, `classify_mutation`, `create_governance_override_decision`, `add_team_to_entity_owners`, and owner-matching rules.
++- `crates/qdev-core/src/lib.rs` -- Register and re-export `governance` module types.
++- `crates/qdev-cli/src/cli.rs` -- Add `--override` and `--justification` global CLI flags to `Cli` struct.
++- `crates/qdev-cli/src/main.rs` -- Implement `check_governance_gate` and integrate before `handle_update`, `handle_transition`, `handle_relate`, and `handle_unrelate`.
++- `crates/qdev-core/tests/governance_tests.rs` -- Unit tests verifying classification, team matching, decision creation, and exemption rules.
++- `crates/qdev-cli/tests/scope_cli_tests.rs` -- Integration tests testing CLI behavior for out-of-lease, cross-team, interactive TTY options, non-interactive refusal, and override flag execution.
++
++## Tasks & Acceptance
++
++**Execution:**
++- [x] `crates/qdev-core/src/governance.rs` -- Implement `ScopeClassification`, `classify_mutation`, `create_governance_override_decision`, and `add_team_to_entity_owners`.
++- [x] `crates/qdev-core/src/lib.rs` -- Export governance module and types from `qdev_core`.
++- [x] `crates/qdev-cli/src/cli.rs` -- Add global `--override` and `--justification` flags to `Cli`.
++- [x] `crates/qdev-cli/src/main.rs` -- Implement `check_governance_gate` with interactive TTY menu handling and wire into `handle_update`, `handle_transition`, `handle_relate`, and `handle_unrelate`.
++- [x] `crates/qdev-core/tests/governance_tests.rs` -- Add unit tests for scope classification, team resolution, decision creation, and exemptions.
++- [x] `crates/qdev-cli/tests/scope_cli_tests.rs` -- Add integration tests for scope enforcement, cross-team overrides, TTY interaction, and error envelopes.
++
++**Acceptance Criteria:**
++- Given a lease on E12S4 held by `sally` (team ui-shell), when a mutating command (`update`, `transition`, `relate`, `unrelate`) targets E12 (owned by team core-platform), then it is classified as both out-of-lease and cross-team.
++- Given out-of-lease or cross-team classification in non-interactive mode without `--override`, then the command exits 3 with error code `needs_confirmation` naming `--override --justification`.
++- Given out-of-lease or cross-team classification with `--override --justification "<rationale>"`, then the mutation succeeds and a committed `DEC-` record of type `cross_team_override` (or `lease_override`) is created and indexed in the cache.
++- Given an interactive TTY, when a cross-team edit is attempted, then the 3 options from `docs/governance-and-teams.md` §3 are offered, allowing override with justification, adding team to owners, or aborting cleanly.
++- Given decisions, scratchpad entries on the leased story, or originating deferred work, when mutated, then no lease override is required.
++
++## Implementation Notes
++
++## Spec Change Log
++
++## Review Triage Log
++
++| Source | File:Line | Verdict | Route | Summary / Evidence |
++|---|---|---|---|---|
++| Blind Hunter | `governance.rs:352` | false | rejected | Cross-worktree lease detection via `get_lease` was already implemented for workspaces without leases. |
++| Blind Hunter | `governance.rs:55` | high | patch | Direct constraint ID without frontmatter lacks owner inheritance; patched to inherit from parent story owners. |
++| Blind Hunter | `governance.rs:184` | medium | patch | Case-insensitive team normalization required on `owners` frontmatter comparison; patched using `normalize_team_name`. |
++| Blind Hunter | `main.rs:913` | low | patch | Adding owner for developer without team should use raw `author.id` instead of `team:` prefix; patched in interactive flow and owner insertion. |
++| Edge Case Hunter | `main.rs:840` | high | patch | Staging DEC creation before mutation risks orphaned records on write failure; patched to defer DEC creation until after mutation succeeds. |
++| Edge Case Hunter | `governance.rs:400` | medium | patch | Stale cache DB probe; patched to check file existence before attempting sqlite open. |
++| Edge Case Hunter | `main.rs:1585` | medium | patch | Interactive transition on out-of-lease story loses prompt justification; patched to forward `effective_justification = cli.justification.clone().or(gov_just)`. |
++| Edge Case Hunter | `governance.rs:540` | medium | patch | Optimistic concurrency in `add_team_to_entity_owners`; patched to accept `if_version` and return early if team is already present. |
++| Verification Gap | `governance_tests.rs:460` | high | patch | Missing test for originating deferred work (`DW-`) exemption; patched with `test_originating_deferred_work_exemption`. |
++| Verification Gap | `governance_tests.rs:500` | medium | patch | Missing test for cross-worktree lease detection; patched with `test_cross_worktree_lease_detection`. |
++| Verification Gap | `scope_cli_tests.rs:730` | medium | patch | Missing test for 2-option menu for same-team out-of-lease mutation; patched with `test_cli_out_of_lease_same_team_interactive_option_1_override` and abort test. |
++| Verification Gap | `scope_cli_tests.rs:655` | low | patch | Missing explicit DEC count and relation removal assertion in `test_cli_unrelate_scope_enforcement`; patched. |
++
++## Design Notes
++
++- Governance evaluation:
++  1. Leases: check workspace leases (`find_workspace_leases`). If active lease exists, target must match leased story ID, child constraint ID (`{story_id}/...`), scratchpad, or decision. If not, mark `is_out_of_lease = true`. If no workspace lease, check if target is leased by another holder/worktree (`get_lease`).
++  2. Owners: target entity frontmatter `owners` is inspected. If present and non-empty, current user ID (`author.id` / config / git email) and teams (`config.identity.teams` + `config.teams` mapping) must match at least one owner string (normalizing `team:` prefix). If no match, mark `is_cross_team = true`.
++  3. Overrides create `DEC-` files under `docs/state/decisions/` using atomic write and update SQLite cache.
++
++## Verification
++
++**Commands:**
++- `cargo test --test governance_tests` -- expected: All core unit tests pass for classification, owner matching, and decision generation.
++- `cargo test --test scope_cli_tests` -- expected: CLI integration tests verify non-interactive exit 3, TTY interactive options, `--override --justification`, and exemptions.
++- `cargo test` -- expected: Entire workspace test suite passes with zero regressions.
+diff --git a/docs/bmad/implementation-artifacts/sprint-status.yaml b/docs/bmad/implementation-artifacts/sprint-status.yaml
+index 7ad6298..620c215 100644
+--- a/docs/bmad/implementation-artifacts/sprint-status.yaml
++++ b/docs/bmad/implementation-artifacts/sprint-status.yaml
+@@ -16,7 +16,7 @@
+ # story_location: "{project-root}/docs/bmad/implementation-artifacts"
+ 
+ generated: 09-06-2026 08:48
+-last_updated: 09-13-2026 06:47
++last_updated: 09-13-2026 10:33
+ project: qdev
+ project_key: NOKEY
+ tracking_system: file-system
+@@ -66,7 +66,7 @@ development_status:
+   2-1-state-machine-lifecycle-hooks: review
+   2-2-justified-backward-transitions: review
+   2-3-story-leases: review
+-  2-4-scope-enforcement-cross-team-overrides: backlog
++  2-4-scope-enforcement-cross-team-overrides: review
+   2-5-constraints-as-entities: backlog
+   2-6-scratchpads: backlog
+   2-7-decision-ledger: backlog

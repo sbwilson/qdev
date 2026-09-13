@@ -1874,7 +1874,7 @@ type StoryDetailFields = (
     Option<String>,
 );
 
-fn story_detail_fields(
+pub(crate) fn story_detail_fields(
     kind: EntityKind,
     canonical_id: &str,
     updated_frontmatter: &serde_json::Value,

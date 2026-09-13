@@ -20,6 +20,14 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub non_interactive: bool,
 
+    /// Override scope lease or cross-team mutation restrictions
+    #[arg(long = "override", global = true)]
+    pub r#override: bool,
+
+    /// Justification for override
+    #[arg(long, global = true)]
+    pub justification: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -91,10 +99,6 @@ pub struct ReleaseArgs {
     /// Force release of another worker's or stale lease
     #[arg(long = "force")]
     pub force: bool,
-
-    /// Justification for breaking a lease with --force
-    #[arg(long = "justification")]
-    pub justification: Option<String>,
 
     /// Attribution author type override ('human' or 'agent')
     #[arg(long = "author-type")]
@@ -282,10 +286,6 @@ pub struct TransitionArgs {
 
     /// Target status to transition to
     pub target_status: String,
-
-    /// Justification for terminal (superseded/abandoned) or backward transitions
-    #[arg(long = "justification")]
-    pub justification: Option<String>,
 
     /// Attribution author type override ('human' or 'agent')
     #[arg(long = "author-type")]

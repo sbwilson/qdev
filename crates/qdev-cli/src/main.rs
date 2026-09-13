@@ -2,6 +2,7 @@ mod cli;
 mod output;
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::IsTerminal;
 use std::panic;
 use std::process::ExitCode as StdExitCode;
@@ -241,7 +242,14 @@ fn run(raw_args: &[String]) -> ExitCode {
             }
         },
         Some(Commands::Update(ref update_args)) => {
-            handle_update(update_args, &annotated_config, &cli, &output, &current_dir)
+            handle_update(
+                update_args,
+                &annotated_config,
+                &cli,
+                &output,
+                &current_dir,
+                interactivity,
+            )
         }
         Some(Commands::Transition(ref transition_args)) => handle_transition(
             transition_args,
@@ -249,6 +257,7 @@ fn run(raw_args: &[String]) -> ExitCode {
             &cli,
             &output,
             &current_dir,
+            interactivity,
         ),
         Some(Commands::Get(ref get_args)) => {
             handle_get(get_args, &annotated_config, &cli, &output, &current_dir)
@@ -257,7 +266,14 @@ fn run(raw_args: &[String]) -> ExitCode {
             handle_list(list_args, &annotated_config, &cli, &output, &current_dir)
         }
         Some(Commands::Relate(ref relate_args)) => {
-            handle_relate(relate_args, &annotated_config, &cli, &output, &current_dir)
+            handle_relate(
+                relate_args,
+                &annotated_config,
+                &cli,
+                &output,
+                &current_dir,
+                interactivity,
+            )
         }
         Some(Commands::Unrelate(ref unrelate_args)) => handle_unrelate(
             unrelate_args,
@@ -265,6 +281,7 @@ fn run(raw_args: &[String]) -> ExitCode {
             &cli,
             &output,
             &current_dir,
+            interactivity,
         ),
         Some(Commands::Graph(ref graph_args)) => {
             handle_graph(graph_args, &annotated_config, &cli, &output, &current_dir)
@@ -761,6 +778,308 @@ fn prompt_input(prompt: &str) -> std::io::Result<String> {
     Ok(input.trim().to_string())
 }
 
+enum GovernanceOutcome {
+    Proceed {
+        justification: Option<String>,
+        override_decision: Option<(String, String)>,
+    },
+    Aborted,
+}
+
+fn check_governance_gate(
+    root: &std::path::Path,
+    target_id: &str,
+    target_kind: Option<qdev_core::EntityKind>,
+    author: &qdev_core::Author,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    interactivity: Interactivity,
+    cli: &Cli,
+    output: &OutputEmitter,
+    if_version: &mut Option<u64>,
+) -> Result<GovernanceOutcome, ExitCode> {
+    let opt_store = open_query_store(root, annotated_config).ok();
+    let classification = match qdev_core::classify_mutation(
+        root,
+        target_id,
+        target_kind,
+        author,
+        &annotated_config.config,
+        opt_store.as_ref().map(|s| s as &dyn qdev_core::Store),
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return Err(e.exit_code());
+        }
+    };
+
+    if !classification.is_out_of_lease && !classification.is_cross_team {
+        return Ok(GovernanceOutcome::Proceed {
+            justification: None,
+            override_decision: None,
+        });
+    }
+
+    if cli.r#override {
+        let just = cli.justification.as_deref().unwrap_or("").trim();
+        if just.is_empty() {
+            let err = qdev_core::QdevError::policy_refusal(
+                "needs_justification",
+                "--override requires a non-empty --justification",
+            );
+            let _ = output.emit_error(&err);
+            return Err(ExitCode::PolicyRefusal);
+        }
+
+        let decision_type = if classification.is_cross_team {
+            "cross_team_override"
+        } else {
+            "lease_override"
+        };
+
+        return Ok(GovernanceOutcome::Proceed {
+            justification: Some(just.to_string()),
+            override_decision: Some((decision_type.to_string(), just.to_string())),
+        });
+    }
+
+    if interactivity.is_non_interactive() {
+        let msg = if classification.is_cross_team && classification.is_out_of_lease {
+            format!(
+                "Mutation on entity '{}' is out-of-lease and cross-team; re-run with --override --justification \"<rationale>\"",
+                target_id
+            )
+        } else if classification.is_cross_team {
+            format!(
+                "Cross-team mutation on entity '{}' requires confirmation; re-run with --override --justification \"<rationale>\"",
+                target_id
+            )
+        } else {
+            format!(
+                "Out-of-lease mutation on entity '{}' requires confirmation; re-run with --override --justification \"<rationale>\"",
+                target_id
+            )
+        };
+        let err = qdev_core::QdevError::policy_refusal("needs_confirmation", msg);
+        let _ = output.emit_error(&err);
+        return Err(ExitCode::PolicyRefusal);
+    }
+
+    // Interactive TTY flow
+    let entity_title = opt_store
+        .as_ref()
+        .and_then(|s| s.get_entity(target_id).ok().flatten())
+        .and_then(|e| e.title)
+        .unwrap_or_else(|| {
+            if let Ok((_, _, path)) = qdev_core::resolve_entity_file(
+                root,
+                None,
+                target_id,
+                Some(&annotated_config.config.storage),
+            ) {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if let Ok(fm) = qdev_core::extract_frontmatter(&content) {
+                        return fm
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                    }
+                }
+            }
+            String::new()
+        });
+
+    if classification.is_cross_team {
+        let owners_str = if classification.target_owners.is_empty() {
+            "none".to_string()
+        } else {
+            classification.target_owners.join(", ")
+        };
+        let user_teams_str = if classification.user_teams.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " ({})",
+                classification
+                    .user_teams
+                    .iter()
+                    .map(|t| qdev_core::canonical_team_string(t))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+
+        let team_to_add = if let Some(team) = classification.user_teams.first() {
+            qdev_core::canonical_team_string(team)
+        } else {
+            author.id.clone()
+        };
+
+        eprintln!("⚠ Cross-team edit");
+        eprintln!(
+            "  Entity  {} \"{}\"   owners: {}",
+            target_id, entity_title, owners_str
+        );
+        eprintln!("  You     {}{}", author.id, user_teams_str);
+        eprintln!("  [1] Override with justification (logged as DEC cross_team_override)");
+        eprintln!(
+            "  [2] Add {} to owners (requires an existing owner's lease or override)",
+            team_to_add
+        );
+        eprintln!("  [3] Abort");
+
+        let choice = match prompt_input("") {
+            Ok(c) => c,
+            Err(_) => {
+                println!("Aborted.");
+                return Ok(GovernanceOutcome::Aborted);
+            }
+        };
+
+        match choice.trim() {
+            "1" => {
+                let just = match prompt_input("Justification: ") {
+                    Ok(j) => j,
+                    Err(_) => {
+                        let err = qdev_core::QdevError::policy_refusal(
+                            "needs_justification",
+                            "--override requires a non-empty --justification",
+                        );
+                        let _ = output.emit_error(&err);
+                        return Err(ExitCode::PolicyRefusal);
+                    }
+                };
+                let trimmed_just = just.trim();
+                if trimmed_just.is_empty() {
+                    let err = qdev_core::QdevError::policy_refusal(
+                        "needs_justification",
+                        "--override requires a non-empty --justification",
+                    );
+                    let _ = output.emit_error(&err);
+                    return Err(ExitCode::PolicyRefusal);
+                }
+
+                Ok(GovernanceOutcome::Proceed {
+                    justification: Some(trimmed_just.to_string()),
+                    override_decision: Some((
+                        "cross_team_override".to_string(),
+                        trimmed_just.to_string(),
+                    )),
+                })
+            }
+            "2" => {
+                let just = match prompt_input("Justification: ") {
+                    Ok(j) => j,
+                    Err(_) => {
+                        let err = qdev_core::QdevError::policy_refusal(
+                            "needs_justification",
+                            "--override requires a non-empty --justification",
+                        );
+                        let _ = output.emit_error(&err);
+                        return Err(ExitCode::PolicyRefusal);
+                    }
+                };
+                let trimmed_just = just.trim();
+                if trimmed_just.is_empty() {
+                    let err = qdev_core::QdevError::policy_refusal(
+                        "needs_justification",
+                        "--override requires a non-empty --justification",
+                    );
+                    let _ = output.emit_error(&err);
+                    return Err(ExitCode::PolicyRefusal);
+                }
+
+                if let Err(e) = qdev_core::add_team_to_entity_owners(
+                    root,
+                    Some(&annotated_config.config.storage),
+                    target_id,
+                    &team_to_add,
+                    author,
+                    *if_version,
+                ) {
+                    let _ = output.emit_error(&e);
+                    return Err(e.exit_code());
+                }
+
+                if let Some(v) = *if_version {
+                    *if_version = Some(v + 1);
+                }
+
+                Ok(GovernanceOutcome::Proceed {
+                    justification: Some(trimmed_just.to_string()),
+                    override_decision: Some((
+                        "cross_team_override".to_string(),
+                        trimmed_just.to_string(),
+                    )),
+                })
+            }
+            "3" => {
+                println!("Aborted.");
+                Ok(GovernanceOutcome::Aborted)
+            }
+            _ => {
+                println!("Aborted.");
+                Ok(GovernanceOutcome::Aborted)
+            }
+        }
+    } else {
+        eprintln!("⚠ Out-of-lease edit");
+        eprintln!("  Entity  {} \"{}\"", target_id, entity_title);
+        if let Some(ref l) = classification.active_lease {
+            eprintln!("  Lease   {} (held in {})", l.story_id, l.worktree_path);
+        }
+        eprintln!("  [1] Override with justification (logged as DEC lease_override)");
+        eprintln!("  [3] Abort");
+
+        let choice = match prompt_input("") {
+            Ok(c) => c,
+            Err(_) => {
+                println!("Aborted.");
+                return Ok(GovernanceOutcome::Aborted);
+            }
+        };
+
+        match choice.trim() {
+            "1" => {
+                let just = match prompt_input("Justification: ") {
+                    Ok(j) => j,
+                    Err(_) => {
+                        let err = qdev_core::QdevError::policy_refusal(
+                            "needs_justification",
+                            "--override requires a non-empty --justification",
+                        );
+                        let _ = output.emit_error(&err);
+                        return Err(ExitCode::PolicyRefusal);
+                    }
+                };
+                let trimmed_just = just.trim();
+                if trimmed_just.is_empty() {
+                    let err = qdev_core::QdevError::policy_refusal(
+                        "needs_justification",
+                        "--override requires a non-empty --justification",
+                    );
+                    let _ = output.emit_error(&err);
+                    return Err(ExitCode::PolicyRefusal);
+                }
+
+                Ok(GovernanceOutcome::Proceed {
+                    justification: Some(trimmed_just.to_string()),
+                    override_decision: Some((
+                        "lease_override".to_string(),
+                        trimmed_just.to_string(),
+                    )),
+                })
+            }
+            _ => {
+                println!("Aborted.");
+                Ok(GovernanceOutcome::Aborted)
+            }
+        }
+    }
+}
+
+
 /// Argument parsing, id allocation, author resolution and output rendering — the write itself
 /// belongs to `qdev_core::create_story`, which takes the advisory lock, validates the generated
 /// frontmatter against the story schema, writes atomically and syncs the cache. Per AD-2 the CLI
@@ -897,6 +1216,7 @@ fn handle_update(
     cli: &Cli,
     output: &OutputEmitter,
     current_dir: &std::path::Path,
+    interactivity: Interactivity,
 ) -> ExitCode {
     let root = qdev_core::find_workspace_root(current_dir);
 
@@ -1129,6 +1449,26 @@ fn handle_update(
             return e.exit_code();
         }
     };
+ 
+    let mut if_version = update_args.if_version;
+    let (_gov_just, override_decision) = match check_governance_gate(
+        &root,
+        &entity_id,
+        entity_kind,
+        &author,
+        annotated_config,
+        interactivity,
+        cli,
+        output,
+        &mut if_version,
+    ) {
+        Ok(GovernanceOutcome::Proceed {
+            justification,
+            override_decision,
+        }) => (justification, override_decision),
+        Ok(GovernanceOutcome::Aborted) => return ExitCode::Success,
+        Err(code) => return code,
+    };
 
     // Resolve section file path if provided
     let section_file = update_args.file.as_ref().map(|f| {
@@ -1141,17 +1481,17 @@ fn handle_update(
     });
 
     let update_opts = qdev_core::EntityUpdateOptions {
-        workspace_root: root,
+        workspace_root: root.clone(),
         storage: Some(annotated_config.config.storage.clone()),
         entity_kind,
-        entity_id,
+        entity_id: entity_id.clone(),
         status: update_args.status.clone(),
         title: update_args.title.clone(),
         custom_fields,
         section: update_args.section.clone(),
         section_file,
-        if_version: update_args.if_version,
-        author,
+        if_version,
+        author: author.clone(),
     };
 
     let res = match qdev_core::apply_entity_update(&update_opts) {
@@ -1161,6 +1501,21 @@ fn handle_update(
             return e.exit_code();
         }
     };
+
+    if let Some((dec_type, dec_just)) = override_decision {
+        if let Err(e) = qdev_core::create_governance_override_decision(
+            &root,
+            Some(&annotated_config.config.storage),
+            &entity_id,
+            &dec_type,
+            &dec_just,
+            &author,
+            None,
+        ) {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    }
 
     if cli.json {
         let envelope = JsonEnvelope::new(res.updated_frontmatter);
@@ -1188,6 +1543,7 @@ fn handle_transition(
     cli: &Cli,
     output: &OutputEmitter,
     current_dir: &std::path::Path,
+    interactivity: Interactivity,
 ) -> ExitCode {
     let root = qdev_core::find_workspace_root(current_dir);
 
@@ -1221,15 +1577,37 @@ fn handle_transition(
         }
     };
 
+    let mut if_version = transition_args.if_version;
+    let (gov_just, override_decision) = match check_governance_gate(
+        &root,
+        &transition_args.id,
+        Some(qdev_core::EntityKind::Story),
+        &author,
+        annotated_config,
+        interactivity,
+        cli,
+        output,
+        &mut if_version,
+    ) {
+        Ok(GovernanceOutcome::Proceed {
+            justification,
+            override_decision,
+        }) => (justification, override_decision),
+        Ok(GovernanceOutcome::Aborted) => return ExitCode::Success,
+        Err(code) => return code,
+    };
+
+    let effective_justification = cli.justification.clone().or(gov_just);
+
     let options = qdev_core::TransitionOptions {
-        workspace_root: root,
+        workspace_root: root.clone(),
         storage: Some(annotated_config.config.storage.clone()),
         entity_kind: transition_args.kind.clone(),
         story_id: transition_args.id.clone(),
         target_status: transition_args.target_status.clone(),
-        justification: transition_args.justification.clone(),
-        author,
-        if_version: transition_args.if_version,
+        justification: effective_justification,
+        author: author.clone(),
+        if_version,
     };
 
     let engine = qdev_core::TransitionEngine::new();
@@ -1240,6 +1618,21 @@ fn handle_transition(
             return e.exit_code();
         }
     };
+
+    if let Some((dec_type, dec_just)) = override_decision {
+        if let Err(e) = qdev_core::create_governance_override_decision(
+            &root,
+            Some(&annotated_config.config.storage),
+            &transition_args.id,
+            &dec_type,
+            &dec_just,
+            &author,
+            None,
+        ) {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    }
 
     if cli.json {
         let envelope = JsonEnvelope::new(res);
@@ -1791,6 +2184,7 @@ fn handle_relate(
     cli: &Cli,
     output: &OutputEmitter,
     current_dir: &std::path::Path,
+    interactivity: Interactivity,
 ) -> ExitCode {
     let root = qdev_core::find_workspace_root(current_dir);
 
@@ -1865,8 +2259,28 @@ fn handle_relate(
         }
     };
 
+    let mut if_version = relate_args.if_version;
+    let (_gov_just, override_decision) = match check_governance_gate(
+        &root,
+        &source.id,
+        Some(source.kind),
+        &author,
+        annotated_config,
+        interactivity,
+        cli,
+        output,
+        &mut if_version,
+    ) {
+        Ok(GovernanceOutcome::Proceed {
+            justification,
+            override_decision,
+        }) => (justification, override_decision),
+        Ok(GovernanceOutcome::Aborted) => return ExitCode::Success,
+        Err(code) => return code,
+    };
+
     let opts = qdev_core::RelationChangeOptions {
-        workspace_root: root,
+        workspace_root: root.clone(),
         storage: Some(annotated_config.config.storage.clone()),
         entity_kind: None,
         // Both ids as the cache stores them, which is what the kind-pair and cycle pre-checks
@@ -1877,8 +2291,8 @@ fn handle_relate(
         relation: relate_args.relation.clone(),
         target_id: target_id.clone(),
         add: true,
-        if_version: relate_args.if_version,
-        author,
+        if_version,
+        author: author.clone(),
     };
 
     let res = match qdev_core::apply_relation_change(&opts) {
@@ -1888,6 +2302,21 @@ fn handle_relate(
             return e.exit_code();
         }
     };
+
+    if let Some((dec_type, dec_just)) = override_decision {
+        if let Err(e) = qdev_core::create_governance_override_decision(
+            &root,
+            Some(&annotated_config.config.storage),
+            &source.id,
+            &dec_type,
+            &dec_just,
+            &author,
+            None,
+        ) {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    }
 
     if cli.json {
         let envelope = JsonEnvelope::new(RelatePayload {
@@ -1927,6 +2356,7 @@ fn handle_unrelate(
     cli: &Cli,
     output: &OutputEmitter,
     current_dir: &std::path::Path,
+    interactivity: Interactivity,
 ) -> ExitCode {
     let root = qdev_core::find_workspace_root(current_dir);
 
@@ -1950,16 +2380,36 @@ fn handle_unrelate(
         }
     };
 
+    let mut if_version = unrelate_args.if_version;
+    let (_gov_just, override_decision) = match check_governance_gate(
+        &root,
+        &unrelate_args.source_id,
+        None,
+        &author,
+        annotated_config,
+        interactivity,
+        cli,
+        output,
+        &mut if_version,
+    ) {
+        Ok(GovernanceOutcome::Proceed {
+            justification,
+            override_decision,
+        }) => (justification, override_decision),
+        Ok(GovernanceOutcome::Aborted) => return ExitCode::Success,
+        Err(code) => return code,
+    };
+
     let opts = qdev_core::RelationChangeOptions {
-        workspace_root: root,
+        workspace_root: root.clone(),
         storage: Some(annotated_config.config.storage.clone()),
         entity_kind: None,
         entity_id: unrelate_args.source_id.clone(),
         relation: unrelate_args.relation.clone(),
         target_id: unrelate_args.target_id.clone(),
         add: false,
-        if_version: unrelate_args.if_version,
-        author,
+        if_version,
+        author: author.clone(),
     };
 
     // Unrelating an absent entry, with a relation name that exists, is an idempotent no-op
@@ -1973,6 +2423,21 @@ fn handle_unrelate(
             return e.exit_code();
         }
     };
+
+    if let Some((dec_type, dec_just)) = override_decision {
+        if let Err(e) = qdev_core::create_governance_override_decision(
+            &root,
+            Some(&annotated_config.config.storage),
+            &unrelate_args.source_id,
+            &dec_type,
+            &dec_just,
+            &author,
+            None,
+        ) {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    }
 
     if cli.json {
         let envelope = JsonEnvelope::new(RelatePayload {
@@ -3585,7 +4050,7 @@ fn handle_release(
         &story_id,
         &author,
         args.force,
-        args.justification.as_deref(),
+        cli.justification.as_deref(),
         Some(&annotated_config.config.storage),
         opt_store.as_ref().map(|s| s as &dyn qdev_core::Store),
     ) {

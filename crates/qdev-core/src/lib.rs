@@ -3,6 +3,7 @@ pub mod dag;
 pub mod doctor;
 pub mod envelope;
 pub mod errors;
+pub mod governance;
 pub mod id;
 pub mod init;
 pub mod interactivity;
@@ -13,6 +14,12 @@ pub mod store;
 pub mod transition;
 pub mod validate;
 pub mod write;
+
+pub use governance::{
+    add_team_to_entity_owners, canonical_team_string, classify_mutation,
+    create_governance_override_decision, extract_entity_owners, is_user_owner,
+    normalize_team_name, resolve_user_teams, ScopeClassification,
+};
 
 pub use lease::{
     auto_release_lease, claim_story, create_lease_override_decision, discover_git_branch,
