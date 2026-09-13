@@ -241,16 +241,14 @@ fn run(raw_args: &[String]) -> ExitCode {
                 handle_create_story(story_args, &annotated_config, &cli, &output, &current_dir)
             }
         },
-        Some(Commands::Update(ref update_args)) => {
-            handle_update(
-                update_args,
-                &annotated_config,
-                &cli,
-                &output,
-                &current_dir,
-                interactivity,
-            )
-        }
+        Some(Commands::Update(ref update_args)) => handle_update(
+            update_args,
+            &annotated_config,
+            &cli,
+            &output,
+            &current_dir,
+            interactivity,
+        ),
         Some(Commands::Transition(ref transition_args)) => handle_transition(
             transition_args,
             &annotated_config,
@@ -265,16 +263,14 @@ fn run(raw_args: &[String]) -> ExitCode {
         Some(Commands::List(ref list_args)) => {
             handle_list(list_args, &annotated_config, &cli, &output, &current_dir)
         }
-        Some(Commands::Relate(ref relate_args)) => {
-            handle_relate(
-                relate_args,
-                &annotated_config,
-                &cli,
-                &output,
-                &current_dir,
-                interactivity,
-            )
-        }
+        Some(Commands::Relate(ref relate_args)) => handle_relate(
+            relate_args,
+            &annotated_config,
+            &cli,
+            &output,
+            &current_dir,
+            interactivity,
+        ),
         Some(Commands::Unrelate(ref unrelate_args)) => handle_unrelate(
             unrelate_args,
             &annotated_config,
@@ -786,6 +782,7 @@ enum GovernanceOutcome {
     Aborted,
 }
 
+#[allow(clippy::too_many_arguments, clippy::disallowed_methods)] // Interactive governance prompt displays retained entity title to user.
 fn check_governance_gate(
     root: &std::path::Path,
     target_id: &str,
@@ -1078,7 +1075,6 @@ fn check_governance_gate(
         }
     }
 }
-
 
 /// Argument parsing, id allocation, author resolution and output rendering — the write itself
 /// belongs to `qdev_core::create_story`, which takes the advisory lock, validates the generated
@@ -1449,7 +1445,7 @@ fn handle_update(
             return e.exit_code();
         }
     };
- 
+
     let mut if_version = update_args.if_version;
     let (_gov_just, override_decision) = match check_governance_gate(
         &root,

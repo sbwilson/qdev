@@ -17,8 +17,8 @@ pub mod write;
 
 pub use governance::{
     add_team_to_entity_owners, canonical_team_string, classify_mutation,
-    create_governance_override_decision, extract_entity_owners, is_user_owner,
-    normalize_team_name, resolve_user_teams, ScopeClassification,
+    create_governance_override_decision, extract_entity_owners, is_user_owner, normalize_team_name,
+    resolve_user_teams, ScopeClassification,
 };
 
 pub use lease::{

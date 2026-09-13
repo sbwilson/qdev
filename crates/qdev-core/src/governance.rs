@@ -8,7 +8,9 @@ use crate::config::{Config, StorageConfig};
 use crate::errors::QdevError;
 use crate::id::{allocate_decision_id_in_with_rng, Identifier};
 use crate::lease::{find_workspace_leases, get_lease, StoryLease};
-use crate::schema::{extract_frontmatter, validate_frontmatter, validate_value_detailed, EntityKind};
+use crate::schema::{
+    extract_frontmatter, validate_frontmatter, validate_value_detailed, EntityKind,
+};
 use crate::store::{DecisionRecord, EntityRecord, SqliteStore, Store};
 use crate::write::{
     acquire_workspace_write_lock, canonical_file_name, current_iso8601, directory_for_kind,
@@ -47,6 +49,7 @@ pub fn canonical_team_string(team: &str) -> String {
 /// Extracts declared owners from an entity's SQLite record or frontmatter file.
 /// If target_id is a child constraint (e.g. E12S4/NG-1) with no direct owners,
 /// falls back to its parent entity's owners.
+#[allow(clippy::disallowed_methods)] // Ownership inspection gate explicitly checks stale flag before using cached owners.
 pub fn extract_entity_owners(
     workspace_root: &Path,
     target_id: &str,
@@ -233,14 +236,14 @@ fn is_exempt_from_lease(
     }
 
     // 4. Scratchpads of the leased story
-    if target_kind == Some(EntityKind::Scratchpad) {
-        if workspace_leases.iter().any(|l| {
+    if target_kind == Some(EntityKind::Scratchpad)
+        && workspace_leases.iter().any(|l| {
             l.story_id == target_id
                 || target_id.starts_with(&format!("{}.", l.story_id))
                 || target_id.starts_with(&format!("{}/", l.story_id))
-        }) {
-            return true;
-        }
+        })
+    {
+        return true;
     }
 
     // 5. Deferred work originating from the leased story
@@ -286,6 +289,7 @@ fn is_exempt_from_lease(
 }
 
 /// Classifies an entity mutation against workspace leases and declared team ownership.
+#[allow(clippy::disallowed_methods)] // Scope classification gate explicitly resolves live or fallback disk entity kind.
 pub fn classify_mutation(
     workspace_root: &Path,
     target_id: &str,
@@ -554,8 +558,7 @@ pub fn add_team_to_entity_owners(
         trimmed_team.to_string()
     };
 
-    let (kind, id, file_path) =
-        resolve_entity_file(workspace_root, None, entity_id, storage)?;
+    let (kind, id, file_path) = resolve_entity_file(workspace_root, None, entity_id, storage)?;
 
     let _lock_guard = acquire_workspace_write_lock(workspace_root, storage)?;
 

@@ -1656,6 +1656,11 @@ fn test_half_migrated_v1_cache_is_reported_as_mismatch() {
 fn test_benchmark_warm_sweep_bound() {
     const N: usize = 1000;
     const WARM_SWEEPS: usize = 25;
+    // In virtualized CI environments on Windows (e.g. GitHub Actions), NTFS metadata
+    // overhead in unoptimized debug test builds can experience scheduling variance.
+    #[cfg(windows)]
+    const MEDIAN_BUDGET_MS: u128 = 60;
+    #[cfg(not(windows))]
     const MEDIAN_BUDGET_MS: u128 = 30;
     const CEILING_MS: u128 = 500;
 

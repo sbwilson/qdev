@@ -146,8 +146,7 @@ fn test_cli_update_in_lease_owned_story_succeeds_without_override() {
     // Verify file updated
     let content = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
     assert!(
-        content.contains("title: Updated Title")
-            || content.contains("title: \"Updated Title\"")
+        content.contains("title: Updated Title") || content.contains("title: \"Updated Title\"")
     );
 
     // Verify no DEC files created
@@ -377,7 +376,13 @@ fn test_cli_transition_scope_enforcement() {
     let mut trans_cmd = Command::cargo_bin("qdev").unwrap();
     trans_cmd
         .current_dir(root)
-        .args(["transition", "story", "E12S5", "in-progress", "--non-interactive"])
+        .args([
+            "transition",
+            "story",
+            "E12S5",
+            "in-progress",
+            "--non-interactive",
+        ])
         .assert()
         .failure()
         .code(3);
@@ -421,7 +426,11 @@ fn test_cli_relate_scope_enforcement() {
 
     // Sync cache so relate knows about entities
     let mut sync_cmd = Command::cargo_bin("qdev").unwrap();
-    sync_cmd.current_dir(root).args(["sync", "--rebuild"]).assert().success();
+    sync_cmd
+        .current_dir(root)
+        .args(["sync", "--rebuild"])
+        .assert()
+        .success();
 
     let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
     claim_cmd
@@ -601,7 +610,11 @@ fn test_cli_unrelate_scope_enforcement() {
 
     // First, relate E12 supersedes E13 with override
     let mut sync_cmd = Command::cargo_bin("qdev").unwrap();
-    sync_cmd.current_dir(root).args(["sync", "--rebuild"]).assert().success();
+    sync_cmd
+        .current_dir(root)
+        .args(["sync", "--rebuild"])
+        .assert()
+        .success();
 
     let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
     claim_cmd
@@ -699,7 +712,11 @@ context: Original context
     .unwrap();
 
     let mut sync_cmd = Command::cargo_bin("qdev").unwrap();
-    sync_cmd.current_dir(root).args(["sync", "--rebuild"]).assert().success();
+    sync_cmd
+        .current_dir(root)
+        .args(["sync", "--rebuild"])
+        .assert()
+        .success();
 
     // Claim lease on E12S4
     let mut claim_cmd = Command::cargo_bin("qdev").unwrap();

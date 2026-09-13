@@ -4,8 +4,8 @@ use std::path::Path;
 use qdev_core::config::Config;
 use qdev_core::governance::{
     add_team_to_entity_owners, canonical_team_string, classify_mutation,
-    create_governance_override_decision, extract_entity_owners, is_user_owner,
-    normalize_team_name, resolve_user_teams,
+    create_governance_override_decision, extract_entity_owners, is_user_owner, normalize_team_name,
+    resolve_user_teams,
 };
 use qdev_core::lease::claim_story;
 use qdev_core::schema::EntityKind;
@@ -250,21 +250,17 @@ fn test_classify_out_of_lease_and_cross_team() {
     claim_story(root, "E12S4", &author, None, None).unwrap();
 
     let config = qdev_core::load_config(root).unwrap().config;
-    let classification = classify_mutation(
-        root,
-        "E12",
-        Some(EntityKind::Epic),
-        &author,
-        &config,
-        None,
-    )
-    .unwrap();
+    let classification =
+        classify_mutation(root, "E12", Some(EntityKind::Epic), &author, &config, None).unwrap();
 
     assert!(classification.is_out_of_lease);
     assert!(classification.is_cross_team);
     assert!(!classification.is_exempt);
     assert_eq!(
-        classification.active_lease.as_ref().map(|l| l.story_id.as_str()),
+        classification
+            .active_lease
+            .as_ref()
+            .map(|l| l.story_id.as_str()),
         Some("E12S4")
     );
 }
@@ -282,15 +278,8 @@ fn test_classify_out_of_lease_same_team() {
     claim_story(root, "E12S4", &author, None, None).unwrap();
 
     let config = qdev_core::load_config(root).unwrap().config;
-    let classification = classify_mutation(
-        root,
-        "E12",
-        Some(EntityKind::Epic),
-        &author,
-        &config,
-        None,
-    )
-    .unwrap();
+    let classification =
+        classify_mutation(root, "E12", Some(EntityKind::Epic), &author, &config, None).unwrap();
 
     assert!(classification.is_out_of_lease);
     assert!(!classification.is_cross_team);
@@ -323,28 +312,14 @@ fn test_classify_exempt_entities() {
     assert!(dec_class.is_exempt);
 
     // 2. Child constraint of leased story is exempt
-    let constraint_class = classify_mutation(
-        root,
-        "E12S4/C1",
-        None,
-        &author,
-        &config,
-        None,
-    )
-    .unwrap();
+    let constraint_class =
+        classify_mutation(root, "E12S4/C1", None, &author, &config, None).unwrap();
     assert!(!constraint_class.is_out_of_lease);
     assert!(constraint_class.is_exempt);
 
     // 3. Child constraint of OTHER story is NOT exempt
-    let other_constraint_class = classify_mutation(
-        root,
-        "E12S5/C1",
-        None,
-        &author,
-        &config,
-        None,
-    )
-    .unwrap();
+    let other_constraint_class =
+        classify_mutation(root, "E12S5/C1", None, &author, &config, None).unwrap();
     assert!(other_constraint_class.is_out_of_lease);
     assert!(!other_constraint_class.is_exempt);
 }
@@ -395,7 +370,10 @@ fn test_create_governance_override_decision() {
     // Verify decision indexed in SQLite cache
     let cache_db = root.join(".qdev/cache/cache.sqlite");
     let store = SqliteStore::open(&cache_db).unwrap();
-    let dec_record = store.get_decision(&dec_id).unwrap().expect("decision indexed");
+    let dec_record = store
+        .get_decision(&dec_id)
+        .unwrap()
+        .expect("decision indexed");
     assert_eq!(dec_record.subject_id, "E12");
     assert_eq!(
         dec_record.decision_type.as_deref(),
@@ -417,10 +395,13 @@ fn test_add_team_to_entity_owners() {
     let author = Author::new("human", "sally");
 
     // Fails with version_mismatch if if_version doesn't match current version 1
-    let conflict_err = add_team_to_entity_owners(root, None, "E12", "team:ui-shell", &author, Some(999)).unwrap_err();
+    let conflict_err =
+        add_team_to_entity_owners(root, None, "E12", "team:ui-shell", &author, Some(999))
+            .unwrap_err();
     assert_eq!(conflict_err.code, "version_mismatch");
 
-    let new_owners = add_team_to_entity_owners(root, None, "E12", "team:ui-shell", &author, Some(1)).unwrap();
+    let new_owners =
+        add_team_to_entity_owners(root, None, "E12", "team:ui-shell", &author, Some(1)).unwrap();
     assert_eq!(new_owners, vec!["team:core-platform", "team:ui-shell"]);
 
     // Check frontmatter updated and version bumped to 2
@@ -434,8 +415,12 @@ fn test_add_team_to_entity_owners() {
     assert_eq!(extracted, vec!["team:core-platform", "team:ui-shell"]);
 
     // Adding an individual user without team: prefix
-    let user_owners = add_team_to_entity_owners(root, None, "E12", "bob", &author, Some(2)).unwrap();
-    assert_eq!(user_owners, vec!["team:core-platform", "team:ui-shell", "bob"]);
+    let user_owners =
+        add_team_to_entity_owners(root, None, "E12", "bob", &author, Some(2)).unwrap();
+    assert_eq!(
+        user_owners,
+        vec!["team:core-platform", "team:ui-shell", "bob"]
+    );
 
     // Adding same team again is idempotent and does not error
     let idempotent_owners =
@@ -492,12 +477,28 @@ fn test_originating_deferred_work_exemption() {
     let cfg = Config::default();
 
     // DW originating from leased story is exempt
-    let c1 = classify_mutation(root, "DW-001", Some(EntityKind::DeferredWork), &author, &cfg, None).unwrap();
+    let c1 = classify_mutation(
+        root,
+        "DW-001",
+        Some(EntityKind::DeferredWork),
+        &author,
+        &cfg,
+        None,
+    )
+    .unwrap();
     assert!(c1.is_exempt);
     assert!(!c1.is_out_of_lease);
 
     // DW originating from another story is not exempt
-    let c2 = classify_mutation(root, "DW-002", Some(EntityKind::DeferredWork), &author, &cfg, None).unwrap();
+    let c2 = classify_mutation(
+        root,
+        "DW-002",
+        Some(EntityKind::DeferredWork),
+        &author,
+        &cfg,
+        None,
+    )
+    .unwrap();
     assert!(!c2.is_exempt);
     assert!(c2.is_out_of_lease);
 }
@@ -521,7 +522,11 @@ fn test_cross_worktree_lease_detection() {
         started_at: "2026-09-13T00:00:00Z".to_string(),
         session_token: "tok123".to_string(),
     };
-    fs::write(lease_dir.join("E12S5.json"), serde_json::to_string(&lease).unwrap()).unwrap();
+    fs::write(
+        lease_dir.join("E12S5.json"),
+        serde_json::to_string(&lease).unwrap(),
+    )
+    .unwrap();
 
     let author = Author::new("human", "sally");
     let cfg = Config::default();

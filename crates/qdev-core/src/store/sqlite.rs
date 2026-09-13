@@ -3005,32 +3005,32 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
         let config_path = workspace_root.join("qdev.toml");
 
         // Collect the current on-disk file sets (the same 4+1 sets a full rebuild scans)
-        let mut entity_files = Vec::new();
+        let mut entity_files: Vec<(PathBuf, (i64, u64))> = Vec::new();
         let mut unreadable_dirs = Vec::new();
-        collect_markdown_files(&specs_dir, &mut entity_files, &mut unreadable_dirs);
-        collect_markdown_files(&state_dir, &mut entity_files, &mut unreadable_dirs);
-        entity_files.sort();
+        collect_markdown_files_with_stamp(&specs_dir, &mut entity_files, &mut unreadable_dirs);
+        collect_markdown_files_with_stamp(&state_dir, &mut entity_files, &mut unreadable_dirs);
+        entity_files.sort_by(|a, b| a.0.cmp(&b.0));
         // Deduped for the same reason as the rebuild's walk: an overlapping
         // `specs_dir`/`state_dir` layout would otherwise sweep a file twice.
-        entity_files.dedup();
+        entity_files.dedup_by(|a, b| a.0 == b.0);
 
-        let mut scratch_files = Vec::new();
-        collect_files_with_ext(
+        let mut scratch_files: Vec<(PathBuf, (i64, u64))> = Vec::new();
+        collect_files_with_ext_and_stamp(
             &scratch_dir,
             "jsonl",
             &mut scratch_files,
             &mut unreadable_dirs,
         );
-        scratch_files.sort();
+        scratch_files.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let mut evidence_files = Vec::new();
-        collect_files_with_ext(
+        let mut evidence_files: Vec<(PathBuf, (i64, u64))> = Vec::new();
+        collect_files_with_ext_and_stamp(
             &evidence_dir,
             "json",
             &mut evidence_files,
             &mut unreadable_dirs,
         );
-        evidence_files.sort();
+        evidence_files.sort_by(|a, b| a.0.cmp(&b.0));
 
         unreadable_dirs.sort_by(|a, b| a.0.cmp(&b.0));
         unreadable_dirs.dedup_by(|a, b| a.0 == b.0);
@@ -3040,33 +3040,38 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
             .map(|(d, _)| safe_relative_dir_path(workspace_root, d))
             .collect();
 
-        let mut disk: Vec<(String, PathBuf, SweepFileRole)> = Vec::new();
-        for f in &entity_files {
+        let mut disk: Vec<(String, PathBuf, SweepFileRole, (i64, u64))> = Vec::new();
+        for (f, stamp_size) in entity_files {
             disk.push((
-                relative_path(workspace_root, f),
-                f.clone(),
+                relative_path(workspace_root, &f),
+                f,
                 SweepFileRole::Markdown,
+                stamp_size,
             ));
         }
-        for f in &scratch_files {
+        for (f, stamp_size) in scratch_files {
             disk.push((
-                relative_path(workspace_root, f),
-                f.clone(),
+                relative_path(workspace_root, &f),
+                f,
                 SweepFileRole::Scratch,
+                stamp_size,
             ));
         }
-        for f in &evidence_files {
+        for (f, stamp_size) in evidence_files {
             disk.push((
-                relative_path(workspace_root, f),
-                f.clone(),
+                relative_path(workspace_root, &f),
+                f,
                 SweepFileRole::Evidence,
+                stamp_size,
             ));
         }
         if config_path.exists() {
+            let stamp_size = file_change_stamp(&config_path);
             disk.push((
                 "qdev.toml".to_string(),
                 config_path.clone(),
                 SweepFileRole::Config,
+                stamp_size,
             ));
         }
         let disk_paths: HashSet<String> = disk.iter().map(|d| d.0.clone()).collect();
@@ -3318,8 +3323,9 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
             }
 
             // 2. Sweep each on-disk file
-            for (rel, abs, role) in &disk {
-                let (stamp, size) = file_change_stamp(abs);
+            for (rel, abs, role, (stamp, size)) in &disk {
+                let stamp = *stamp;
+                let size = *size;
                 let size_i64 = size as i64;
                 let is_dirty = dirty_paths.contains(rel);
                 let restored_from_unreadable_dir = is_under_any_unreadable_dir(rel, &restored_dirs);
@@ -4098,10 +4104,8 @@ pub fn stamp_cannot_resolve_the_edit(
 /// ctime is only available on Unix. On Windows the stamp is mtime alone, so a permission-only
 /// change there is not seen until the file is otherwise touched; making a file unreadable on
 /// Windows takes an ACL edit, which no qdev operation performs.
-fn file_change_stamp(file_path: &Path) -> (i64, u64) {
-    let metadata = fs::metadata(file_path).ok();
+fn file_change_stamp_from_metadata(metadata: Option<&fs::Metadata>) -> (i64, u64) {
     let mtime = metadata
-        .as_ref()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
@@ -4111,7 +4115,6 @@ fn file_change_stamp(file_path: &Path) -> (i64, u64) {
     let stamp = {
         use std::os::unix::fs::MetadataExt;
         let ctime = metadata
-            .as_ref()
             .map(|m| {
                 let secs = m.ctime().saturating_mul(1_000_000_000);
                 secs.saturating_add(m.ctime_nsec())
@@ -4124,6 +4127,11 @@ fn file_change_stamp(file_path: &Path) -> (i64, u64) {
 
     let size = metadata.map(|m| m.len()).unwrap_or(0);
     (stamp, size)
+}
+
+fn file_change_stamp(file_path: &Path) -> (i64, u64) {
+    let metadata = fs::metadata(file_path).ok();
+    file_change_stamp_from_metadata(metadata.as_ref())
 }
 
 fn upsert_sync_state_row(
@@ -5798,9 +5806,9 @@ ON CONFLICT(id) DO UPDATE SET
     Ok(())
 }
 
-pub(crate) fn collect_markdown_files(
+pub(crate) fn collect_markdown_files_with_stamp(
     dir: &Path,
-    files: &mut Vec<PathBuf>,
+    files: &mut Vec<(PathBuf, (i64, u64))>,
     unreadable_dirs: &mut Vec<(PathBuf, std::io::Error)>,
 ) {
     match dir.try_exists() {
@@ -5819,13 +5827,110 @@ pub(crate) fn collect_markdown_files(
             for entry in entries {
                 match entry {
                     Ok(entry) => {
-                        let path = entry.path();
-                        if path.is_dir() && !path.is_symlink() {
-                            collect_markdown_files(&path, files, unreadable_dirs);
-                        } else if path.is_file() {
-                            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                                if ext.eq_ignore_ascii_case("md") {
-                                    files.push(path);
+                        let ft = match entry.file_type() {
+                            Ok(ft) => ft,
+                            Err(e) => {
+                                unreadable_dirs.push((dir.to_path_buf(), e));
+                                break;
+                            }
+                        };
+                        if ft.is_dir() && !ft.is_symlink() {
+                            collect_markdown_files_with_stamp(
+                                &entry.path(),
+                                files,
+                                unreadable_dirs,
+                            );
+                        } else {
+                            let name = entry.file_name();
+                            let is_md = Path::new(&name)
+                                .extension()
+                                .and_then(|s| s.to_str())
+                                .map(|ext| ext.eq_ignore_ascii_case("md"))
+                                .unwrap_or(false);
+                            if is_md {
+                                let is_file =
+                                    ft.is_file() || (ft.is_symlink() && entry.path().is_file());
+                                if is_file {
+                                    let meta = entry.metadata().ok();
+                                    let stamp_size = file_change_stamp_from_metadata(meta.as_ref());
+                                    files.push((entry.path(), stamp_size));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        unreadable_dirs.push((dir.to_path_buf(), e));
+                        break;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            unreadable_dirs.push((dir.to_path_buf(), e));
+        }
+    }
+}
+
+pub(crate) fn collect_markdown_files(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    unreadable_dirs: &mut Vec<(PathBuf, std::io::Error)>,
+) {
+    let mut with_stamps = Vec::new();
+    collect_markdown_files_with_stamp(dir, &mut with_stamps, unreadable_dirs);
+    files.extend(with_stamps.into_iter().map(|(p, _)| p));
+}
+
+fn collect_files_with_ext_and_stamp(
+    dir: &Path,
+    extension: &str,
+    files: &mut Vec<(PathBuf, (i64, u64))>,
+    unreadable_dirs: &mut Vec<(PathBuf, std::io::Error)>,
+) {
+    match dir.try_exists() {
+        Ok(false) => return,
+        Ok(true) => {}
+        Err(e) => {
+            unreadable_dirs.push((dir.to_path_buf(), e));
+            return;
+        }
+    }
+    if !dir.is_dir() {
+        return;
+    }
+    match fs::read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(entry) => {
+                        let ft = match entry.file_type() {
+                            Ok(ft) => ft,
+                            Err(e) => {
+                                unreadable_dirs.push((dir.to_path_buf(), e));
+                                break;
+                            }
+                        };
+                        if ft.is_dir() && !ft.is_symlink() {
+                            collect_files_with_ext_and_stamp(
+                                &entry.path(),
+                                extension,
+                                files,
+                                unreadable_dirs,
+                            );
+                        } else {
+                            let name = entry.file_name();
+                            let matches_ext = Path::new(&name)
+                                .extension()
+                                .and_then(|s| s.to_str())
+                                .map(|ext| ext.eq_ignore_ascii_case(extension))
+                                .unwrap_or(false);
+                            if matches_ext {
+                                let is_file =
+                                    ft.is_file() || (ft.is_symlink() && entry.path().is_file());
+                                if is_file {
+                                    let meta = entry.metadata().ok();
+                                    let stamp_size = file_change_stamp_from_metadata(meta.as_ref());
+                                    files.push((entry.path(), stamp_size));
                                 }
                             }
                         }
@@ -5849,44 +5954,9 @@ fn collect_files_with_ext(
     files: &mut Vec<PathBuf>,
     unreadable_dirs: &mut Vec<(PathBuf, std::io::Error)>,
 ) {
-    match dir.try_exists() {
-        Ok(false) => return,
-        Ok(true) => {}
-        Err(e) => {
-            unreadable_dirs.push((dir.to_path_buf(), e));
-            return;
-        }
-    }
-    if !dir.is_dir() {
-        return;
-    }
-    match fs::read_dir(dir) {
-        Ok(entries) => {
-            for entry in entries {
-                match entry {
-                    Ok(entry) => {
-                        let path = entry.path();
-                        if path.is_dir() && !path.is_symlink() {
-                            collect_files_with_ext(&path, extension, files, unreadable_dirs);
-                        } else if path.is_file() {
-                            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                                if ext.eq_ignore_ascii_case(extension) {
-                                    files.push(path);
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        unreadable_dirs.push((dir.to_path_buf(), e));
-                        break;
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            unreadable_dirs.push((dir.to_path_buf(), e));
-        }
-    }
+    let mut with_stamps = Vec::new();
+    collect_files_with_ext_and_stamp(dir, extension, &mut with_stamps, unreadable_dirs);
+    files.extend(with_stamps.into_iter().map(|(p, _)| p));
 }
 
 /// Infers an entity's kind from its `kind:` frontmatter field, its file path's directory
