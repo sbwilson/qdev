@@ -509,6 +509,9 @@ pub fn patch_frontmatter(
             .map(|l| format!("{}{}", l, newline))
             .collect();
         match v {
+            serde_yaml::Value::Sequence(seq) if seq.is_empty() => {
+                updates.insert(k.clone(), vec![format!("{}: []{}", k, newline)]);
+            }
             serde_yaml::Value::Mapping(_) | serde_yaml::Value::Sequence(_) => {
                 let mut key_lines = vec![format!("{}:{}", k, newline)];
                 for l in lines {
@@ -837,6 +840,18 @@ pub struct RelationRowChange {
     pub relation: String,
     pub target_id: String,
     /// `true` inserts the edge, `false` deletes it.
+    pub add: bool,
+}
+
+/// One constraint row to apply to the cache's `constraints` table in the same transaction as an
+/// entity upsert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstraintRowChange {
+    pub id: String,
+    pub owner_id: String,
+    pub kind: String,
+    pub text: String,
+    /// `true` inserts/updates the constraint, `false` deletes it.
     pub add: bool,
 }
 
@@ -1216,6 +1231,254 @@ ON CONFLICT(source_id, relation, target_id) DO NOTHING;
                     format!(
                         "Failed to apply relation '{}' --[{}]--> '{}': {}",
                         change.source_id, change.relation, change.target_id, e
+                    ),
+                )
+            })?;
+        }
+
+        // 4. Mark row as dirty in dirty_entities
+        let dirty_at = current_iso8601();
+        tx.execute(
+            r#"
+INSERT INTO dirty_entities (id, dirty_at)
+VALUES (?1, ?2)
+ON CONFLICT(id) DO UPDATE SET dirty_at = excluded.dirty_at;
+"#,
+            rusqlite::params![entity.id, dirty_at],
+        )
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to mark dirty in dirty_entities table: {}", e),
+            )
+        })?;
+
+        // 5. Invalidate sync_state for this entity path
+        tx.execute(
+            "DELETE FROM sync_state WHERE path = ?1;",
+            rusqlite::params![entity.source_path],
+        )
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to invalidate sync_state: {}", e),
+            )
+        })?;
+
+        tx.commit().map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to commit transaction: {}", e),
+            )
+        })?;
+
+        Ok(())
+    })
+}
+
+/// `upsert_cache_and_mark_dirty` plus, when `constraint_change` is given, the matching
+/// insert/delete on the `constraints` table — in the same transaction.
+pub fn upsert_cache_with_constraint(
+    cache_db_path: &Path,
+    entity: &EntityRecord,
+    constraint_change: Option<&ConstraintRowChange>,
+) -> Result<(), QdevError> {
+    let store = crate::store::SqliteStore::open(cache_db_path)?;
+
+    // Ensure schema exists
+    store.with_conn(|conn| {
+        crate::store::create_schema(conn)?;
+        Ok(())
+    })?;
+
+    store.with_conn_mut(|conn| {
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!("Failed to begin transaction: {}", e),
+                )
+            })?;
+
+        let (c_type, c_id) = match entity.created_by {
+            Some(ref a) => (Some(a.author_type.clone()), Some(a.id.clone())),
+            None => (None, None),
+        };
+        let (u_type, u_id) = match entity.updated_by {
+            Some(ref a) => (Some(a.author_type.clone()), Some(a.id.clone())),
+            None => (None, None),
+        };
+
+        // 0. Drop any row still claiming this file under a different id
+        let stale_path_ids: Vec<String> = {
+            let mut stmt = tx
+                .prepare("SELECT id FROM entities WHERE source_path = ?1 AND id <> ?2;")
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to prepare source_path conflict scan: {}", e),
+                    )
+                })?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![entity.source_path, entity.id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to scan for rows claiming '{}': {}", entity.source_path, e),
+                    )
+                })?;
+            let mut ids = Vec::new();
+            for r in rows {
+                ids.push(r.map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to read conflicting row id: {}", e),
+                    )
+                })?);
+            }
+            ids
+        };
+        for stale_id in &stale_path_ids {
+            delete_entity_row_shallow(&tx, stale_id)?;
+        }
+
+        // 0b. Kind change cleanup
+        let prev_kind: Option<String> = tx
+            .query_row(
+                "SELECT kind FROM entities WHERE id = ?1;",
+                rusqlite::params![entity.id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!(
+                        "Failed to read the cached kind of entity '{}': {}",
+                        entity.id, e
+                    ),
+                )
+            })?;
+        if let Some(prev_kind) = prev_kind
+            .as_deref()
+            .and_then(|k| EntityKind::from_str_loose(k).ok())
+        {
+            if prev_kind != entity.kind {
+                crate::store::sqlite::delete_kind_detail_row(&tx, &entity.id, prev_kind)?;
+            }
+        }
+
+        // 1. Upsert into entities table
+        tx.execute(
+            r#"
+INSERT INTO entities (
+    id, kind, title, status, owners, source_path, content_hash, version,
+    created_by_type, created_by_id, updated_by_type, updated_by_id, updated_at
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+ON CONFLICT(id) DO UPDATE SET
+    kind = excluded.kind,
+    title = excluded.title,
+    status = excluded.status,
+    owners = excluded.owners,
+    source_path = excluded.source_path,
+    content_hash = excluded.content_hash,
+    version = excluded.version,
+    created_by_type = COALESCE(excluded.created_by_type, entities.created_by_type),
+    created_by_id = COALESCE(excluded.created_by_id, entities.created_by_id),
+    updated_by_type = excluded.updated_by_type,
+    updated_by_id = excluded.updated_by_id,
+    updated_at = excluded.updated_at,
+    stale = 0;
+"#,
+            rusqlite::params![
+                entity.id,
+                entity.kind.as_str(),
+                entity.title,
+                entity.status,
+                entity.owners,
+                entity.source_path,
+                entity.content_hash,
+                entity.version,
+                c_type,
+                c_id,
+                u_type,
+                u_id,
+                entity.updated_at,
+            ],
+        )
+        .map_err(|e| {
+            QdevError::infrastructure_failure(
+                "sqlite_error",
+                format!("Failed to upsert into entities table: {}", e),
+            )
+        })?;
+
+        // 2. Kind-specific upsert: stories
+        if entity.kind == EntityKind::Story {
+            if let (Some(ref epic), Some(seq)) = (&entity.epic_id, entity.seq) {
+                tx.execute(
+                    r#"
+INSERT INTO stories (id, epic_id, seq, appetite, safety_class, target_modules)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+ON CONFLICT(id) DO UPDATE SET
+    epic_id = excluded.epic_id,
+    seq = excluded.seq,
+    appetite = excluded.appetite,
+    safety_class = excluded.safety_class,
+    target_modules = excluded.target_modules;
+"#,
+                    rusqlite::params![
+                        entity.id,
+                        epic,
+                        seq,
+                        entity.appetite,
+                        entity.safety_class,
+                        entity.target_modules,
+                    ],
+                )
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to upsert into stories table: {}", e),
+                    )
+                })?;
+            }
+        }
+
+        // 3. Apply the constraint change
+        if let Some(change) = constraint_change {
+            if change.add {
+                tx.execute(
+                    r#"
+INSERT INTO constraints (id, owner_id, kind, text)
+VALUES (?1, ?2, ?3, ?4)
+ON CONFLICT(id) DO UPDATE SET
+    owner_id = excluded.owner_id,
+    kind = excluded.kind,
+    text = excluded.text;
+"#,
+                    rusqlite::params![change.id, change.owner_id, change.kind, change.text],
+                )
+            } else {
+                tx.execute(
+                    "DELETE FROM constraints WHERE id = ?1 OR (owner_id = ?2 AND id = ?3);",
+                    rusqlite::params![
+                        change.id,
+                        change.owner_id,
+                        change.id.split('/').nth(1).unwrap_or(&change.id)
+                    ],
+                )
+            }
+            .map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "sqlite_error",
+                    format!(
+                        "Failed to apply constraint '{}' on owner '{}': {}",
+                        change.id, change.owner_id, e
                     ),
                 )
             })?;
@@ -2742,6 +3005,545 @@ pub fn apply_relation_change(
         new_version,
         changed: true,
         relations: relations_out,
+    })
+}
+
+/// Options for applying a constraint addition (`qdev constraint add`).
+#[derive(Debug, Clone)]
+pub struct ConstraintAddOptions {
+    pub workspace_root: PathBuf,
+    pub storage: Option<StorageConfig>,
+    pub entity_id: String,
+    pub kind: crate::id::ConstraintKind,
+    pub text: String,
+    pub if_version: Option<u64>,
+    pub author: Author,
+}
+
+/// Result returned from applying a constraint addition.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConstraintAddResult {
+    pub id: String,
+    pub relative_id: String,
+    pub owner_id: String,
+    pub kind: String,
+    pub text: String,
+    pub path: PathBuf,
+    pub rel_path: String,
+    pub old_version: u64,
+    pub new_version: u64,
+    pub constraints: Vec<serde_json::Value>,
+}
+
+/// Options for applying a constraint removal (`qdev constraint remove`).
+#[derive(Debug, Clone)]
+pub struct ConstraintRemoveOptions {
+    pub workspace_root: PathBuf,
+    pub storage: Option<StorageConfig>,
+    pub constraint_id: String,
+    pub justification: Option<String>,
+    pub if_version: Option<u64>,
+    pub author: Author,
+}
+
+/// Result returned from applying a constraint removal.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConstraintRemoveResult {
+    pub id: String,
+    pub owner_id: String,
+    pub path: PathBuf,
+    pub rel_path: String,
+    pub old_version: u64,
+    pub new_version: u64,
+    pub constraints: Vec<serde_json::Value>,
+}
+
+/// Patches an entity's `constraints:` frontmatter list to add a new negative or rabbit-hole constraint.
+/// Validates the entity exists and is a Story or Epic, checks `--if-version`, acquires advisory write lock,
+/// allocates next sequential constraint ID, bumps entity version, updates `updated_by`, validates against
+/// schema, writes atomically, and synchronizes SQLite cache.
+pub fn apply_constraint_add(
+    options: &ConstraintAddOptions,
+) -> Result<ConstraintAddResult, QdevError> {
+    options.author.validate()?;
+
+    let text_trimmed = options.text.trim();
+    if text_trimmed.is_empty() {
+        return Err(QdevError::usage_error("Constraint text cannot be empty"));
+    }
+
+    // 1. Resolve entity file
+    let (kind, id, file_path) = resolve_entity_file(
+        &options.workspace_root,
+        None,
+        &options.entity_id,
+        options.storage.as_ref(),
+    )?;
+
+    id.parse::<Identifier>().map_err(|e| {
+        QdevError::usage_error(format!("Invalid owner identifier '{}': {}", id, e))
+    })?;
+
+    if kind != EntityKind::Story && kind != EntityKind::Epic {
+        return Err(QdevError::usage_error(format!(
+            "Constraints can only be added to Story or Epic entities, found {:?}",
+            kind
+        )));
+    }
+
+    let rel_path = workspace_rel_path(&file_path, &options.workspace_root);
+
+    // 2. Acquire workspace advisory write lock
+    let _lock_guard = acquire_workspace_write_lock(&options.workspace_root, options.storage.as_ref())?;
+
+    // 3. Read existing file content
+    let existing_content = fs::read_to_string(&file_path).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "io_error",
+            format!(
+                "Failed to read entity file '{}': {}",
+                file_path.display(),
+                e
+            ),
+        )
+    })?;
+
+    let kind = kind_for_write(&file_path, &existing_content, kind);
+
+    let declared_version = frontmatter_version(&existing_content);
+    let old_version = declared_version.unwrap_or(0);
+    check_if_version(options.if_version, declared_version)?;
+
+    let (frontmatter_str, _) =
+        crate::schema::extract_frontmatter_str(&existing_content).map_err(|e| {
+            QdevError::logical_failure(
+                "missing_frontmatter",
+                format!(
+                    "Failed to locate frontmatter in '{}': {}",
+                    file_path.display(),
+                    e
+                ),
+            )
+        })?;
+    let old_frontmatter_yaml: serde_yaml::Value =
+        serde_yaml::from_str(frontmatter_str).map_err(|e| {
+            QdevError::logical_failure(
+                "yaml_parse_error",
+                format!(
+                    "Failed to parse frontmatter YAML in '{}': {}",
+                    file_path.display(),
+                    e
+                ),
+            )
+        })?;
+
+    // 4. Allocate next monotonic constraint id
+    let default_storage = StorageConfig::default();
+    let st = options.storage.as_ref().unwrap_or(&default_storage);
+    let cache_dir_rel = st.cache_dir.as_str();
+    let cache_db_path = options.workspace_root.join(cache_dir_rel).join("cache.sqlite");
+    let opt_store = if cache_db_path.is_file() {
+        crate::store::SqliteStore::open(&cache_db_path).ok()
+    } else {
+        None
+    };
+
+    let allocated_ident = crate::id::allocate_next_constraint_id_in(
+        &options.workspace_root,
+        st,
+        &id,
+        options.kind,
+        opt_store.as_ref().map(|s| s as &dyn crate::store::Store),
+    )?;
+
+    let allocated_id = allocated_ident.to_string();
+    let (seq_kind, seq_num) = match allocated_ident {
+        Identifier::Constraint { kind, number, .. } => (kind, number),
+        _ => unreachable!(),
+    };
+    let relative_id = format!("{}-{}", seq_kind.as_str(), seq_num);
+
+    // 5. Append to constraints sequence in frontmatter
+    let mut constraints_seq: Vec<serde_yaml::Value> = match old_frontmatter_yaml.get("constraints") {
+        None | Some(serde_yaml::Value::Null) => Vec::new(),
+        Some(serde_yaml::Value::Sequence(items)) => items.clone(),
+        Some(_) => {
+            return Err(QdevError::logical_failure(
+                "unsupported_constraints_shape",
+                format!(
+                    "Frontmatter 'constraints' in '{}' is not a sequence",
+                    file_path.display()
+                ),
+            ))
+        }
+    };
+
+    let mut new_item = serde_yaml::Mapping::new();
+    new_item.insert(
+        serde_yaml::Value::String("id".to_string()),
+        serde_yaml::Value::String(relative_id.clone()),
+    );
+    new_item.insert(
+        serde_yaml::Value::String("kind".to_string()),
+        serde_yaml::Value::String(options.kind.to_kind_str().to_string()),
+    );
+    new_item.insert(
+        serde_yaml::Value::String("text".to_string()),
+        serde_yaml::Value::String(text_trimmed.to_string()),
+    );
+    constraints_seq.push(serde_yaml::Value::Mapping(new_item));
+
+    let constraints_yaml = serde_yaml::Value::Sequence(constraints_seq);
+
+    // 6. Line-based frontmatter patch
+    let patch_opts = FrontmatterPatchOptions {
+        status: None,
+        title: None,
+        custom_fields: vec![("constraints".to_string(), constraints_yaml)],
+        author: Some(options.author.clone()),
+        if_version: options.if_version,
+    };
+
+    let (patched_content, new_version) = patch_frontmatter(&existing_content, &patch_opts)?;
+
+    // 7. Validate updated frontmatter against JSON Schema
+    validate_frontmatter(kind, &patched_content).map_err(|errs| {
+        QdevError::logical_failure(
+            "schema_validation_failed",
+            format!("Updated frontmatter failed schema validation: {:?}", errs),
+        )
+        .with_details(serde_json::json!({
+            "validation_errors": errs,
+        }))
+    })?;
+
+    // 8. Atomic write via tempfile rename
+    write_file_atomic(&file_path, &patched_content)?;
+
+    // 9. Extract updated frontmatter for cache and result
+    let updated_frontmatter =
+        crate::schema::extract_frontmatter(&patched_content).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "parse_error",
+                format!("Failed to parse updated frontmatter: {}", e),
+            )
+        })?;
+
+    let canonical_id = updated_frontmatter
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or(id);
+
+    let content_hash = sha256_digest(patched_content.as_bytes());
+    let title_val = updated_frontmatter
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let status_val = updated_frontmatter
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let owners_val = updated_frontmatter.get("owners").map(|v| v.to_string());
+
+    let c_author = updated_frontmatter
+        .get("created_by")
+        .and_then(|v| serde_json::from_value::<Author>(v.clone()).ok());
+    let u_author = Some(options.author.clone());
+
+    let (epic_id, seq, appetite, safety_class, target_modules) =
+        story_detail_fields(kind, &canonical_id, &updated_frontmatter);
+
+    let record = EntityRecord {
+        id: canonical_id.clone(),
+        kind,
+        title: title_val,
+        status: status_val,
+        owners: owners_val,
+        source_path: rel_path.clone(),
+        content_hash,
+        version: new_version,
+        created_by: c_author,
+        updated_by: u_author,
+        updated_at: current_iso8601(),
+        stale: false,
+        epic_id,
+        seq,
+        appetite,
+        safety_class,
+        target_modules,
+    };
+
+    upsert_cache_with_constraint(
+        &cache_db_path,
+        &record,
+        Some(&ConstraintRowChange {
+            id: allocated_id.clone(),
+            owner_id: canonical_id.clone(),
+            kind: options.kind.to_kind_str().to_string(),
+            text: text_trimmed.to_string(),
+            add: true,
+        }),
+    )?;
+
+    let constraints_out = updated_frontmatter
+        .get("constraints")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(ConstraintAddResult {
+        id: allocated_id,
+        relative_id,
+        owner_id: canonical_id,
+        kind: options.kind.to_kind_str().to_string(),
+        text: text_trimmed.to_string(),
+        path: file_path,
+        rel_path,
+        old_version,
+        new_version,
+        constraints: constraints_out,
+    })
+}
+
+/// Patches an entity's `constraints:` frontmatter list to remove a constraint.
+/// Validates that the constraint exists, verifies justification if entity is not in draft status,
+/// checks `--if-version`, acquires advisory write lock, bumps entity version, updates `updated_by`,
+/// validates against schema, writes atomically, and removes constraint from SQLite cache.
+pub fn apply_constraint_remove(
+    options: &ConstraintRemoveOptions,
+) -> Result<ConstraintRemoveResult, QdevError> {
+    options.author.validate()?;
+
+    let trimmed_target = options.constraint_id.trim();
+    let (owner_id, rel_cid) = trimmed_target.split_once('/').ok_or_else(|| {
+        QdevError::usage_error(format!(
+            "Invalid constraint identifier '{}', must be of form {{owner}}/{{kind}}-{{n}}",
+            trimmed_target
+        ))
+    })?;
+
+    // 1. Resolve entity file
+    let (kind, id, file_path) = resolve_entity_file(
+        &options.workspace_root,
+        None,
+        owner_id,
+        options.storage.as_ref(),
+    )
+    .map_err(|_| {
+        QdevError::usage_error_with_code(
+            "entity_not_found",
+            format!("Constraint '{}' not found", trimmed_target),
+        )
+    })?;
+
+    let rel_path = workspace_rel_path(&file_path, &options.workspace_root);
+
+    // 2. Acquire advisory write lock
+    let _lock_guard = acquire_workspace_write_lock(&options.workspace_root, options.storage.as_ref())?;
+
+    // 3. Read existing file content under lock
+    let fresh_content = fs::read_to_string(&file_path).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "io_error",
+            format!(
+                "Failed to read entity file '{}': {}",
+                file_path.display(),
+                e
+            ),
+        )
+    })?;
+
+    let kind = kind_for_write(&file_path, &fresh_content, kind);
+
+    let (frontmatter_str, _) =
+        crate::schema::extract_frontmatter_str(&fresh_content).map_err(|e| {
+            QdevError::logical_failure(
+                "missing_frontmatter",
+                format!(
+                    "Failed to locate frontmatter in '{}': {}",
+                    file_path.display(),
+                    e
+                ),
+            )
+        })?;
+    let frontmatter_yaml: serde_yaml::Value =
+        serde_yaml::from_str(frontmatter_str).map_err(|e| {
+            QdevError::logical_failure(
+                "yaml_parse_error",
+                format!(
+                    "Failed to parse frontmatter YAML in '{}': {}",
+                    file_path.display(),
+                    e
+                ),
+            )
+        })?;
+
+    // 4. Locate target constraint in frontmatter
+    let mut constraints_seq: Vec<serde_yaml::Value> = match frontmatter_yaml.get("constraints") {
+        Some(serde_yaml::Value::Sequence(items)) => items.clone(),
+        _ => Vec::new(),
+    };
+
+    let target_canonical = format!("{}/{}", owner_id, rel_cid);
+    let target_rel = rel_cid;
+
+    let existing_idx = constraints_seq.iter().position(|item| {
+        if let Some(item_id) = item.get("id").and_then(|v| v.as_str()) {
+            item_id == target_rel
+                || item_id == target_canonical.as_str()
+                || item_id
+                    .split_once('/')
+                    .map_or(false, |(o, r)| o == owner_id && r == target_rel)
+        } else {
+            false
+        }
+    });
+
+    let remove_idx = existing_idx.ok_or_else(|| {
+        QdevError::usage_error_with_code(
+            "entity_not_found",
+            format!("Constraint '{}' not found", trimmed_target),
+        )
+    })?;
+
+    // 5. Non-draft justification gate
+    let status_str = frontmatter_yaml
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if status_str != "draft" {
+        let just = options.justification.as_deref().unwrap_or("").trim();
+        if just.is_empty() {
+            return Err(QdevError::policy_refusal(
+                "needs_justification",
+                format!(
+                    "Removing constraint '{}' from non-draft entity '{}' requires a non-empty --justification",
+                    trimmed_target, owner_id
+                ),
+            ));
+        }
+    }
+
+    // 6. Verify optimistic concurrency
+    let declared_version = frontmatter_version(&fresh_content);
+    let old_version = declared_version.unwrap_or(0);
+    check_if_version(options.if_version, declared_version)?;
+
+    // 7. Remove the constraint
+    constraints_seq.remove(remove_idx);
+    let constraints_yaml = serde_yaml::Value::Sequence(constraints_seq);
+
+    // 8. Line-based frontmatter patch
+    let patch_opts = FrontmatterPatchOptions {
+        status: None,
+        title: None,
+        custom_fields: vec![("constraints".to_string(), constraints_yaml)],
+        author: Some(options.author.clone()),
+        if_version: options.if_version,
+    };
+
+    let (patched_content, new_version) = patch_frontmatter(&fresh_content, &patch_opts)?;
+
+    // 9. Validate updated frontmatter against JSON Schema
+    validate_frontmatter(kind, &patched_content).map_err(|errs| {
+        QdevError::logical_failure(
+            "schema_validation_failed",
+            format!("Updated frontmatter failed schema validation: {:?}", errs),
+        )
+        .with_details(serde_json::json!({
+            "validation_errors": errs,
+        }))
+    })?;
+
+    // 10. Atomic write via tempfile rename
+    write_file_atomic(&file_path, &patched_content)?;
+
+    // 11. Update SQLite cache
+    let default_storage = StorageConfig::default();
+    let st = options.storage.as_ref().unwrap_or(&default_storage);
+    let cache_dir_rel = st.cache_dir.as_str();
+    let cache_db_path = options.workspace_root.join(cache_dir_rel).join("cache.sqlite");
+
+    let updated_frontmatter =
+        crate::schema::extract_frontmatter(&patched_content).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "parse_error",
+                format!("Failed to parse updated frontmatter: {}", e),
+            )
+        })?;
+
+    let canonical_id = updated_frontmatter
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or(id);
+
+    let content_hash = sha256_digest(patched_content.as_bytes());
+    let title_val = updated_frontmatter
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let status_val = updated_frontmatter
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let owners_val = updated_frontmatter.get("owners").map(|v| v.to_string());
+
+    let c_author = updated_frontmatter
+        .get("created_by")
+        .and_then(|v| serde_json::from_value::<Author>(v.clone()).ok());
+    let u_author = Some(options.author.clone());
+
+    let (epic_id, seq, appetite, safety_class, target_modules) =
+        story_detail_fields(kind, &canonical_id, &updated_frontmatter);
+
+    let record = EntityRecord {
+        id: canonical_id.clone(),
+        kind,
+        title: title_val,
+        status: status_val,
+        owners: owners_val,
+        source_path: rel_path.clone(),
+        content_hash,
+        version: new_version,
+        created_by: c_author,
+        updated_by: u_author,
+        updated_at: current_iso8601(),
+        stale: false,
+        epic_id,
+        seq,
+        appetite,
+        safety_class,
+        target_modules,
+    };
+
+    upsert_cache_with_constraint(
+        &cache_db_path,
+        &record,
+        Some(&ConstraintRowChange {
+            id: target_canonical.clone(),
+            owner_id: canonical_id.clone(),
+            kind: String::new(),
+            text: String::new(),
+            add: false,
+        }),
+    )?;
+
+    let constraints_out = updated_frontmatter
+        .get("constraints")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(ConstraintRemoveResult {
+        id: target_canonical,
+        owner_id: canonical_id,
+        path: file_path,
+        rel_path,
+        old_version,
+        new_version,
+        constraints: constraints_out,
     })
 }
 

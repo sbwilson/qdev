@@ -1,0 +1,2599 @@
+diff --git a/crates/qdev-cli/src/cli.rs b/crates/qdev-cli/src/cli.rs
+index 648e541..84d38cf 100644
+--- a/crates/qdev-cli/src/cli.rs
++++ b/crates/qdev-cli/src/cli.rs
+@@ -57,6 +57,8 @@ pub enum Commands {
+     Relate(RelateArgs),
+     /// Remove a relation from a source entity to a target entity
+     Unrelate(UnrelateArgs),
++    /// Declare or remove negative and rabbit-hole constraints
++    Constraint(ConstraintArgs),
+     /// Render the story dependency graph
+     Graph(GraphArgs),
+     /// Surface cached and freshly computed integrity findings
+@@ -195,6 +197,67 @@ pub struct UnrelateArgs {
+     pub author_id: Option<String>,
+ }
+ 
++#[derive(Parser, Debug, Clone, PartialEq, Eq)]
++pub struct ConstraintArgs {
++    #[command(subcommand)]
++    pub command: ConstraintCommands,
++}
++
++#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
++pub enum ConstraintCommands {
++    /// Add a negative or rabbit-hole constraint to an entity
++    Add(ConstraintAddArgs),
++    /// Remove a constraint from an entity
++    Remove(ConstraintRemoveArgs),
++}
++
++#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
++pub struct ConstraintAddArgs {
++    /// Target entity identifier (e.g. E12S4 or E12)
++    pub target: String,
++
++    /// Constraint kind: 'no_go', 'rabbit_hole', or 'appetite'
++    #[arg(long = "kind")]
++    pub kind: String,
++
++    /// Constraint description text
++    pub text: String,
++
++    /// Optimistic concurrency control: expected existing entity version
++    #[arg(long = "if-version")]
++    pub if_version: Option<u64>,
++
++    /// Attribution author type override ('human' or 'agent')
++    #[arg(long = "author-type")]
++    pub author_type: Option<String>,
++
++    /// Attribution developer/agent ID override
++    #[arg(long = "author-id")]
++    pub author_id: Option<String>,
++}
++
++#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
++pub struct ConstraintRemoveArgs {
++    /// Constraint identifier to remove (e.g. E12S4/NG-1)
++    pub target: String,
++
++    /// Justification for removing a constraint from a non-draft entity
++    #[arg(long = "justification")]
++    pub justification: Option<String>,
++
++    /// Optimistic concurrency control: expected existing entity version
++    #[arg(long = "if-version")]
++    pub if_version: Option<u64>,
++
++    /// Attribution author type override ('human' or 'agent')
++    #[arg(long = "author-type")]
++    pub author_type: Option<String>,
++
++    /// Attribution developer/agent ID override
++    #[arg(long = "author-id")]
++    pub author_id: Option<String>,
++}
++
+ #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+ pub struct GetArgs {
+     /// Target entity kind or identifier (e.g. "story" or "E12S4")
+diff --git a/crates/qdev-cli/src/main.rs b/crates/qdev-cli/src/main.rs
+index 1c1a53c..9badcd6 100644
+--- a/crates/qdev-cli/src/main.rs
++++ b/crates/qdev-cli/src/main.rs
+@@ -279,6 +279,14 @@ fn run(raw_args: &[String]) -> ExitCode {
+             &current_dir,
+             interactivity,
+         ),
++        Some(Commands::Constraint(ref constraint_args)) => handle_constraint(
++            constraint_args,
++            &annotated_config,
++            &cli,
++            &output,
++            &current_dir,
++            interactivity,
++        ),
+         Some(Commands::Graph(ref graph_args)) => {
+             handle_graph(graph_args, &annotated_config, &cli, &output, &current_dir)
+         }
+@@ -376,6 +384,7 @@ fn requires_workspace(command: Option<&Commands>) -> bool {
+         | Some(Commands::List(_))
+         | Some(Commands::Relate(_))
+         | Some(Commands::Unrelate(_))
++        | Some(Commands::Constraint(_))
+         | Some(Commands::Graph(_))
+         | Some(Commands::Validate(_))
+         | Some(Commands::Sync(_))
+@@ -2467,6 +2476,293 @@ fn handle_unrelate(
+     ExitCode::Success
+ }
+ 
++#[derive(Serialize)]
++struct ConstraintAddPayload {
++    id: String,
++    relative_id: String,
++    owner_id: String,
++    kind: String,
++    text: String,
++    version: u64,
++    constraints: Vec<serde_json::Value>,
++}
++
++#[derive(Serialize)]
++struct ConstraintRemovePayload {
++    id: String,
++    owner_id: String,
++    version: u64,
++    constraints: Vec<serde_json::Value>,
++}
++
++fn handle_constraint(
++    args: &cli::ConstraintArgs,
++    annotated_config: &qdev_core::AnnotatedConfig,
++    cli: &Cli,
++    output: &OutputEmitter,
++    current_dir: &std::path::Path,
++    interactivity: Interactivity,
++) -> ExitCode {
++    match args.command {
++        cli::ConstraintCommands::Add(ref add_args) => handle_constraint_add(
++            add_args,
++            annotated_config,
++            cli,
++            output,
++            current_dir,
++            interactivity,
++        ),
++        cli::ConstraintCommands::Remove(ref remove_args) => handle_constraint_remove(
++            remove_args,
++            annotated_config,
++            cli,
++            output,
++            current_dir,
++            interactivity,
++        ),
++    }
++}
++
++fn handle_constraint_add(
++    add_args: &cli::ConstraintAddArgs,
++    annotated_config: &qdev_core::AnnotatedConfig,
++    cli: &Cli,
++    output: &OutputEmitter,
++    current_dir: &std::path::Path,
++    interactivity: Interactivity,
++) -> ExitCode {
++    let root = qdev_core::find_workspace_root(current_dir);
++
++    let kind = match qdev_core::ConstraintKind::from_kind_str(&add_args.kind) {
++        Some(k) => k,
++        None => {
++            let err = QdevError::usage_error(format!(
++                "Invalid constraint kind '{}', expected one of: 'no_go', 'rabbit_hole', 'appetite'",
++                add_args.kind
++            ));
++            let _ = output.emit_error(&err);
++            return err.exit_code();
++        }
++    };
++
++    if add_args.text.trim().is_empty() {
++        let err = QdevError::usage_error("Constraint text cannot be empty");
++        let _ = output.emit_error(&err);
++        return err.exit_code();
++    }
++
++    let author = match resolve_author(
++        add_args.author_type.as_deref(),
++        add_args.author_id.as_deref(),
++        annotated_config,
++        &root,
++    ) {
++        Ok(a) => a,
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    };
++
++    let mut if_version = add_args.if_version;
++    let (_gov_just, override_decision) = match check_governance_gate(
++        &root,
++        &add_args.target,
++        None,
++        &author,
++        annotated_config,
++        interactivity,
++        cli,
++        output,
++        &mut if_version,
++    ) {
++        Ok(GovernanceOutcome::Proceed {
++            justification,
++            override_decision,
++        }) => (justification, override_decision),
++        Ok(GovernanceOutcome::Aborted) => return ExitCode::Success,
++        Err(code) => return code,
++    };
++
++    let opts = qdev_core::ConstraintAddOptions {
++        workspace_root: root.clone(),
++        storage: Some(annotated_config.config.storage.clone()),
++        entity_id: add_args.target.clone(),
++        kind,
++        text: add_args.text.clone(),
++        if_version,
++        author: author.clone(),
++    };
++
++    let res = match qdev_core::apply_constraint_add(&opts) {
++        Ok(r) => r,
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    };
++
++    if let Some((dec_type, dec_just)) = override_decision {
++        if let Err(e) = qdev_core::create_governance_override_decision(
++            &root,
++            Some(&annotated_config.config.storage),
++            &add_args.target,
++            &dec_type,
++            &dec_just,
++            &author,
++            None,
++        ) {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    }
++
++    if cli.json {
++        let envelope = JsonEnvelope::new(ConstraintAddPayload {
++            id: res.id.clone(),
++            relative_id: res.relative_id.clone(),
++            owner_id: res.owner_id.clone(),
++            kind: res.kind.clone(),
++            text: res.text.clone(),
++            version: res.new_version,
++            constraints: res.constraints,
++        });
++        if let Err(e) = output.emit_envelope(&envelope) {
++            let err = QdevError::infrastructure_failure(
++                "io_error",
++                format!("Failed to emit constraint envelope: {}", e),
++            );
++            let _ = output.emit_error(&err);
++            return ExitCode::InfrastructureFailure;
++        }
++    } else {
++        println!(
++            "Added constraint {} [{}] to {} (version {}) at {}",
++            res.id, res.kind, res.owner_id, res.new_version, res.rel_path
++        );
++    }
++
++    ExitCode::Success
++}
++
++fn handle_constraint_remove(
++    remove_args: &cli::ConstraintRemoveArgs,
++    annotated_config: &qdev_core::AnnotatedConfig,
++    cli: &Cli,
++    output: &OutputEmitter,
++    current_dir: &std::path::Path,
++    interactivity: Interactivity,
++) -> ExitCode {
++    let root = qdev_core::find_workspace_root(current_dir);
++
++    let (owner_id, _) = match remove_args.target.trim().split_once('/') {
++        Some((o, r)) if !o.is_empty() && !r.is_empty() => (o, r),
++        _ => {
++            let err = QdevError::usage_error(format!(
++                "Invalid constraint identifier '{}', must be of form {{owner}}/{{kind}}-{{n}}",
++                remove_args.target
++            ));
++            let _ = output.emit_error(&err);
++            return err.exit_code();
++        }
++    };
++
++    let author = match resolve_author(
++        remove_args.author_type.as_deref(),
++        remove_args.author_id.as_deref(),
++        annotated_config,
++        &root,
++    ) {
++        Ok(a) => a,
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    };
++
++    let mut if_version = remove_args.if_version;
++    let (gov_just, override_decision) = match check_governance_gate(
++        &root,
++        owner_id,
++        None,
++        &author,
++        annotated_config,
++        interactivity,
++        cli,
++        output,
++        &mut if_version,
++    ) {
++        Ok(GovernanceOutcome::Proceed {
++            justification,
++            override_decision,
++        }) => (justification, override_decision),
++        Ok(GovernanceOutcome::Aborted) => return ExitCode::Success,
++        Err(code) => return code,
++    };
++
++    let effective_justification = remove_args
++        .justification
++        .clone()
++        .or_else(|| cli.justification.clone())
++        .or(gov_just);
++
++    let opts = qdev_core::ConstraintRemoveOptions {
++        workspace_root: root.clone(),
++        storage: Some(annotated_config.config.storage.clone()),
++        constraint_id: remove_args.target.clone(),
++        justification: effective_justification,
++        if_version,
++        author: author.clone(),
++    };
++
++    let res = match qdev_core::apply_constraint_remove(&opts) {
++        Ok(r) => r,
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    };
++
++    if let Some((dec_type, dec_just)) = override_decision {
++        if let Err(e) = qdev_core::create_governance_override_decision(
++            &root,
++            Some(&annotated_config.config.storage),
++            owner_id,
++            &dec_type,
++            &dec_just,
++            &author,
++            None,
++        ) {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    }
++
++    if cli.json {
++        let envelope = JsonEnvelope::new(ConstraintRemovePayload {
++            id: res.id.clone(),
++            owner_id: res.owner_id.clone(),
++            version: res.new_version,
++            constraints: res.constraints,
++        });
++        if let Err(e) = output.emit_envelope(&envelope) {
++            let err = QdevError::infrastructure_failure(
++                "io_error",
++                format!("Failed to emit constraint envelope: {}", e),
++            );
++            let _ = output.emit_error(&err);
++            return ExitCode::InfrastructureFailure;
++        }
++    } else {
++        println!(
++            "Removed constraint {} from {} (version {}) at {}",
++            res.id, res.owner_id, res.new_version, res.rel_path
++        );
++    }
++
++    ExitCode::Success
++}
++
+ /// Renders a single entity projection as a compact `key: value` text block.
+ fn render_get_entity_text(p: &qdev_core::EntityProjection) -> String {
+     let mut out = String::new();
+diff --git a/crates/qdev-cli/tests/workspace_guard_cli_tests.rs b/crates/qdev-cli/tests/workspace_guard_cli_tests.rs
+index a74963f..08d31e2 100644
+--- a/crates/qdev-cli/tests/workspace_guard_cli_tests.rs
++++ b/crates/qdev-cli/tests/workspace_guard_cli_tests.rs
+@@ -25,6 +25,7 @@ fn guarded_invocations() -> Vec<Vec<&'static str>> {
+         vec!["doctor"],
+         vec!["claim", "story", "E1S1"],
+         vec!["release", "story", "E1S1"],
++        vec!["constraint", "add", "E1S1", "--kind", "no_go", "text"],
+     ]
+ }
+ 
+diff --git a/crates/qdev-core/src/id.rs b/crates/qdev-core/src/id.rs
+index b2a65dc..ff0673b 100644
+--- a/crates/qdev-core/src/id.rs
++++ b/crates/qdev-core/src/id.rs
+@@ -105,12 +105,13 @@ impl<'de> Deserialize<'de> for ConstraintOwner {
+     }
+ }
+ 
+-/// Kind of constraint (NoGo or RabbitHole).
++/// Kind of constraint (NoGo, RabbitHole, or Appetite).
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+ #[serde(rename_all = "snake_case")]
+ pub enum ConstraintKind {
+     NoGo,
+     RabbitHole,
++    Appetite,
+ }
+ 
+ impl ConstraintKind {
+@@ -118,6 +119,33 @@ impl ConstraintKind {
+         match self {
+             ConstraintKind::NoGo => "NG",
+             ConstraintKind::RabbitHole => "RH",
++            ConstraintKind::Appetite => "APP",
++        }
++    }
++
++    pub fn to_kind_str(&self) -> &'static str {
++        match self {
++            ConstraintKind::NoGo => "no_go",
++            ConstraintKind::RabbitHole => "rabbit_hole",
++            ConstraintKind::Appetite => "appetite",
++        }
++    }
++
++    pub fn from_kind_str(s: &str) -> Option<Self> {
++        match s {
++            "no_go" => Some(ConstraintKind::NoGo),
++            "rabbit_hole" => Some(ConstraintKind::RabbitHole),
++            "appetite" => Some(ConstraintKind::Appetite),
++            _ => None,
++        }
++    }
++
++    pub fn from_prefix(s: &str) -> Option<Self> {
++        match s {
++            "NG" => Some(ConstraintKind::NoGo),
++            "RH" => Some(ConstraintKind::RabbitHole),
++            "APP" => Some(ConstraintKind::Appetite),
++            _ => None,
+         }
+     }
+ }
+@@ -362,6 +390,7 @@ fn parse_constraint(
+         let kind = match kind_str {
+             "NG" => ConstraintKind::NoGo,
+             "RH" => ConstraintKind::RabbitHole,
++            "APP" => ConstraintKind::Appetite,
+             _ => return Err(IdParseError::InvalidConstraint(full_str.to_string())),
+         };
+         let number = parse_positive_int(num_str, full_str)?;
+@@ -712,3 +741,124 @@ pub fn allocate_decision_id(workspace_root: &Path) -> Result<Identifier, QdevErr
+     let mut rng = rand::rng();
+     allocate_decision_id_with_rng(workspace_root, &mut rng)
+ }
++
++/// Extracts the sequence number `n` from a constraint ID string (relative e.g. `NG-1` or
++/// absolute e.g. `E12S4/NG-1`) for the specified kind prefix.
++pub fn parse_constraint_seq(
++    id_str: &str,
++    expected_owner: Option<&str>,
++    kind: ConstraintKind,
++) -> Option<u32> {
++    let (owner_part, suffix) = if let Some((o, s)) = id_str.split_once('/') {
++        (Some(o), s)
++    } else {
++        (None, id_str)
++    };
++
++    if let (Some(exp), Some(act)) = (expected_owner, owner_part) {
++        if !exp.eq_ignore_ascii_case(act) {
++            return None;
++        }
++    }
++
++    let (prefix, num_str) = suffix.split_once('-')?;
++    if prefix != kind.as_str() {
++        return None;
++    }
++    if num_str.starts_with('0') || !num_str.chars().all(|c| c.is_ascii_digit()) {
++        return None;
++    }
++    num_str.parse::<u32>().ok().filter(|&n| n >= 1)
++}
++
++/// Allocates the next monotonic constraint identifier for an owner entity and kind,
++/// assuming the default `[storage]` layout and no cache.
++pub fn allocate_next_constraint_id(
++    workspace_root: &Path,
++    owner_id: &str,
++    kind: ConstraintKind,
++) -> Result<Identifier, QdevError> {
++    allocate_next_constraint_id_in(
++        workspace_root,
++        &StorageConfig::default(),
++        owner_id,
++        kind,
++        None,
++    )
++}
++
++/// Allocates the next monotonic constraint identifier for an owner entity and kind,
++/// scanning existing constraints in both the entity frontmatter and the SQLite cache.
++pub fn allocate_next_constraint_id_in(
++    workspace_root: &Path,
++    storage: &StorageConfig,
++    owner_id: &str,
++    kind: ConstraintKind,
++    store: Option<&dyn crate::store::Store>,
++) -> Result<Identifier, QdevError> {
++    let owner = match owner_id.parse::<Identifier>() {
++        Ok(Identifier::Epic { number }) => ConstraintOwner::Epic(number),
++        Ok(Identifier::Story { epic, story }) => ConstraintOwner::Story(epic, story),
++        _ => {
++            return Err(QdevError::usage_error(format!(
++                "Invalid constraint owner '{}', must be Epic (e.g. E12) or Story (e.g. E12S4)",
++                owner_id
++            )))
++        }
++    };
++
++    let mut existing_ids = HashSet::new();
++
++    // 1. Scan SQLite cache if store is provided
++    if let Some(s) = store {
++        if let Ok(records) = s.get_constraints_for_owner(owner_id) {
++            for r in records {
++                existing_ids.insert(r.id);
++            }
++        }
++    }
++
++    // 2. Scan entity frontmatter file
++    if let Ok((_kind, _id, file_path)) =
++        crate::write::resolve_entity_file(workspace_root, None, owner_id, Some(storage))
++    {
++        if let Ok(content) = std::fs::read_to_string(&file_path) {
++            if let Ok(frontmatter) = crate::schema::extract_frontmatter(&content) {
++                if let Some(serde_json::Value::Array(constraints)) = frontmatter.get("constraints") {
++                    for c in constraints {
++                        if let Some(id_val) = c.get("id").and_then(|v| v.as_str()) {
++                            existing_ids.insert(id_val.to_string());
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    let mut max_n = 0u32;
++    for id_str in &existing_ids {
++        if let Some(n) = parse_constraint_seq(id_str, Some(owner_id), kind) {
++            if n > max_n {
++                max_n = n;
++            }
++        }
++    }
++
++    let next_n = max_n.checked_add(1).ok_or_else(|| {
++        QdevError::logical_failure(
++            "id_space_exhausted",
++            format!(
++                "Owner {} has exhausted constraint numbers for kind {}",
++                owner_id,
++                kind.as_str()
++            ),
++        )
++    })?;
++
++    Ok(Identifier::Constraint {
++        owner,
++        kind,
++        number: next_n,
++    })
++}
++
+diff --git a/crates/qdev-core/src/lib.rs b/crates/qdev-core/src/lib.rs
+index 22d9b79..32ad81a 100644
+--- a/crates/qdev-core/src/lib.rs
++++ b/crates/qdev-core/src/lib.rs
+@@ -59,8 +59,10 @@ pub use errors::{ExitCode, QdevError};
+ pub use id::{
+     allocate_decision_id, allocate_decision_id_in_with_rng, allocate_decision_id_with_rng,
+     allocate_deferred_work_id, allocate_deferred_work_id_in_with_rng,
+-    allocate_deferred_work_id_with_rng, allocate_next_story_id, allocate_next_story_id_in,
+-    ConstraintKind, ConstraintOwner, IdParseError, Identifier, IdentifierKind,
++    allocate_deferred_work_id_with_rng, allocate_next_constraint_id,
++    allocate_next_constraint_id_in, allocate_next_story_id, allocate_next_story_id_in,
++    parse_constraint_seq, ConstraintKind, ConstraintOwner, IdParseError, Identifier,
++    IdentifierKind,
+ };
+ pub use init::{
+     gitignore_entries, init, standard_directories, verify_cache_compatible, InitLayout,
+@@ -94,14 +96,16 @@ pub use validate::{
+     DuplicateIdScan,
+ };
+ pub use write::{
+-    acquire_write_lock, apply_entity_update, apply_relation_change, canonical_file_name,
+-    create_story, current_iso8601, directory_for_kind, filename_carries_id,
+-    find_file_in_dir_for_id, id_carried_by_filename, iso8601_from_timestamp, kind_for_write,
+-    patch_frontmatter, purge_entity_row_for_moved_file, renamed_file_name,
++    acquire_write_lock, apply_constraint_add, apply_constraint_remove, apply_entity_update,
++    apply_relation_change, canonical_file_name, create_story, current_iso8601, directory_for_kind,
++    filename_carries_id, find_file_in_dir_for_id, id_carried_by_filename, iso8601_from_timestamp,
++    kind_for_write, patch_frontmatter, purge_entity_row_for_moved_file, renamed_file_name,
+     replace_markdown_section, resolve_entity_file, sha256_digest, upsert_cache_and_mark_dirty,
+-    upsert_cache_with_relation, write_file_atomic, AdvisoryLockGuard, Author, EntityUpdateOptions,
+-    EntityUpdateResult, FrontmatterPatchOptions, RelationChangeOptions, RelationChangeResult,
+-    RelationRowChange, StoryCreateOptions, StoryCreateResult,
++    upsert_cache_with_constraint, upsert_cache_with_relation, write_file_atomic, AdvisoryLockGuard,
++    Author, ConstraintAddOptions, ConstraintAddResult, ConstraintRemoveOptions,
++    ConstraintRemoveResult, ConstraintRowChange, EntityUpdateOptions, EntityUpdateResult,
++    FrontmatterPatchOptions, RelationChangeOptions, RelationChangeResult, RelationRowChange,
++    StoryCreateOptions, StoryCreateResult,
+ };
+ 
+ use serde::{Deserialize, Serialize};
+diff --git a/crates/qdev-core/src/write.rs b/crates/qdev-core/src/write.rs
+index 67b2c4e..5f417cd 100644
+--- a/crates/qdev-core/src/write.rs
++++ b/crates/qdev-core/src/write.rs
+@@ -509,6 +509,9 @@ pub fn patch_frontmatter(
+             .map(|l| format!("{}{}", l, newline))
+             .collect();
+         match v {
++            serde_yaml::Value::Sequence(seq) if seq.is_empty() => {
++                updates.insert(k.clone(), vec![format!("{}: []{}", k, newline)]);
++            }
+             serde_yaml::Value::Mapping(_) | serde_yaml::Value::Sequence(_) => {
+                 let mut key_lines = vec![format!("{}:{}", k, newline)];
+                 for l in lines {
+@@ -840,6 +843,18 @@ pub struct RelationRowChange {
+     pub add: bool,
+ }
+ 
++/// One constraint row to apply to the cache's `constraints` table in the same transaction as an
++/// entity upsert.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct ConstraintRowChange {
++    pub id: String,
++    pub owner_id: String,
++    pub kind: String,
++    pub text: String,
++    /// `true` inserts/updates the constraint, `false` deletes it.
++    pub add: bool,
++}
++
+ /// Deletes one entity's own rows — `entities`, its `stories` detail row, and its
+ /// `dirty_entities` marker — and nothing else.
+ ///
+@@ -1261,6 +1276,254 @@ ON CONFLICT(id) DO UPDATE SET dirty_at = excluded.dirty_at;
+     })
+ }
+ 
++/// `upsert_cache_and_mark_dirty` plus, when `constraint_change` is given, the matching
++/// insert/delete on the `constraints` table — in the same transaction.
++pub fn upsert_cache_with_constraint(
++    cache_db_path: &Path,
++    entity: &EntityRecord,
++    constraint_change: Option<&ConstraintRowChange>,
++) -> Result<(), QdevError> {
++    let store = crate::store::SqliteStore::open(cache_db_path)?;
++
++    // Ensure schema exists
++    store.with_conn(|conn| {
++        crate::store::create_schema(conn)?;
++        Ok(())
++    })?;
++
++    store.with_conn_mut(|conn| {
++        let tx = conn
++            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
++            .map_err(|e| {
++                QdevError::infrastructure_failure(
++                    "sqlite_error",
++                    format!("Failed to begin transaction: {}", e),
++                )
++            })?;
++
++        let (c_type, c_id) = match entity.created_by {
++            Some(ref a) => (Some(a.author_type.clone()), Some(a.id.clone())),
++            None => (None, None),
++        };
++        let (u_type, u_id) = match entity.updated_by {
++            Some(ref a) => (Some(a.author_type.clone()), Some(a.id.clone())),
++            None => (None, None),
++        };
++
++        // 0. Drop any row still claiming this file under a different id
++        let stale_path_ids: Vec<String> = {
++            let mut stmt = tx
++                .prepare("SELECT id FROM entities WHERE source_path = ?1 AND id <> ?2;")
++                .map_err(|e| {
++                    QdevError::infrastructure_failure(
++                        "sqlite_error",
++                        format!("Failed to prepare source_path conflict scan: {}", e),
++                    )
++                })?;
++            let rows = stmt
++                .query_map(
++                    rusqlite::params![entity.source_path, entity.id],
++                    |row| row.get::<_, String>(0),
++                )
++                .map_err(|e| {
++                    QdevError::infrastructure_failure(
++                        "sqlite_error",
++                        format!("Failed to scan for rows claiming '{}': {}", entity.source_path, e),
++                    )
++                })?;
++            let mut ids = Vec::new();
++            for r in rows {
++                ids.push(r.map_err(|e| {
++                    QdevError::infrastructure_failure(
++                        "sqlite_error",
++                        format!("Failed to read conflicting row id: {}", e),
++                    )
++                })?);
++            }
++            ids
++        };
++        for stale_id in &stale_path_ids {
++            delete_entity_row_shallow(&tx, stale_id)?;
++        }
++
++        // 0b. Kind change cleanup
++        let prev_kind: Option<String> = tx
++            .query_row(
++                "SELECT kind FROM entities WHERE id = ?1;",
++                rusqlite::params![entity.id],
++                |row| row.get(0),
++            )
++            .optional()
++            .map_err(|e| {
++                QdevError::infrastructure_failure(
++                    "sqlite_error",
++                    format!(
++                        "Failed to read the cached kind of entity '{}': {}",
++                        entity.id, e
++                    ),
++                )
++            })?;
++        if let Some(prev_kind) = prev_kind
++            .as_deref()
++            .and_then(|k| EntityKind::from_str_loose(k).ok())
++        {
++            if prev_kind != entity.kind {
++                crate::store::sqlite::delete_kind_detail_row(&tx, &entity.id, prev_kind)?;
++            }
++        }
++
++        // 1. Upsert into entities table
++        tx.execute(
++            r#"
++INSERT INTO entities (
++    id, kind, title, status, owners, source_path, content_hash, version,
++    created_by_type, created_by_id, updated_by_type, updated_by_id, updated_at
++) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
++ON CONFLICT(id) DO UPDATE SET
++    kind = excluded.kind,
++    title = excluded.title,
++    status = excluded.status,
++    owners = excluded.owners,
++    source_path = excluded.source_path,
++    content_hash = excluded.content_hash,
++    version = excluded.version,
++    created_by_type = COALESCE(excluded.created_by_type, entities.created_by_type),
++    created_by_id = COALESCE(excluded.created_by_id, entities.created_by_id),
++    updated_by_type = excluded.updated_by_type,
++    updated_by_id = excluded.updated_by_id,
++    updated_at = excluded.updated_at,
++    stale = 0;
++"#,
++            rusqlite::params![
++                entity.id,
++                entity.kind.as_str(),
++                entity.title,
++                entity.status,
++                entity.owners,
++                entity.source_path,
++                entity.content_hash,
++                entity.version,
++                c_type,
++                c_id,
++                u_type,
++                u_id,
++                entity.updated_at,
++            ],
++        )
++        .map_err(|e| {
++            QdevError::infrastructure_failure(
++                "sqlite_error",
++                format!("Failed to upsert into entities table: {}", e),
++            )
++        })?;
++
++        // 2. Kind-specific upsert: stories
++        if entity.kind == EntityKind::Story {
++            if let (Some(ref epic), Some(seq)) = (&entity.epic_id, entity.seq) {
++                tx.execute(
++                    r#"
++INSERT INTO stories (id, epic_id, seq, appetite, safety_class, target_modules)
++VALUES (?1, ?2, ?3, ?4, ?5, ?6)
++ON CONFLICT(id) DO UPDATE SET
++    epic_id = excluded.epic_id,
++    seq = excluded.seq,
++    appetite = excluded.appetite,
++    safety_class = excluded.safety_class,
++    target_modules = excluded.target_modules;
++"#,
++                    rusqlite::params![
++                        entity.id,
++                        epic,
++                        seq,
++                        entity.appetite,
++                        entity.safety_class,
++                        entity.target_modules,
++                    ],
++                )
++                .map_err(|e| {
++                    QdevError::infrastructure_failure(
++                        "sqlite_error",
++                        format!("Failed to upsert into stories table: {}", e),
++                    )
++                })?;
++            }
++        }
++
++        // 3. Apply the constraint change
++        if let Some(change) = constraint_change {
++            if change.add {
++                tx.execute(
++                    r#"
++INSERT INTO constraints (id, owner_id, kind, text)
++VALUES (?1, ?2, ?3, ?4)
++ON CONFLICT(id) DO UPDATE SET
++    owner_id = excluded.owner_id,
++    kind = excluded.kind,
++    text = excluded.text;
++"#,
++                    rusqlite::params![change.id, change.owner_id, change.kind, change.text],
++                )
++            } else {
++                tx.execute(
++                    "DELETE FROM constraints WHERE id = ?1 OR (owner_id = ?2 AND id = ?3);",
++                    rusqlite::params![
++                        change.id,
++                        change.owner_id,
++                        change.id.split('/').nth(1).unwrap_or(&change.id)
++                    ],
++                )
++            }
++            .map_err(|e| {
++                QdevError::infrastructure_failure(
++                    "sqlite_error",
++                    format!(
++                        "Failed to apply constraint '{}' on owner '{}': {}",
++                        change.id, change.owner_id, e
++                    ),
++                )
++            })?;
++        }
++
++        // 4. Mark row as dirty in dirty_entities
++        let dirty_at = current_iso8601();
++        tx.execute(
++            r#"
++INSERT INTO dirty_entities (id, dirty_at)
++VALUES (?1, ?2)
++ON CONFLICT(id) DO UPDATE SET dirty_at = excluded.dirty_at;
++"#,
++            rusqlite::params![entity.id, dirty_at],
++        )
++        .map_err(|e| {
++            QdevError::infrastructure_failure(
++                "sqlite_error",
++                format!("Failed to mark dirty in dirty_entities table: {}", e),
++            )
++        })?;
++
++        // 5. Invalidate sync_state for this entity path
++        tx.execute(
++            "DELETE FROM sync_state WHERE path = ?1;",
++            rusqlite::params![entity.source_path],
++        )
++        .map_err(|e| {
++            QdevError::infrastructure_failure(
++                "sqlite_error",
++                format!("Failed to invalidate sync_state: {}", e),
++            )
++        })?;
++
++        tx.commit().map_err(|e| {
++            QdevError::infrastructure_failure(
++                "sqlite_error",
++                format!("Failed to commit transaction: {}", e),
++            )
++        })?;
++
++        Ok(())
++    })
++}
++
+ /// Standard entity file resolution directory map with optional storage config.
+ ///
+ /// This is the directory half of the one identity rule stated on [`resolve_entity_file`]:
+@@ -2745,6 +3008,545 @@ pub fn apply_relation_change(
+     })
+ }
+ 
++/// Options for applying a constraint addition (`qdev constraint add`).
++#[derive(Debug, Clone)]
++pub struct ConstraintAddOptions {
++    pub workspace_root: PathBuf,
++    pub storage: Option<StorageConfig>,
++    pub entity_id: String,
++    pub kind: crate::id::ConstraintKind,
++    pub text: String,
++    pub if_version: Option<u64>,
++    pub author: Author,
++}
++
++/// Result returned from applying a constraint addition.
++#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
++pub struct ConstraintAddResult {
++    pub id: String,
++    pub relative_id: String,
++    pub owner_id: String,
++    pub kind: String,
++    pub text: String,
++    pub path: PathBuf,
++    pub rel_path: String,
++    pub old_version: u64,
++    pub new_version: u64,
++    pub constraints: Vec<serde_json::Value>,
++}
++
++/// Options for applying a constraint removal (`qdev constraint remove`).
++#[derive(Debug, Clone)]
++pub struct ConstraintRemoveOptions {
++    pub workspace_root: PathBuf,
++    pub storage: Option<StorageConfig>,
++    pub constraint_id: String,
++    pub justification: Option<String>,
++    pub if_version: Option<u64>,
++    pub author: Author,
++}
++
++/// Result returned from applying a constraint removal.
++#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
++pub struct ConstraintRemoveResult {
++    pub id: String,
++    pub owner_id: String,
++    pub path: PathBuf,
++    pub rel_path: String,
++    pub old_version: u64,
++    pub new_version: u64,
++    pub constraints: Vec<serde_json::Value>,
++}
++
++/// Patches an entity's `constraints:` frontmatter list to add a new negative or rabbit-hole constraint.
++/// Validates the entity exists and is a Story or Epic, checks `--if-version`, acquires advisory write lock,
++/// allocates next sequential constraint ID, bumps entity version, updates `updated_by`, validates against
++/// schema, writes atomically, and synchronizes SQLite cache.
++pub fn apply_constraint_add(
++    options: &ConstraintAddOptions,
++) -> Result<ConstraintAddResult, QdevError> {
++    options.author.validate()?;
++
++    let text_trimmed = options.text.trim();
++    if text_trimmed.is_empty() {
++        return Err(QdevError::usage_error("Constraint text cannot be empty"));
++    }
++
++    // 1. Resolve entity file
++    let (kind, id, file_path) = resolve_entity_file(
++        &options.workspace_root,
++        None,
++        &options.entity_id,
++        options.storage.as_ref(),
++    )?;
++
++    id.parse::<Identifier>().map_err(|e| {
++        QdevError::usage_error(format!("Invalid owner identifier '{}': {}", id, e))
++    })?;
++
++    if kind != EntityKind::Story && kind != EntityKind::Epic {
++        return Err(QdevError::usage_error(format!(
++            "Constraints can only be added to Story or Epic entities, found {:?}",
++            kind
++        )));
++    }
++
++    let rel_path = workspace_rel_path(&file_path, &options.workspace_root);
++
++    // 2. Acquire workspace advisory write lock
++    let _lock_guard = acquire_workspace_write_lock(&options.workspace_root, options.storage.as_ref())?;
++
++    // 3. Read existing file content
++    let existing_content = fs::read_to_string(&file_path).map_err(|e| {
++        QdevError::infrastructure_failure(
++            "io_error",
++            format!(
++                "Failed to read entity file '{}': {}",
++                file_path.display(),
++                e
++            ),
++        )
++    })?;
++
++    let kind = kind_for_write(&file_path, &existing_content, kind);
++
++    let declared_version = frontmatter_version(&existing_content);
++    let old_version = declared_version.unwrap_or(0);
++    check_if_version(options.if_version, declared_version)?;
++
++    let (frontmatter_str, _) =
++        crate::schema::extract_frontmatter_str(&existing_content).map_err(|e| {
++            QdevError::logical_failure(
++                "missing_frontmatter",
++                format!(
++                    "Failed to locate frontmatter in '{}': {}",
++                    file_path.display(),
++                    e
++                ),
++            )
++        })?;
++    let old_frontmatter_yaml: serde_yaml::Value =
++        serde_yaml::from_str(frontmatter_str).map_err(|e| {
++            QdevError::logical_failure(
++                "yaml_parse_error",
++                format!(
++                    "Failed to parse frontmatter YAML in '{}': {}",
++                    file_path.display(),
++                    e
++                ),
++            )
++        })?;
++
++    // 4. Allocate next monotonic constraint id
++    let default_storage = StorageConfig::default();
++    let st = options.storage.as_ref().unwrap_or(&default_storage);
++    let cache_dir_rel = st.cache_dir.as_str();
++    let cache_db_path = options.workspace_root.join(cache_dir_rel).join("cache.sqlite");
++    let opt_store = if cache_db_path.is_file() {
++        crate::store::SqliteStore::open(&cache_db_path).ok()
++    } else {
++        None
++    };
++
++    let allocated_ident = crate::id::allocate_next_constraint_id_in(
++        &options.workspace_root,
++        st,
++        &id,
++        options.kind,
++        opt_store.as_ref().map(|s| s as &dyn crate::store::Store),
++    )?;
++
++    let allocated_id = allocated_ident.to_string();
++    let (seq_kind, seq_num) = match allocated_ident {
++        Identifier::Constraint { kind, number, .. } => (kind, number),
++        _ => unreachable!(),
++    };
++    let relative_id = format!("{}-{}", seq_kind.as_str(), seq_num);
++
++    // 5. Append to constraints sequence in frontmatter
++    let mut constraints_seq: Vec<serde_yaml::Value> = match old_frontmatter_yaml.get("constraints") {
++        None | Some(serde_yaml::Value::Null) => Vec::new(),
++        Some(serde_yaml::Value::Sequence(items)) => items.clone(),
++        Some(_) => {
++            return Err(QdevError::logical_failure(
++                "unsupported_constraints_shape",
++                format!(
++                    "Frontmatter 'constraints' in '{}' is not a sequence",
++                    file_path.display()
++                ),
++            ))
++        }
++    };
++
++    let mut new_item = serde_yaml::Mapping::new();
++    new_item.insert(
++        serde_yaml::Value::String("id".to_string()),
++        serde_yaml::Value::String(relative_id.clone()),
++    );
++    new_item.insert(
++        serde_yaml::Value::String("kind".to_string()),
++        serde_yaml::Value::String(options.kind.to_kind_str().to_string()),
++    );
++    new_item.insert(
++        serde_yaml::Value::String("text".to_string()),
++        serde_yaml::Value::String(text_trimmed.to_string()),
++    );
++    constraints_seq.push(serde_yaml::Value::Mapping(new_item));
++
++    let constraints_yaml = serde_yaml::Value::Sequence(constraints_seq);
++
++    // 6. Line-based frontmatter patch
++    let patch_opts = FrontmatterPatchOptions {
++        status: None,
++        title: None,
++        custom_fields: vec![("constraints".to_string(), constraints_yaml)],
++        author: Some(options.author.clone()),
++        if_version: options.if_version,
++    };
++
++    let (patched_content, new_version) = patch_frontmatter(&existing_content, &patch_opts)?;
++
++    // 7. Validate updated frontmatter against JSON Schema
++    validate_frontmatter(kind, &patched_content).map_err(|errs| {
++        QdevError::logical_failure(
++            "schema_validation_failed",
++            format!("Updated frontmatter failed schema validation: {:?}", errs),
++        )
++        .with_details(serde_json::json!({
++            "validation_errors": errs,
++        }))
++    })?;
++
++    // 8. Atomic write via tempfile rename
++    write_file_atomic(&file_path, &patched_content)?;
++
++    // 9. Extract updated frontmatter for cache and result
++    let updated_frontmatter =
++        crate::schema::extract_frontmatter(&patched_content).map_err(|e| {
++            QdevError::infrastructure_failure(
++                "parse_error",
++                format!("Failed to parse updated frontmatter: {}", e),
++            )
++        })?;
++
++    let canonical_id = updated_frontmatter
++        .get("id")
++        .and_then(|v| v.as_str())
++        .map(str::to_string)
++        .unwrap_or(id);
++
++    let content_hash = sha256_digest(patched_content.as_bytes());
++    let title_val = updated_frontmatter
++        .get("title")
++        .and_then(|v| v.as_str())
++        .map(str::to_string);
++    let status_val = updated_frontmatter
++        .get("status")
++        .and_then(|v| v.as_str())
++        .map(str::to_string);
++    let owners_val = updated_frontmatter.get("owners").map(|v| v.to_string());
++
++    let c_author = updated_frontmatter
++        .get("created_by")
++        .and_then(|v| serde_json::from_value::<Author>(v.clone()).ok());
++    let u_author = Some(options.author.clone());
++
++    let (epic_id, seq, appetite, safety_class, target_modules) =
++        story_detail_fields(kind, &canonical_id, &updated_frontmatter);
++
++    let record = EntityRecord {
++        id: canonical_id.clone(),
++        kind,
++        title: title_val,
++        status: status_val,
++        owners: owners_val,
++        source_path: rel_path.clone(),
++        content_hash,
++        version: new_version,
++        created_by: c_author,
++        updated_by: u_author,
++        updated_at: current_iso8601(),
++        stale: false,
++        epic_id,
++        seq,
++        appetite,
++        safety_class,
++        target_modules,
++    };
++
++    upsert_cache_with_constraint(
++        &cache_db_path,
++        &record,
++        Some(&ConstraintRowChange {
++            id: allocated_id.clone(),
++            owner_id: canonical_id.clone(),
++            kind: options.kind.to_kind_str().to_string(),
++            text: text_trimmed.to_string(),
++            add: true,
++        }),
++    )?;
++
++    let constraints_out = updated_frontmatter
++        .get("constraints")
++        .and_then(|v| v.as_array())
++        .cloned()
++        .unwrap_or_default();
++
++    Ok(ConstraintAddResult {
++        id: allocated_id,
++        relative_id,
++        owner_id: canonical_id,
++        kind: options.kind.to_kind_str().to_string(),
++        text: text_trimmed.to_string(),
++        path: file_path,
++        rel_path,
++        old_version,
++        new_version,
++        constraints: constraints_out,
++    })
++}
++
++/// Patches an entity's `constraints:` frontmatter list to remove a constraint.
++/// Validates that the constraint exists, verifies justification if entity is not in draft status,
++/// checks `--if-version`, acquires advisory write lock, bumps entity version, updates `updated_by`,
++/// validates against schema, writes atomically, and removes constraint from SQLite cache.
++pub fn apply_constraint_remove(
++    options: &ConstraintRemoveOptions,
++) -> Result<ConstraintRemoveResult, QdevError> {
++    options.author.validate()?;
++
++    let trimmed_target = options.constraint_id.trim();
++    let (owner_id, rel_cid) = trimmed_target.split_once('/').ok_or_else(|| {
++        QdevError::usage_error(format!(
++            "Invalid constraint identifier '{}', must be of form {{owner}}/{{kind}}-{{n}}",
++            trimmed_target
++        ))
++    })?;
++
++    // 1. Resolve entity file
++    let (kind, id, file_path) = resolve_entity_file(
++        &options.workspace_root,
++        None,
++        owner_id,
++        options.storage.as_ref(),
++    )
++    .map_err(|_| {
++        QdevError::usage_error_with_code(
++            "entity_not_found",
++            format!("Constraint '{}' not found", trimmed_target),
++        )
++    })?;
++
++    let rel_path = workspace_rel_path(&file_path, &options.workspace_root);
++
++    // 2. Acquire advisory write lock
++    let _lock_guard = acquire_workspace_write_lock(&options.workspace_root, options.storage.as_ref())?;
++
++    // 3. Read existing file content under lock
++    let fresh_content = fs::read_to_string(&file_path).map_err(|e| {
++        QdevError::infrastructure_failure(
++            "io_error",
++            format!(
++                "Failed to read entity file '{}': {}",
++                file_path.display(),
++                e
++            ),
++        )
++    })?;
++
++    let kind = kind_for_write(&file_path, &fresh_content, kind);
++
++    let (frontmatter_str, _) =
++        crate::schema::extract_frontmatter_str(&fresh_content).map_err(|e| {
++            QdevError::logical_failure(
++                "missing_frontmatter",
++                format!(
++                    "Failed to locate frontmatter in '{}': {}",
++                    file_path.display(),
++                    e
++                ),
++            )
++        })?;
++    let frontmatter_yaml: serde_yaml::Value =
++        serde_yaml::from_str(frontmatter_str).map_err(|e| {
++            QdevError::logical_failure(
++                "yaml_parse_error",
++                format!(
++                    "Failed to parse frontmatter YAML in '{}': {}",
++                    file_path.display(),
++                    e
++                ),
++            )
++        })?;
++
++    // 4. Locate target constraint in frontmatter
++    let mut constraints_seq: Vec<serde_yaml::Value> = match frontmatter_yaml.get("constraints") {
++        Some(serde_yaml::Value::Sequence(items)) => items.clone(),
++        _ => Vec::new(),
++    };
++
++    let target_canonical = format!("{}/{}", owner_id, rel_cid);
++    let target_rel = rel_cid;
++
++    let existing_idx = constraints_seq.iter().position(|item| {
++        if let Some(item_id) = item.get("id").and_then(|v| v.as_str()) {
++            item_id == target_rel
++                || item_id == target_canonical.as_str()
++                || item_id
++                    .split_once('/')
++                    .map_or(false, |(o, r)| o == owner_id && r == target_rel)
++        } else {
++            false
++        }
++    });
++
++    let remove_idx = existing_idx.ok_or_else(|| {
++        QdevError::usage_error_with_code(
++            "entity_not_found",
++            format!("Constraint '{}' not found", trimmed_target),
++        )
++    })?;
++
++    // 5. Non-draft justification gate
++    let status_str = frontmatter_yaml
++        .get("status")
++        .and_then(|v| v.as_str())
++        .unwrap_or("");
++    if status_str != "draft" {
++        let just = options.justification.as_deref().unwrap_or("").trim();
++        if just.is_empty() {
++            return Err(QdevError::policy_refusal(
++                "needs_justification",
++                format!(
++                    "Removing constraint '{}' from non-draft entity '{}' requires a non-empty --justification",
++                    trimmed_target, owner_id
++                ),
++            ));
++        }
++    }
++
++    // 6. Verify optimistic concurrency
++    let declared_version = frontmatter_version(&fresh_content);
++    let old_version = declared_version.unwrap_or(0);
++    check_if_version(options.if_version, declared_version)?;
++
++    // 7. Remove the constraint
++    constraints_seq.remove(remove_idx);
++    let constraints_yaml = serde_yaml::Value::Sequence(constraints_seq);
++
++    // 8. Line-based frontmatter patch
++    let patch_opts = FrontmatterPatchOptions {
++        status: None,
++        title: None,
++        custom_fields: vec![("constraints".to_string(), constraints_yaml)],
++        author: Some(options.author.clone()),
++        if_version: options.if_version,
++    };
++
++    let (patched_content, new_version) = patch_frontmatter(&fresh_content, &patch_opts)?;
++
++    // 9. Validate updated frontmatter against JSON Schema
++    validate_frontmatter(kind, &patched_content).map_err(|errs| {
++        QdevError::logical_failure(
++            "schema_validation_failed",
++            format!("Updated frontmatter failed schema validation: {:?}", errs),
++        )
++        .with_details(serde_json::json!({
++            "validation_errors": errs,
++        }))
++    })?;
++
++    // 10. Atomic write via tempfile rename
++    write_file_atomic(&file_path, &patched_content)?;
++
++    // 11. Update SQLite cache
++    let default_storage = StorageConfig::default();
++    let st = options.storage.as_ref().unwrap_or(&default_storage);
++    let cache_dir_rel = st.cache_dir.as_str();
++    let cache_db_path = options.workspace_root.join(cache_dir_rel).join("cache.sqlite");
++
++    let updated_frontmatter =
++        crate::schema::extract_frontmatter(&patched_content).map_err(|e| {
++            QdevError::infrastructure_failure(
++                "parse_error",
++                format!("Failed to parse updated frontmatter: {}", e),
++            )
++        })?;
++
++    let canonical_id = updated_frontmatter
++        .get("id")
++        .and_then(|v| v.as_str())
++        .map(str::to_string)
++        .unwrap_or(id);
++
++    let content_hash = sha256_digest(patched_content.as_bytes());
++    let title_val = updated_frontmatter
++        .get("title")
++        .and_then(|v| v.as_str())
++        .map(str::to_string);
++    let status_val = updated_frontmatter
++        .get("status")
++        .and_then(|v| v.as_str())
++        .map(str::to_string);
++    let owners_val = updated_frontmatter.get("owners").map(|v| v.to_string());
++
++    let c_author = updated_frontmatter
++        .get("created_by")
++        .and_then(|v| serde_json::from_value::<Author>(v.clone()).ok());
++    let u_author = Some(options.author.clone());
++
++    let (epic_id, seq, appetite, safety_class, target_modules) =
++        story_detail_fields(kind, &canonical_id, &updated_frontmatter);
++
++    let record = EntityRecord {
++        id: canonical_id.clone(),
++        kind,
++        title: title_val,
++        status: status_val,
++        owners: owners_val,
++        source_path: rel_path.clone(),
++        content_hash,
++        version: new_version,
++        created_by: c_author,
++        updated_by: u_author,
++        updated_at: current_iso8601(),
++        stale: false,
++        epic_id,
++        seq,
++        appetite,
++        safety_class,
++        target_modules,
++    };
++
++    upsert_cache_with_constraint(
++        &cache_db_path,
++        &record,
++        Some(&ConstraintRowChange {
++            id: target_canonical.clone(),
++            owner_id: canonical_id.clone(),
++            kind: String::new(),
++            text: String::new(),
++            add: false,
++        }),
++    )?;
++
++    let constraints_out = updated_frontmatter
++        .get("constraints")
++        .and_then(|v| v.as_array())
++        .cloned()
++        .unwrap_or_default();
++
++    Ok(ConstraintRemoveResult {
++        id: target_canonical,
++        owner_id: canonical_id,
++        path: file_path,
++        rel_path,
++        old_version,
++        new_version,
++        constraints: constraints_out,
++    })
++}
++
+ #[cfg(test)]
+ mod path_spelling_tests {
+     use super::workspace_rel_path;
+diff --git a/docs/bmad/implementation-artifacts/sprint-status.yaml b/docs/bmad/implementation-artifacts/sprint-status.yaml
+index 620c215..1c04f20 100644
+--- a/docs/bmad/implementation-artifacts/sprint-status.yaml
++++ b/docs/bmad/implementation-artifacts/sprint-status.yaml
+@@ -16,7 +16,7 @@
+ # story_location: "{project-root}/docs/bmad/implementation-artifacts"
+ 
+ generated: 09-06-2026 08:48
+-last_updated: 09-13-2026 10:33
++last_updated: 09-13-2026 12:56
+ project: qdev
+ project_key: NOKEY
+ tracking_system: file-system
+@@ -67,7 +67,7 @@ development_status:
+   2-2-justified-backward-transitions: review
+   2-3-story-leases: review
+   2-4-scope-enforcement-cross-team-overrides: review
+-  2-5-constraints-as-entities: backlog
++  2-5-constraints-as-entities: in-progress
+   2-6-scratchpads: backlog
+   2-7-decision-ledger: backlog
+   2-8-deferred-work: backlog
+diff --git a/crates/qdev-cli/tests/constraint_cli_tests.rs b/crates/qdev-cli/tests/constraint_cli_tests.rs
+new file mode 100644
+index 0000000..49da542
+--- /dev/null
++++ b/crates/qdev-cli/tests/constraint_cli_tests.rs
+@@ -0,0 +1,537 @@
++use std::fs;
++use std::path::Path;
++
++use assert_cmd::Command;
++use serde_json::Value;
++use tempfile::TempDir;
++
++fn setup_workspace(root: &Path) {
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "init",
++            "--non-interactive",
++            "--name",
++            "TestProject",
++            "--developer",
++            "simon",
++            "--team",
++            "core-platform",
++        ])
++        .assert()
++        .success();
++}
++
++fn create_story(root: &Path, id: &str, status: &str, version: u64, constraints_yaml: &str) {
++    let dir = root.join("docs/specs/stories");
++    fs::create_dir_all(&dir).unwrap();
++    let constraints_block = if constraints_yaml.is_empty() {
++        String::new()
++    } else {
++        format!("constraints:\n{constraints_yaml}")
++    };
++    fs::write(
++        dir.join(format!("{id}.md")),
++        format!(
++            r#"---
++id: {id}
++title: "Story {id}"
++status: {status}
++version: {version}
++owners:
++  - simon
++epic_id: E12
++created_by:
++  type: human
++  id: simon
++updated_by:
++  type: human
++  id: simon
++{constraints_block}---
++
++## Acceptance Criteria
++- Verify constraint behavior.
++"#
++        ),
++    )
++    .unwrap();
++}
++
++fn create_epic(root: &Path, id: &str, status: &str, version: u64, constraints_yaml: &str) {
++    let dir = root.join("docs/specs/epics");
++    fs::create_dir_all(&dir).unwrap();
++    let constraints_block = if constraints_yaml.is_empty() {
++        String::new()
++    } else {
++        format!("constraints:\n{constraints_yaml}")
++    };
++    fs::write(
++        dir.join(format!("{id}.md")),
++        format!(
++            r#"---
++id: {id}
++title: "Epic {id}"
++status: {status}
++version: {version}
++owners:
++  - simon
++created_by:
++  type: human
++  id: simon
++updated_by:
++  type: human
++  id: simon
++{constraints_block}---
++
++## Summary
++- Epic summary.
++"#
++        ),
++    )
++    .unwrap();
++}
++
++#[test]
++fn test_cli_constraint_add_happy_path() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "draft", 1, "");
++
++    // 1. Add first constraint
++    let mut cmd1 = Command::cargo_bin("qdev").unwrap();
++    cmd1.current_dir(root)
++        .args([
++            "constraint",
++            "add",
++            "E12S4",
++            "--kind",
++            "no_go",
++            "--",
++            "Do not touch frame buffers",
++        ])
++        .assert()
++        .success();
++
++    let content1 = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
++    assert!(content1.contains("version: 2"));
++    assert!(content1.contains("id: NG-1"));
++    assert!(content1.contains("kind: no_go"));
++
++    // 2. Add second constraint of same kind: should allocate NG-2
++    let mut cmd2 = Command::cargo_bin("qdev").unwrap();
++    cmd2.current_dir(root)
++        .args([
++            "constraint",
++            "add",
++            "E12S4",
++            "--kind",
++            "no_go",
++            "--",
++            "Do not use unsafe",
++        ])
++        .assert()
++        .success();
++
++    let content2 = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
++    assert!(content2.contains("version: 3"));
++    assert!(content2.contains("id: NG-2"));
++
++    // 3. Add appetite constraint: should allocate APP-1
++    let mut cmd3 = Command::cargo_bin("qdev").unwrap();
++    cmd3.current_dir(root)
++        .args([
++            "constraint",
++            "add",
++            "E12S4",
++            "--kind",
++            "appetite",
++            "--",
++            "Maximum 2 days",
++        ])
++        .assert()
++        .success();
++
++    let content3 = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
++    assert!(content3.contains("version: 4"));
++    assert!(content3.contains("id: APP-1"));
++    assert!(content3.contains("kind: appetite"));
++}
++
++#[test]
++fn test_cli_constraint_add_json_envelope() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "draft", 1, "");
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "constraint",
++            "add",
++            "E12S4",
++            "--kind",
++            "rabbit_hole",
++            "--json",
++            "--",
++            "len == 0 does not mean empty",
++        ])
++        .assert()
++        .success();
++
++    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
++    let json: Value = serde_json::from_str(&stdout).expect("Valid JSON");
++    assert_eq!(json["schema_version"], "1");
++    assert_eq!(json["id"], "E12S4/RH-1");
++    assert_eq!(json["owner_id"], "E12S4");
++    assert_eq!(json["kind"], "rabbit_hole");
++    assert_eq!(json["text"], "len == 0 does not mean empty");
++    assert_eq!(json["version"], 2);
++}
++
++#[test]
++fn test_cli_constraint_add_to_epic() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_workspace(root);
++    create_epic(root, "E12", "planning", 1, "");
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "constraint",
++            "add",
++            "E12",
++            "--kind",
++            "rabbit_hole",
++            "--",
++            "len == 0 does not mean empty",
++        ])
++        .assert()
++        .success();
++
++    let content = fs::read_to_string(root.join("docs/specs/epics/E12.md")).unwrap();
++    assert!(content.contains("version: 2"));
++    assert!(content.contains("id: RH-1"));
++    assert!(content.contains("kind: rabbit_hole"));
++}
++
++#[test]
++fn test_cli_constraint_add_invalid_kind() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "draft", 1, "");
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "constraint",
++            "add",
++            "E12S4",
++            "--kind",
++            "invalid_kind",
++            "--",
++            "text",
++        ])
++        .assert()
++        .code(2);
++}
++
++#[test]
++fn test_cli_constraint_add_empty_text() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "draft", 1, "");
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "constraint",
++            "add",
++            "E12S4",
++            "--kind",
++            "no_go",
++            "--",
++            "   ",
++        ])
++        .assert()
++        .code(2);
++}
++
++#[test]
++fn test_cli_constraint_add_if_version_mismatch() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "draft", 2, "");
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "constraint",
++            "add",
++            "E12S4",
++            "--kind",
++            "no_go",
++            "--if-version",
++            "1",
++            "--",
++            "text",
++        ])
++        .assert()
++        .code(5);
++}
++
++#[test]
++fn test_cli_constraint_remove_draft() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_workspace(root);
++    let constraints_yaml = "  - id: NG-1\n    kind: no_go\n    text: Do not touch frame buffers\n";
++    create_story(root, "E12S4", "draft", 1, constraints_yaml);
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "constraint",
++            "remove",
++            "E12S4/NG-1",
++        ])
++        .assert()
++        .success();
++
++    let content = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
++    assert!(content.contains("version: 2"));
++    assert!(!content.contains("NG-1"));
++}
++
++#[test]
++fn test_cli_constraint_remove_non_draft_without_justification_refused() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_workspace(root);
++    let constraints_yaml = "  - id: NG-1\n    kind: no_go\n    text: Do not touch frame buffers\n";
++    create_story(root, "E12S4", "ready", 1, constraints_yaml);
++
++    // Refused with exit code 3 (PolicyRefusal)
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "constraint",
++            "remove",
++            "E12S4/NG-1",
++        ])
++        .assert()
++        .code(3);
++
++    // File untouched
++    let content = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
++    assert!(content.contains("version: 1"));
++    assert!(content.contains("NG-1"));
++}
++
++#[test]
++fn test_cli_constraint_remove_non_draft_with_justification_succeeds() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_workspace(root);
++    let constraints_yaml = "  - id: NG-1\n    kind: no_go\n    text: Do not touch frame buffers\n";
++    create_story(root, "E12S4", "ready", 1, constraints_yaml);
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "constraint",
++            "remove",
++            "E12S4/NG-1",
++            "--justification",
++            "Design changed to allow direct buffers",
++        ])
++        .assert()
++        .success();
++
++    let content = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
++    assert!(content.contains("version: 2"));
++    assert!(!content.contains("NG-1"));
++}
++
++#[test]
++fn test_cli_constraint_remove_not_found() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "draft", 1, "");
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "constraint",
++            "remove",
++            "E12S4/NG-99",
++        ])
++        .assert()
++        .code(2);
++}
++
++#[test]
++fn test_cli_constraint_remove_json_envelope() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_workspace(root);
++    let constraints_yaml = "  - id: NG-1\n    kind: no_go\n    text: Do not touch frame buffers\n";
++    create_story(root, "E12S4", "draft", 1, constraints_yaml);
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "constraint",
++            "remove",
++            "E12S4/NG-1",
++            "--json",
++        ])
++        .assert()
++        .success();
++
++    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
++    let json: Value = serde_json::from_str(&stdout).expect("Valid JSON");
++    assert_eq!(json["schema_version"], "1");
++    assert_eq!(json["id"], "E12S4/NG-1");
++    assert_eq!(json["owner_id"], "E12S4");
++    assert_eq!(json["version"], 2);
++}
++
++#[test]
++fn test_cli_constraint_get_resolution_and_inheritance() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_workspace(root);
++
++    // Create epic E12 with RH-1
++    let epic_constraints = "  - id: RH-1\n    kind: rabbit_hole\n    text: len == 0 does not mean empty\n";
++    create_epic(root, "E12", "active", 1, epic_constraints);
++
++    // Create story E12S4 with NG-1
++    let story_constraints = "  - id: NG-1\n    kind: no_go\n    text: Do not touch frame buffers\n";
++    create_story(root, "E12S4", "draft", 1, story_constraints);
++
++    // Populate cache by syncing
++    let mut sync_cmd = Command::cargo_bin("qdev").unwrap();
++    sync_cmd.current_dir(root).args(["sync", "--rebuild"]).assert().success();
++
++    // 1. qdev get E12S4/NG-1 resolves bare constraint
++    let mut get_cmd1 = Command::cargo_bin("qdev").unwrap();
++    let assert1 = get_cmd1
++        .current_dir(root)
++        .args(["get", "E12S4/NG-1"])
++        .assert()
++        .success();
++    let stdout1 = String::from_utf8(assert1.get_output().stdout.clone()).unwrap();
++    assert!(stdout1.contains("id: E12S4/NG-1"));
++    assert!(stdout1.contains("owner: E12S4"));
++    assert!(stdout1.contains("kind: no_go"));
++
++    // 2. qdev get story E12S4 --json projects both own and inherited constraints
++    let mut get_cmd2 = Command::cargo_bin("qdev").unwrap();
++    let assert2 = get_cmd2
++        .current_dir(root)
++        .args(["get", "story", "E12S4", "--json"])
++        .assert()
++        .success();
++    let stdout2 = String::from_utf8(assert2.get_output().stdout.clone()).unwrap();
++    let json2: Value = serde_json::from_str(&stdout2).expect("Valid JSON");
++    let constraints = json2["constraints"].as_array().expect("constraints array");
++    assert_eq!(constraints.len(), 2);
++
++    let own = constraints.iter().find(|c| c["id"] == "E12S4/NG-1").expect("own constraint");
++    assert_eq!(own["kind"], "no_go");
++    assert_eq!(own["inherited_from"], Value::Null);
++
++    let inherited = constraints.iter().find(|c| c["id"] == "E12/RH-1").expect("inherited constraint");
++    assert_eq!(inherited["kind"], "rabbit_hole");
++    assert_eq!(inherited["inherited_from"], "E12");
++}
++
++#[test]
++fn test_cli_constraint_remove_if_version_mismatch() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_workspace(root);
++    let constraints_yaml = "  - id: NG-1\n    kind: no_go\n    text: Do not touch frame buffers\n";
++    create_story(root, "E12S4", "draft", 2, constraints_yaml);
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "constraint",
++            "remove",
++            "E12S4/NG-1",
++            "--if-version",
++            "1",
++        ])
++        .assert()
++        .code(5);
++
++    let content = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
++    assert!(content.contains("version: 2"));
++    assert!(content.contains("NG-1"));
++}
++
++#[test]
++fn test_cli_appetite_constraint_remove_and_get() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_workspace(root);
++    create_story(root, "E12S4", "draft", 1, "");
++
++    // 1. Add appetite constraint
++    let mut add_cmd = Command::cargo_bin("qdev").unwrap();
++    add_cmd
++        .current_dir(root)
++        .args([
++            "constraint",
++            "add",
++            "E12S4",
++            "--kind",
++            "appetite",
++            "--",
++            "2 days maximum",
++        ])
++        .assert()
++        .success();
++
++    let content1 = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
++    assert!(content1.contains("id: APP-1"));
++    assert!(content1.contains("kind: appetite"));
++
++    // 2. Bare get
++    let mut get_cmd = Command::cargo_bin("qdev").unwrap();
++    let assert_get = get_cmd
++        .current_dir(root)
++        .args(["get", "E12S4/APP-1"])
++        .assert()
++        .success();
++    let stdout = String::from_utf8(assert_get.get_output().stdout.clone()).unwrap();
++    assert!(stdout.contains("id: E12S4/APP-1"));
++    assert!(stdout.contains("kind: appetite"));
++    assert!(stdout.contains("text: 2 days maximum"));
++
++    // 3. Remove appetite constraint
++    let mut rm_cmd = Command::cargo_bin("qdev").unwrap();
++    rm_cmd
++        .current_dir(root)
++        .args([
++            "constraint",
++            "remove",
++            "E12S4/APP-1",
++        ])
++        .assert()
++        .success();
++
++    let content2 = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
++    assert!(!content2.contains("APP-1"));
++}
+diff --git a/crates/qdev-core/tests/constraint_tests.rs b/crates/qdev-core/tests/constraint_tests.rs
+new file mode 100644
+index 0000000..c486d84
+--- /dev/null
++++ b/crates/qdev-core/tests/constraint_tests.rs
+@@ -0,0 +1,423 @@
++use std::fs;
++use std::path::Path;
++
++use qdev_core::rusqlite;
++use qdev_core::write::Author;
++use qdev_core::{
++    allocate_next_constraint_id_in, apply_constraint_add, apply_constraint_remove,
++    ConstraintAddOptions, ConstraintKind, ConstraintRemoveOptions, ExitCode,
++    StorageConfig,
++};
++use tempfile::TempDir;
++
++fn setup_test_story(root: &Path, id: &str, status: &str, version: u64, constraints_yaml: &str) {
++    let dir = root.join("docs/specs/stories");
++    fs::create_dir_all(&dir).unwrap();
++    let constraints_block = if constraints_yaml.is_empty() {
++        String::new()
++    } else {
++        format!("constraints:\n{constraints_yaml}")
++    };
++    fs::write(
++        dir.join(format!("{id}.md")),
++        format!(
++            r#"---
++id: {id}
++title: "Story {id}"
++status: {status}
++version: {version}
++owners:
++  - simon
++created_by:
++  type: human
++  id: simon
++updated_by:
++  type: human
++  id: simon
++{constraints_block}---
++
++## Acceptance Criteria
++- Verify constraint behavior.
++"#
++        ),
++    )
++    .unwrap();
++}
++
++fn setup_test_epic(root: &Path, id: &str, status: &str, version: u64, constraints_yaml: &str) {
++    let dir = root.join("docs/specs/epics");
++    fs::create_dir_all(&dir).unwrap();
++    let constraints_block = if constraints_yaml.is_empty() {
++        String::new()
++    } else {
++        format!("constraints:\n{constraints_yaml}")
++    };
++    fs::write(
++        dir.join(format!("{id}.md")),
++        format!(
++            r#"---
++id: {id}
++title: "Epic {id}"
++status: {status}
++version: {version}
++owners:
++  - simon
++created_by:
++  type: human
++  id: simon
++updated_by:
++  type: human
++  id: simon
++{constraints_block}---
++
++## Summary
++- Epic summary.
++"#
++        ),
++    )
++    .unwrap();
++}
++
++#[test]
++fn test_constraint_id_allocation_monotonic() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++
++    setup_test_story(root, "E12S4", "draft", 1, "");
++
++    let st = StorageConfig::default();
++
++    // 1. Initial allocation for no_go should be NG-1
++    let id1 = allocate_next_constraint_id_in(root, &st, "E12S4", ConstraintKind::NoGo, None).unwrap();
++    assert_eq!(id1.to_string(), "E12S4/NG-1");
++
++    // 2. Initial allocation for rabbit_hole should be RH-1
++    let id2 = allocate_next_constraint_id_in(root, &st, "E12S4", ConstraintKind::RabbitHole, None).unwrap();
++    assert_eq!(id2.to_string(), "E12S4/RH-1");
++
++    // 3. Initial allocation for appetite should be APP-1
++    let id3 = allocate_next_constraint_id_in(root, &st, "E12S4", ConstraintKind::Appetite, None).unwrap();
++    assert_eq!(id3.to_string(), "E12S4/APP-1");
++
++    // 4. Initial allocation for Epic E12
++    setup_test_epic(root, "E12", "planning", 1, "");
++    let id_epic = allocate_next_constraint_id_in(root, &st, "E12", ConstraintKind::RabbitHole, None).unwrap();
++    assert_eq!(id_epic.to_string(), "E12/RH-1");
++}
++
++#[test]
++fn test_parse_constraint_seq_rejects_leading_zeroes() {
++    use qdev_core::parse_constraint_seq;
++
++    assert_eq!(parse_constraint_seq("NG-1", None, ConstraintKind::NoGo), Some(1));
++    assert_eq!(parse_constraint_seq("NG-10", None, ConstraintKind::NoGo), Some(10));
++    assert_eq!(parse_constraint_seq("E12S4/NG-1", Some("E12S4"), ConstraintKind::NoGo), Some(1));
++
++    // Rejects leading zeroes e.g. 01, 007, 0
++    assert_eq!(parse_constraint_seq("NG-01", None, ConstraintKind::NoGo), None);
++    assert_eq!(parse_constraint_seq("NG-0", None, ConstraintKind::NoGo), None);
++    assert_eq!(parse_constraint_seq("E12S4/NG-05", Some("E12S4"), ConstraintKind::NoGo), None);
++}
++
++#[test]
++fn test_apply_constraint_add_success_and_cache_sync() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_test_story(root, "E12S4", "draft", 1, "");
++
++    let author = Author::new("human", "simon");
++    let opts = ConstraintAddOptions {
++        workspace_root: root.to_path_buf(),
++        storage: None,
++        entity_id: "E12S4".to_string(),
++        kind: ConstraintKind::NoGo,
++        text: "Do not touch frame buffers".to_string(),
++        if_version: Some(1),
++        author: author.clone(),
++    };
++
++    let res = apply_constraint_add(&opts).expect("apply_constraint_add should succeed");
++    assert_eq!(res.id, "E12S4/NG-1");
++    assert_eq!(res.relative_id, "NG-1");
++    assert_eq!(res.owner_id, "E12S4");
++    assert_eq!(res.kind, "no_go");
++    assert_eq!(res.text, "Do not touch frame buffers");
++    assert_eq!(res.old_version, 1);
++    assert_eq!(res.new_version, 2);
++    assert_eq!(res.rel_path, "docs/specs/stories/E12S4.md");
++
++    // Check frontmatter on disk
++    let disk_content = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
++    assert!(disk_content.contains("version: 2"));
++    assert!(disk_content.contains("id: NG-1"));
++    assert!(disk_content.contains("kind: no_go"));
++    assert!(disk_content.contains("text: \"Do not touch frame buffers\"") || disk_content.contains("text: Do not touch frame buffers"));
++
++    // Check SQLite cache
++    let cache_db_path = root.join(".qdev/cache/cache.sqlite");
++    assert!(cache_db_path.exists());
++    let conn = rusqlite::Connection::open(&cache_db_path).unwrap();
++
++    let constraint_count: i64 = conn
++        .query_row(
++            "SELECT COUNT(*) FROM constraints WHERE id = 'E12S4/NG-1' AND owner_id = 'E12S4' AND kind = 'no_go';",
++            [],
++            |r| r.get(0),
++        )
++        .unwrap();
++    assert_eq!(constraint_count, 1);
++
++    let cached_version: u64 = conn
++        .query_row(
++            "SELECT version FROM entities WHERE id = 'E12S4';",
++            [],
++            |r| r.get(0),
++        )
++        .unwrap();
++    assert_eq!(cached_version, 2);
++
++    // Now add a second constraint of the same kind: should allocate NG-2
++    let opts2 = ConstraintAddOptions {
++        workspace_root: root.to_path_buf(),
++        storage: None,
++        entity_id: "E12S4".to_string(),
++        kind: ConstraintKind::NoGo,
++        text: "Do not use unsafe".to_string(),
++        if_version: Some(2),
++        author: author.clone(),
++    };
++
++    let res2 = apply_constraint_add(&opts2).expect("apply_constraint_add should succeed for second constraint");
++    assert_eq!(res2.id, "E12S4/NG-2");
++    assert_eq!(res2.new_version, 3);
++
++    let total_constraints: i64 = conn
++        .query_row(
++            "SELECT COUNT(*) FROM constraints WHERE owner_id = 'E12S4';",
++            [],
++            |r| r.get(0),
++        )
++        .unwrap();
++    assert_eq!(total_constraints, 2);
++}
++
++#[test]
++fn test_apply_constraint_add_epic() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_test_epic(root, "E12", "planning", 1, "");
++
++    let author = Author::new("human", "simon");
++    let opts = ConstraintAddOptions {
++        workspace_root: root.to_path_buf(),
++        storage: None,
++        entity_id: "E12".to_string(),
++        kind: ConstraintKind::RabbitHole,
++        text: "len == 0 does not mean empty".to_string(),
++        if_version: None,
++        author,
++    };
++
++    let res = apply_constraint_add(&opts).expect("apply_constraint_add to epic should succeed");
++    assert_eq!(res.id, "E12/RH-1");
++    assert_eq!(res.owner_id, "E12");
++    assert_eq!(res.rel_path, "docs/specs/epics/E12.md");
++
++    let cache_db_path = root.join(".qdev/cache/cache.sqlite");
++    let conn = rusqlite::Connection::open(&cache_db_path).unwrap();
++    let constraint_count: i64 = conn
++        .query_row(
++            "SELECT COUNT(*) FROM constraints WHERE id = 'E12/RH-1' AND owner_id = 'E12';",
++            [],
++            |r| r.get(0),
++        )
++        .unwrap();
++    assert_eq!(constraint_count, 1);
++}
++
++#[test]
++fn test_apply_constraint_add_empty_text_refused() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_test_story(root, "E12S4", "draft", 1, "");
++
++    let author = Author::new("human", "simon");
++    let opts = ConstraintAddOptions {
++        workspace_root: root.to_path_buf(),
++        storage: None,
++        entity_id: "E12S4".to_string(),
++        kind: ConstraintKind::NoGo,
++        text: "   ".to_string(),
++        if_version: None,
++        author,
++    };
++
++    let err = apply_constraint_add(&opts).unwrap_err();
++    assert_eq!(err.exit_code(), ExitCode::UsageError);
++}
++
++#[test]
++fn test_apply_constraint_add_if_version_mismatch() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_test_story(root, "E12S4", "draft", 2, "");
++
++    let author = Author::new("human", "simon");
++    let opts = ConstraintAddOptions {
++        workspace_root: root.to_path_buf(),
++        storage: None,
++        entity_id: "E12S4".to_string(),
++        kind: ConstraintKind::NoGo,
++        text: "Something".to_string(),
++        if_version: Some(1),
++        author,
++    };
++
++    let err = apply_constraint_add(&opts).unwrap_err();
++    assert_eq!(err.exit_code(), ExitCode::Conflict);
++    assert_eq!(err.code(), "version_mismatch");
++}
++
++#[test]
++fn test_apply_constraint_remove_draft_without_justification() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    let constraints_yaml = "  - id: NG-1\n    kind: no_go\n    text: Do not touch frame buffers\n";
++    setup_test_story(root, "E12S4", "draft", 1, constraints_yaml);
++
++    // Populate initial SQLite cache
++    let author = Author::new("human", "simon");
++    let add_opts = ConstraintAddOptions {
++        workspace_root: root.to_path_buf(),
++        storage: None,
++        entity_id: "E12S4".to_string(),
++        kind: ConstraintKind::RabbitHole,
++        text: "Secondary constraint".to_string(),
++        if_version: Some(1),
++        author: author.clone(),
++    };
++    let _ = apply_constraint_add(&add_opts).unwrap(); // Version now 2, has NG-1 and RH-1
++
++    let remove_opts = ConstraintRemoveOptions {
++        workspace_root: root.to_path_buf(),
++        storage: None,
++        constraint_id: "E12S4/NG-1".to_string(),
++        justification: None,
++        if_version: Some(2),
++        author: author.clone(),
++    };
++
++    let res = apply_constraint_remove(&remove_opts).expect("remove on draft should succeed without justification");
++    assert_eq!(res.id, "E12S4/NG-1");
++    assert_eq!(res.owner_id, "E12S4");
++    assert_eq!(res.new_version, 3);
++
++    // Verify cache dropped NG-1 row
++    let cache_db_path = root.join(".qdev/cache/cache.sqlite");
++    let conn = rusqlite::Connection::open(&cache_db_path).unwrap();
++    let count: i64 = conn
++        .query_row(
++            "SELECT COUNT(*) FROM constraints WHERE id = 'E12S4/NG-1';",
++            [],
++            |r| r.get(0),
++        )
++        .unwrap();
++    assert_eq!(count, 0);
++
++    // RH-1 should still exist in cache
++    let count_rh: i64 = conn
++        .query_row(
++            "SELECT COUNT(*) FROM constraints WHERE id = 'E12S4/RH-1';",
++            [],
++            |r| r.get(0),
++        )
++        .unwrap();
++    assert_eq!(count_rh, 1);
++}
++
++#[test]
++fn test_apply_constraint_remove_non_draft_without_justification_fails() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    let constraints_yaml = "  - id: NG-1\n    kind: no_go\n    text: Do not touch frame buffers\n";
++    setup_test_story(root, "E12S4", "ready", 1, constraints_yaml);
++
++    let author = Author::new("human", "simon");
++    let remove_opts = ConstraintRemoveOptions {
++        workspace_root: root.to_path_buf(),
++        storage: None,
++        constraint_id: "E12S4/NG-1".to_string(),
++        justification: None,
++        if_version: None,
++        author: author.clone(),
++    };
++
++    let err = apply_constraint_remove(&remove_opts).unwrap_err();
++    assert_eq!(err.exit_code(), ExitCode::PolicyRefusal);
++    assert_eq!(err.code(), "needs_justification");
++
++    // Whitespace only justification also fails
++    let remove_opts_whitespace = ConstraintRemoveOptions {
++        workspace_root: root.to_path_buf(),
++        storage: None,
++        constraint_id: "E12S4/NG-1".to_string(),
++        justification: Some("   \t  ".to_string()),
++        if_version: None,
++        author: author.clone(),
++    };
++    let err2 = apply_constraint_remove(&remove_opts_whitespace).unwrap_err();
++    assert_eq!(err2.exit_code(), ExitCode::PolicyRefusal);
++    assert_eq!(err2.code(), "needs_justification");
++
++    // Files untouched: version remains 1
++    let content = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
++    assert!(content.contains("version: 1"));
++    assert!(content.contains("NG-1"));
++}
++
++#[test]
++fn test_apply_constraint_remove_non_draft_with_justification_succeeds() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    let constraints_yaml = "  - id: NG-1\n    kind: no_go\n    text: Do not touch frame buffers\n";
++    setup_test_story(root, "E12S4", "in-progress", 1, constraints_yaml);
++
++    let author = Author::new("human", "simon");
++    let remove_opts = ConstraintRemoveOptions {
++        workspace_root: root.to_path_buf(),
++        storage: None,
++        constraint_id: "E12S4/NG-1".to_string(),
++        justification: Some("Architecture approved frame buffer direct access".to_string()),
++        if_version: Some(1),
++        author,
++    };
++
++    let res = apply_constraint_remove(&remove_opts).expect("remove on non-draft with justification should succeed");
++    assert_eq!(res.id, "E12S4/NG-1");
++    assert_eq!(res.new_version, 2);
++
++    let content = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
++    assert!(content.contains("version: 2"));
++    assert!(!content.contains("NG-1"));
++}
++
++#[test]
++fn test_apply_constraint_remove_not_found() {
++    let tmp = TempDir::new().unwrap();
++    let root = tmp.path();
++    setup_test_story(root, "E12S4", "draft", 1, "");
++
++    let author = Author::new("human", "simon");
++    let remove_opts = ConstraintRemoveOptions {
++        workspace_root: root.to_path_buf(),
++        storage: None,
++        constraint_id: "E12S4/NG-99".to_string(),
++        justification: None,
++        if_version: None,
++        author,
++    };
++
++    let err = apply_constraint_remove(&remove_opts).unwrap_err();
++    assert_eq!(err.exit_code(), ExitCode::UsageError);
++    assert_eq!(err.code(), "entity_not_found");
++}
+diff --git a/docs/bmad/implementation-artifacts/spec-2-5-constraints-as-entities.md b/docs/bmad/implementation-artifacts/spec-2-5-constraints-as-entities.md
+new file mode 100644
+index 0000000..37c0036
+--- /dev/null
++++ b/docs/bmad/implementation-artifacts/spec-2-5-constraints-as-entities.md
+@@ -0,0 +1,124 @@
++---
++title: 'Story 2.5: Constraints as Entities'
++type: 'feature'
++created: '2026-09-13'
++status: 'in-review'
++baseline_commit: '3b70ad1c7a3583b0aebb7128dbaa75e124f2f4c2'
++route: 'dispatch'
++review_loop_iteration: 0
++context: []
++---
++
++<frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
++
++## Intent
++
++**Problem:** Autonomous agents and developers lack a formal CLI and write-path mechanism to declare and enforce first-class negative constraints (appetites, rabbit holes, and no-gos), making rejections and scope limits ad-hoc, untracked, and prone to silent removal after specification.
++
++**Approach:** Implement `qdev constraint add` and `qdev constraint remove` commands backed by atomic write-lock mutation, sequential scoped identifier allocation (`{owner}/{kind_prefix}-{n}`), JSON Schema validation, and immediate SQLite cache synchronization, enforcing exit code 3 (`needs_justification`) when removing constraints from non-draft entities.
++
++## Boundaries & Constraints
++
++**Always:**
++- Scoped constraint IDs follow the canonical grammar: `{owner_id}/{kind_prefix}-{n}` (e.g. `E12S4/NG-1`, `E12/RH-2`, `E12S4/APP-1`).
++- Map constraint kinds to canonical prefixes: `no_go` -> `NG`, `rabbit_hole` -> `RH`, `appetite` -> `APP`.
++- Allocate constraint IDs monotonically within an owner and kind: `n = max(existing_n) + 1` (starting at 1 if none exist).
++- Store constraints in the owning entity's frontmatter as a sequence of `{ id, kind, text }` records (preserving relative ID e.g. `NG-1` or full ID).
++- Pass all constraint mutations through the workspace advisory write lock (`write.lock`), bump the entity `version`, validate against entity JSON schema, and write atomically via tempfile replacement.
++- Immediately synchronize the `constraints` table and update the entity row in the SQLite cache within the write path transaction.
++- When `qdev constraint remove` targets a story or epic whose status is not `draft`, require a non-empty `--justification` flag; refuse missing or whitespace-only justification with exit code 3 (`needs_justification`).
++- Pass target entities through governance checks (`check_governance_gate`), recognizing child constraints as exempt when under a held lease on the parent story.
++
++**Never:**
++- Never remove a constraint from an active, ready, in-progress, review, or done story without an explicit non-empty justification.
++- Never allocate duplicate or non-sequential constraint numbers within an entity.
++- Never corrupt or reorder unrelated frontmatter sections during constraint addition or removal.
++- Never leave SQLite cache out of sync with frontmatter after successful constraint addition or removal.
++
++## I/O & Edge-Case Matrix
++
++| Scenario | Input / State | Expected Output / Behavior | Error Handling |
++|----------|--------------|---------------------------|----------------|
++| Add constraint happy path | `qdev constraint add E12S4 --kind no_go -- "Do not touch frame buffers"` on draft story | Allocates `E12S4/NG-1`, appends to frontmatter, updates cache, exit 0 | Standard write errors |
++| Add second constraint of same kind | `qdev constraint add E12S4 --kind no_go -- "Do not use unsafe"` when `NG-1` exists | Allocates `E12S4/NG-2`, appends, bumps version, exit 0 | Standard write errors |
++| Add constraint to epic | `qdev constraint add E12 --kind rabbit_hole -- "len == 0 does not mean empty"` | Allocates `E12/RH-1`, writes to `docs/specs/epics/E12.md`, updates cache, exit 0 | Standard write errors |
++| Add constraint invalid kind | `qdev constraint add E12S4 --kind invalid_kind -- "text"` | Refuses with exit 2 `usage_error` naming valid kinds (`no_go`, `rabbit_hole`, `appetite`) | Exit 2 `usage_error` |
++| Add constraint empty text | `qdev constraint add E12S4 --kind no_go -- "   "` | Refuses with exit 2 `usage_error` indicating constraint text cannot be empty | Exit 2 `usage_error` |
++| Remove constraint in draft | `qdev constraint remove E12S4/NG-1` on draft story | Removes constraint from frontmatter, drops cache row, bumps version, exit 0 | Standard errors |
++| Remove constraint after draft without justification | `qdev constraint remove E12S4/NG-1` on `ready` or `in-progress` story (no `--justification`) | Refuses mutation with exit 3 `needs_justification`, files untouched | Exit 3 `needs_justification` |
++| Remove constraint after draft with justification | `qdev constraint remove E12S4/NG-1 --justification "Design changed"` on `ready` story | Removes constraint, updates cache, exit 0 | Standard errors |
++| Remove non-existent constraint | `qdev constraint remove E12S4/NG-99` | Refuses with exit 2 `entity_not_found` | Exit 2 `entity_not_found` |
++| Optimistic concurrency mismatch | `qdev constraint add E12S4 --kind no_go --if-version 1 -- "text"` when version is 2 | Refuses with exit 5 `version_mismatch`, no files modified | Exit 5 `version_mismatch` |
++
++</frozen-after-approval>
++
++## Code Map
++
++- `crates/qdev-core/src/id.rs` -- Extend `ConstraintKind` to support `Appetite` (`APP`), and provide allocator helper for sequential constraint IDs within an owner.
++- `crates/qdev-core/src/write.rs` -- Implement `apply_constraint_add` and `apply_constraint_remove` with advisory write lock, schema validation, frontmatter patching, and SQLite cache updates.
++- `crates/qdev-core/src/lib.rs` -- Re-export constraint options and write functions.
++- `crates/qdev-cli/src/cli.rs` -- Define `ConstraintArgs`, `ConstraintCommands`, `ConstraintAddArgs`, and `ConstraintRemoveArgs` in clap command hierarchy.
++- `crates/qdev-cli/src/main.rs` -- Implement `handle_constraint_add` and `handle_constraint_remove`, wire governance gate and `--justification` enforcement, and render JSON/text outputs.
++- `crates/qdev-core/tests/constraint_tests.rs` -- Unit tests verifying constraint ID allocation, atomic writes, version bumping, and cache synchronization.
++- `crates/qdev-cli/tests/constraint_cli_tests.rs` -- CLI integration tests verifying `qdev constraint add`, `qdev constraint remove`, non-draft justification gate (exit 3), `--if-version`, and JSON envelope output.
++
++## Tasks & Acceptance
++
++**Execution:**
++- [x] `crates/qdev-core/src/id.rs` -- Add `ConstraintKind::Appetite` (`APP`) and monotonic constraint ID allocator helper.
++- [x] `crates/qdev-core/src/write.rs` -- Implement `apply_constraint_add` and `apply_constraint_remove` with write-lock, schema validation, frontmatter patching, and cache upsert/delete.
++- [x] `crates/qdev-core/src/lib.rs` -- Export constraint write functions and structs.
++- [x] `crates/qdev-cli/src/cli.rs` -- Add `Constraint` subcommand and arguments (`add`, `remove`).
++- [x] `crates/qdev-cli/src/main.rs` -- Implement constraint handlers with governance integration, justification gating, and CLI output formatting.
++- [x] `crates/qdev-core/tests/constraint_tests.rs` -- Add unit tests for constraint allocation, mutation, and cache sync.
++- [x] `crates/qdev-cli/tests/constraint_cli_tests.rs` -- Add integration tests for CLI commands, exit codes, and envelope structure.
++
++**Acceptance Criteria:**
++- Given an epic E12 with `E12/RH-1` and a story E12S4 with `E12S4/NG-1`, when running `qdev get story E12S4 --json`, then `constraints` contains both with the epic constraint marked `inherited_from: "E12"`.
++- Given an entity E12S4, when running `qdev constraint add E12S4 --kind no_go -- "text"`, then it allocates the next `NG-n` within the owner, writes it via the atomic write path, bumps version, and synchronizes the cache.
++- Given a story that has left `draft` (e.g. `ready`, `in-progress`, `review`, `done`), when running `qdev constraint remove E12S4/NG-1` without `--justification`, then the command is refused with exit code 3 (`needs_justification`).
++- Given a story that has left `draft`, when running `qdev constraint remove E12S4/NG-1 --justification "Approved"`, then the constraint is removed, cache row is deleted, and version is bumped.
++- Given an allocated constraint `E12S4/NG-1`, when running `qdev get E12S4/NG-1`, then it resolves and returns the constraint details.
++
++## Implementation Notes
++
++## Spec Change Log
++
++## Review Triage Log
++
++| Source | File:Line | Verdict | Route | Summary / Evidence |
++|---|---|---|---|---|
++| Blind Hunter | `write.rs:3420` | high | patch | Frontmatter parsing and `remove_idx` resolution was done before acquiring write lock; patched to parse under advisory write lock. |
++| Blind Hunter | `cli.rs:60` | low | patch | Missing `--justification` in `ConstraintRemoveArgs`; patched to expose `--justification` on subcommand so help displays it. |
++| Blind Hunter | `main.rs:304` | medium | patch | Constraint ID passed to `check_governance_gate` instead of entity owner; patched to parse owner before governance check. |
++| Blind Hunter | `main.rs:302` | low | patch | Missing syntax pre-validation on constraint ID before governance check; patched to check syntax early. |
++| Blind Hunter | `write.rs:3388` | medium | patch | Permissive constraint relative suffix matching ignored owner prefix; patched to check owner prefix when slash is present. |
++| Blind Hunter | `id.rs:768` | low | patch | `parse_constraint_seq` permitted leading zeroes; patched to reject leading zeroes. |
++| Blind Hunter | `id.rs:811` | false | rejected | SQLite query in allocator already filtered by `prefix == kind.as_str()` in `parse_constraint_seq`. |
++| Blind Hunter | `write.rs:1203` | false | rejected | Non-existent constraint removal correctly fails with `entity_not_found` per spec. |
++| Blind Hunter | `schema.rs:151` | false | rejected | `PayloadKind` only registers specifically designated commands; `relate`/`unrelate` are likewise not registered. |
++| Blind Hunter | `sprint-status.yaml:67` | false | rejected | Sprint-status rules state `review` status is set at step-05 upon completion, not during step-04. |
++| Blind Hunter | `write.rs:512` | false | rejected | Shared behavior of `patch_frontmatter` across all entity mutations. |
++| Blind Hunter | `write.rs:965` | low | patch | Owner ID parsing should precede lock acquisition; patched to validate before lock. |
++| Blind Hunter | `main.rs:321` | false | rejected | Forwarding interactive governance justification is established pattern from Story 2.4. |
++| Blind Hunter | `constraint_cli_tests.rs:200` | low | patch | Missing test coverage for `APP` constraint removal and `get` resolution; patched with test. |
++| Blind Hunter | `main.rs:260` | false | rejected | Governance interactive menus live in CLI layer by architectural design. |
++| Edge Case Hunter | `write.rs:3420` | high | patch | Duplicate of BH-1: concurrent constraint removal lock safety. |
++| Edge Case Hunter | `main.rs:2674` | medium | patch | Duplicate of BH-3: interactive add-team prompt fails on slash in target id. |
++| Edge Case Hunter | `write.rs:3389` | medium | patch | Duplicate of BH-5: foreign constraint suffix collision. |
++| Verification Gap | `workspace_guard_cli_tests.rs:15` | low | patch | Workspace guard test omitted `constraint` subcommand; patched `guarded_invocations()`. |
++| Verification Gap | `constraint_cli_tests.rs:268` | low | patch | Missing CLI test for optimistic concurrency mismatch (`--if-version`) on constraint remove; patched with test. |
++
++## Design Notes
++
++- Constraint IDs in frontmatter can be relative (`NG-1`) or absolute (`E12S4/NG-1`); both are accepted and indexed consistently in SQLite as `E12S4/NG-1`.
++- Sequential allocation scans existing constraints in both the entity frontmatter and the SQLite cache, computing `max(n) + 1` for the specified kind prefix.
++- Constraint removal requires checking the entity status in frontmatter: if `status != "draft"`, require `--justification` (non-empty trimmed string).
++- Governance gate (`check_governance_gate`) treats `{story_id}/...` as child constraint exempt from story lease violations.
++
++## Verification
++
++**Commands:**
++- `cargo test --test constraint_tests` -- expected: All core unit tests pass for constraint allocation, addition, removal, and cache sync.
++- `cargo test --test constraint_cli_tests` -- expected: CLI integration tests verify `qdev constraint add`, `qdev constraint remove`, justification check, and JSON envelopes.
++- `cargo test` -- expected: Workspace build and entire test suite pass cleanly without regressions.

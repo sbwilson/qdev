@@ -105,12 +105,13 @@ impl<'de> Deserialize<'de> for ConstraintOwner {
     }
 }
 
-/// Kind of constraint (NoGo or RabbitHole).
+/// Kind of constraint (NoGo, RabbitHole, or Appetite).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstraintKind {
     NoGo,
     RabbitHole,
+    Appetite,
 }
 
 impl ConstraintKind {
@@ -118,6 +119,33 @@ impl ConstraintKind {
         match self {
             ConstraintKind::NoGo => "NG",
             ConstraintKind::RabbitHole => "RH",
+            ConstraintKind::Appetite => "APP",
+        }
+    }
+
+    pub fn to_kind_str(&self) -> &'static str {
+        match self {
+            ConstraintKind::NoGo => "no_go",
+            ConstraintKind::RabbitHole => "rabbit_hole",
+            ConstraintKind::Appetite => "appetite",
+        }
+    }
+
+    pub fn from_kind_str(s: &str) -> Option<Self> {
+        match s {
+            "no_go" => Some(ConstraintKind::NoGo),
+            "rabbit_hole" => Some(ConstraintKind::RabbitHole),
+            "appetite" => Some(ConstraintKind::Appetite),
+            _ => None,
+        }
+    }
+
+    pub fn from_prefix(s: &str) -> Option<Self> {
+        match s {
+            "NG" => Some(ConstraintKind::NoGo),
+            "RH" => Some(ConstraintKind::RabbitHole),
+            "APP" => Some(ConstraintKind::Appetite),
+            _ => None,
         }
     }
 }
@@ -362,6 +390,7 @@ fn parse_constraint(
         let kind = match kind_str {
             "NG" => ConstraintKind::NoGo,
             "RH" => ConstraintKind::RabbitHole,
+            "APP" => ConstraintKind::Appetite,
             _ => return Err(IdParseError::InvalidConstraint(full_str.to_string())),
         };
         let number = parse_positive_int(num_str, full_str)?;
@@ -712,3 +741,124 @@ pub fn allocate_decision_id(workspace_root: &Path) -> Result<Identifier, QdevErr
     let mut rng = rand::rng();
     allocate_decision_id_with_rng(workspace_root, &mut rng)
 }
+
+/// Extracts the sequence number `n` from a constraint ID string (relative e.g. `NG-1` or
+/// absolute e.g. `E12S4/NG-1`) for the specified kind prefix.
+pub fn parse_constraint_seq(
+    id_str: &str,
+    expected_owner: Option<&str>,
+    kind: ConstraintKind,
+) -> Option<u32> {
+    let (owner_part, suffix) = if let Some((o, s)) = id_str.split_once('/') {
+        (Some(o), s)
+    } else {
+        (None, id_str)
+    };
+
+    if let (Some(exp), Some(act)) = (expected_owner, owner_part) {
+        if !exp.eq_ignore_ascii_case(act) {
+            return None;
+        }
+    }
+
+    let (prefix, num_str) = suffix.split_once('-')?;
+    if prefix != kind.as_str() {
+        return None;
+    }
+    if num_str.starts_with('0') || !num_str.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    num_str.parse::<u32>().ok().filter(|&n| n >= 1)
+}
+
+/// Allocates the next monotonic constraint identifier for an owner entity and kind,
+/// assuming the default `[storage]` layout and no cache.
+pub fn allocate_next_constraint_id(
+    workspace_root: &Path,
+    owner_id: &str,
+    kind: ConstraintKind,
+) -> Result<Identifier, QdevError> {
+    allocate_next_constraint_id_in(
+        workspace_root,
+        &StorageConfig::default(),
+        owner_id,
+        kind,
+        None,
+    )
+}
+
+/// Allocates the next monotonic constraint identifier for an owner entity and kind,
+/// scanning existing constraints in both the entity frontmatter and the SQLite cache.
+pub fn allocate_next_constraint_id_in(
+    workspace_root: &Path,
+    storage: &StorageConfig,
+    owner_id: &str,
+    kind: ConstraintKind,
+    store: Option<&dyn crate::store::Store>,
+) -> Result<Identifier, QdevError> {
+    let owner = match owner_id.parse::<Identifier>() {
+        Ok(Identifier::Epic { number }) => ConstraintOwner::Epic(number),
+        Ok(Identifier::Story { epic, story }) => ConstraintOwner::Story(epic, story),
+        _ => {
+            return Err(QdevError::usage_error(format!(
+                "Invalid constraint owner '{}', must be Epic (e.g. E12) or Story (e.g. E12S4)",
+                owner_id
+            )))
+        }
+    };
+
+    let mut existing_ids = HashSet::new();
+
+    // 1. Scan SQLite cache if store is provided
+    if let Some(s) = store {
+        if let Ok(records) = s.get_constraints_for_owner(owner_id) {
+            for r in records {
+                existing_ids.insert(r.id);
+            }
+        }
+    }
+
+    // 2. Scan entity frontmatter file
+    if let Ok((_kind, _id, file_path)) =
+        crate::write::resolve_entity_file(workspace_root, None, owner_id, Some(storage))
+    {
+        if let Ok(content) = std::fs::read_to_string(&file_path) {
+            if let Ok(frontmatter) = crate::schema::extract_frontmatter(&content) {
+                if let Some(serde_json::Value::Array(constraints)) = frontmatter.get("constraints") {
+                    for c in constraints {
+                        if let Some(id_val) = c.get("id").and_then(|v| v.as_str()) {
+                            existing_ids.insert(id_val.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut max_n = 0u32;
+    for id_str in &existing_ids {
+        if let Some(n) = parse_constraint_seq(id_str, Some(owner_id), kind) {
+            if n > max_n {
+                max_n = n;
+            }
+        }
+    }
+
+    let next_n = max_n.checked_add(1).ok_or_else(|| {
+        QdevError::logical_failure(
+            "id_space_exhausted",
+            format!(
+                "Owner {} has exhausted constraint numbers for kind {}",
+                owner_id,
+                kind.as_str()
+            ),
+        )
+    })?;
+
+    Ok(Identifier::Constraint {
+        owner,
+        kind,
+        number: next_n,
+    })
+}
+

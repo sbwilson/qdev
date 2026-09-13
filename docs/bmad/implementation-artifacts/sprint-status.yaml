@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-13-2026 10:33
+last_updated: 09-13-2026 13:31
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -67,7 +67,7 @@ development_status:
   2-2-justified-backward-transitions: review
   2-3-story-leases: review
   2-4-scope-enforcement-cross-team-overrides: review
-  2-5-constraints-as-entities: backlog
+  2-5-constraints-as-entities: review
   2-6-scratchpads: backlog
   2-7-decision-ledger: backlog
   2-8-deferred-work: backlog

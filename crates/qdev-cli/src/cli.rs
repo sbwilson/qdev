@@ -57,6 +57,8 @@ pub enum Commands {
     Relate(RelateArgs),
     /// Remove a relation from a source entity to a target entity
     Unrelate(UnrelateArgs),
+    /// Declare or remove negative and rabbit-hole constraints
+    Constraint(ConstraintArgs),
     /// Render the story dependency graph
     Graph(GraphArgs),
     /// Surface cached and freshly computed integrity findings
@@ -183,6 +185,67 @@ pub struct UnrelateArgs {
     pub target_id: String,
 
     /// Optimistic concurrency control: expected existing source entity version
+    #[arg(long = "if-version")]
+    pub if_version: Option<u64>,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct ConstraintArgs {
+    #[command(subcommand)]
+    pub command: ConstraintCommands,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum ConstraintCommands {
+    /// Add a negative or rabbit-hole constraint to an entity
+    Add(ConstraintAddArgs),
+    /// Remove a constraint from an entity
+    Remove(ConstraintRemoveArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConstraintAddArgs {
+    /// Target entity identifier (e.g. E12S4 or E12)
+    pub target: String,
+
+    /// Constraint kind: 'no_go', 'rabbit_hole', or 'appetite'
+    #[arg(long = "kind")]
+    pub kind: String,
+
+    /// Constraint description text
+    pub text: String,
+
+    /// Optimistic concurrency control: expected existing entity version
+    #[arg(long = "if-version")]
+    pub if_version: Option<u64>,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConstraintRemoveArgs {
+    /// Constraint identifier to remove (e.g. E12S4/NG-1)
+    pub target: String,
+
+    /// Justification for removing a constraint from a non-draft entity
+    #[arg(long = "justification")]
+    pub justification: Option<String>,
+
+    /// Optimistic concurrency control: expected existing entity version
     #[arg(long = "if-version")]
     pub if_version: Option<u64>,
 
