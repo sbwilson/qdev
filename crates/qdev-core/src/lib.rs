@@ -1,5 +1,6 @@
 pub mod config;
 pub mod dag;
+pub mod decision;
 pub mod doctor;
 pub mod envelope;
 pub mod errors;
@@ -15,6 +16,10 @@ pub mod store;
 pub mod transition;
 pub mod validate;
 pub mod write;
+
+pub use decision::{
+    log_decision, log_decision_with_store, DecisionInput, DecisionLogPayload, VALID_DECISION_TYPES,
+};
 
 pub use scratch::{
     append_scratch_entry, estimate_tokens, filter_scratch_entries_by_budget, read_scratch_entries,
@@ -91,6 +96,7 @@ pub use schema::{
 pub use serde_yaml;
 pub use transition::{
     append_scratchpad_entry, classify_transition, create_backward_transition_decision,
+    record_backward_transition_decision,
     PostTransitionHook, PreTransitionHook, StoryState, TransitionContext, TransitionEngine,
     TransitionKind, TransitionOptions, TransitionPayload,
 };

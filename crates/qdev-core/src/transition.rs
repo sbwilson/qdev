@@ -8,13 +8,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::StorageConfig;
 use crate::errors::QdevError;
-use crate::id::allocate_decision_id_in_with_rng;
 use crate::schema::EntityKind;
-use crate::store::{DecisionRecord, EntityRecord, ScratchpadRecord, SqliteStore, Store};
+use crate::store::{ScratchpadRecord, SqliteStore, Store};
 use crate::write::{
     acquire_write_lock, apply_entity_update, current_iso8601, directory_for_kind,
-    has_markdown_heading, resolve_entity_file, sha256_digest, upsert_cache_and_mark_dirty,
-    write_file_atomic, Author, EntityUpdateOptions, EntityUpdateResult,
+    has_markdown_heading, resolve_entity_file, write_file_atomic, Author, EntityUpdateOptions,
+    EntityUpdateResult,
 };
 
 /// All valid lifecycle states for a story entity.
@@ -670,7 +669,7 @@ impl TransitionEngine {
                 .workspace_root
                 .join(cache_dir_rel)
                 .join("write.lock");
-            let _lock_guard = if lock_path.parent().map(|p| p.is_dir()).unwrap_or(false) {
+            let lock_guard = if lock_path.parent().map(|p| p.is_dir()).unwrap_or(false) {
                 Some(acquire_write_lock(&lock_path, Duration::from_millis(5000))?)
             } else {
                 None
@@ -684,6 +683,7 @@ impl TransitionEngine {
                 &options.author,
                 &timestamp,
             )?;
+            drop(lock_guard);
 
             let dec_id = create_backward_transition_decision(
                 &options.workspace_root,
@@ -874,25 +874,6 @@ pub fn create_backward_transition_decision(
         "pivot"
     };
 
-    let default_storage = StorageConfig::default();
-    let st = storage.unwrap_or(&default_storage);
-    let cache_dir_rel = st.cache_dir.as_str();
-    let cache_db_path = workspace_root.join(cache_dir_rel).join("cache.sqlite");
-    let opt_store = if cache_db_path.is_file() {
-        Some(SqliteStore::open(&cache_db_path)?)
-    } else {
-        None
-    };
-
-    let mut rng = rand::rng();
-    let dec_ident = allocate_decision_id_in_with_rng(
-        workspace_root,
-        st,
-        &mut rng,
-        opt_store.as_ref().map(|s| s as &dyn crate::store::Store),
-    )?;
-    let dec_id = dec_ident.to_string();
-
     let title = match decision_type {
         "review_rejection" => format!("Review rejection on story {}", story_id),
         _ => format!("Pivot on story {}", story_id),
@@ -900,97 +881,42 @@ pub fn create_backward_transition_decision(
 
     let trajectory = format!("{} -> {}", from_state.as_str(), to_state.as_str());
 
-    let frontmatter_json = serde_json::json!({
-        "id": dec_id,
-        "title": title,
-        "status": "active",
-        "version": 1,
-        "created_by": {
-            "type": author.author_type,
-            "id": author.id,
-        },
-        "updated_by": {
-            "type": author.author_type,
-            "id": author.id,
-        },
-        "subject_id": story_id,
-        "decision_type": decision_type,
-        "context": trajectory,
-        "ruling": justification,
-        "created_at": timestamp,
-    });
+    let input = crate::decision::DecisionInput {
+        subject_id: story_id.to_string(),
+        decision_type: decision_type.to_string(),
+        topic: None,
+        context: Some(trajectory),
+        ruling: justification.to_string(),
+        author: author.clone(),
+        title: Some(title),
+        timestamp: Some(timestamp.to_string()),
+        validate_subject: false,
+    };
 
-    crate::schema::validate_value_detailed(EntityKind::Decision, &frontmatter_json).map_err(
-        |errs| {
-            QdevError::logical_failure(
-                "schema_violation",
-                format!(
-                    "Decision frontmatter schema validation failed: {}",
-                    errs.iter()
-                        .map(|e| e.to_string())
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                ),
-            )
-        },
-    )?;
+    let payload = crate::decision::log_decision(workspace_root, storage, &input)?;
+    Ok(payload.id)
+}
 
-    let frontmatter_yaml = serde_yaml::to_string(&frontmatter_json).map_err(|e| {
-        QdevError::infrastructure_failure(
-            "serialization_error",
-            format!("Failed to serialize decision frontmatter: {}", e),
-        )
-    })?;
-
-    let dec_content = format!(
-        "---\n{}---\n\n# {}\n\nTransition: {}\n\n{}\n",
-        frontmatter_yaml, title, trajectory, justification
-    );
-
-    let rel_dir = directory_for_kind(storage, EntityKind::Decision);
-    let file_name = crate::write::canonical_file_name(&dec_id);
-    let dec_file_path = workspace_root.join(&rel_dir).join(&file_name);
-
-    write_file_atomic(&dec_file_path, &dec_content)?;
-
-    if let Some(ref store) = opt_store {
-        let rel_source_path = crate::write::workspace_rel_path(&dec_file_path, workspace_root);
-        let content_hash = sha256_digest(dec_content.as_bytes());
-
-        let decision_entity_record = EntityRecord {
-            id: dec_id.clone(),
-            kind: EntityKind::Decision,
-            title: Some(title),
-            status: Some("active".to_string()),
-            owners: None,
-            source_path: rel_source_path,
-            content_hash,
-            version: 1,
-            created_by: Some(author.clone()),
-            updated_by: Some(author.clone()),
-            updated_at: timestamp.to_string(),
-            stale: false,
-            epic_id: None,
-            seq: None,
-            appetite: None,
-            safety_class: None,
-            target_modules: None,
-        };
-        upsert_cache_and_mark_dirty(&cache_db_path, &decision_entity_record)?;
-
-        let decision_record = DecisionRecord {
-            id: dec_id.clone(),
-            subject_id: story_id.to_string(),
-            decision_type: Some(decision_type.to_string()),
-            topic: None,
-            context: Some(trajectory),
-            ruling: Some(justification.to_string()),
-            author_type: Some(author.author_type.clone()),
-            author_id: Some(author.id.clone()),
-            created_at: Some(timestamp.to_string()),
-        };
-        store.upsert_decision(&decision_record)?;
-    }
-
-    Ok(dec_id)
+/// Alias for [`create_backward_transition_decision`].
+#[allow(clippy::too_many_arguments)]
+pub fn record_backward_transition_decision(
+    workspace_root: &Path,
+    storage: Option<&StorageConfig>,
+    story_id: &str,
+    from_state: StoryState,
+    to_state: StoryState,
+    justification: &str,
+    author: &Author,
+    timestamp: &str,
+) -> Result<String, QdevError> {
+    create_backward_transition_decision(
+        workspace_root,
+        storage,
+        story_id,
+        from_state,
+        to_state,
+        justification,
+        author,
+        timestamp,
+    )
 }

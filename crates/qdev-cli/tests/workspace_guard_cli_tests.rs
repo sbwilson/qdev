@@ -27,6 +27,18 @@ fn guarded_invocations() -> Vec<Vec<&'static str>> {
         vec!["release", "story", "E1S1"],
         vec!["constraint", "add", "E1S1", "--kind", "no_go", "text"],
         vec!["scratch", "read", "E1S1"],
+        vec![
+            "decision",
+            "log",
+            "--subject",
+            "E1S1",
+            "--type",
+            "human_ruling",
+            "--topic",
+            "Buffer sizing",
+            "--ruling",
+            "Fixed 4 MB pool",
+        ],
     ]
 }
 

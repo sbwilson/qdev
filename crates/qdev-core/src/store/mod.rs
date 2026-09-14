@@ -310,6 +310,10 @@ pub struct EntityFilter {
     pub module: Option<String>,
     /// Sprint id a story must be assigned to (joined via `sprint_assignments`).
     pub sprint: Option<i64>,
+    /// Decision subject entity id (joined via the `decisions` table).
+    pub subject: Option<String>,
+    /// Decision type (joined via the `decisions` table).
+    pub decision_type: Option<String>,
 }
 
 /// The unified Store trait exposing reads and writes for all 16 cache tables.

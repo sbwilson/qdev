@@ -73,6 +73,8 @@ pub enum Commands {
     Release(ReleaseArgs),
     /// Manage story scratchpads
     Scratch(ScratchArgs),
+    /// Log or query decisions
+    Decision(DecisionArgs),
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
@@ -298,6 +300,14 @@ pub struct ListArgs {
     /// Filter by assigned sprint number
     #[arg(long = "sprint")]
     pub sprint: Option<i64>,
+
+    /// Filter decisions by subject entity id (e.g. E12S4)
+    #[arg(long = "subject")]
+    pub subject: Option<String>,
+
+    /// Filter decisions by decision type
+    #[arg(long = "type")]
+    pub r#type: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
@@ -508,6 +518,49 @@ pub struct ScratchReadArgs {
     /// Token budget to bound output entries
     #[arg(long = "budget")]
     pub budget: Option<usize>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct DecisionArgs {
+    #[command(subcommand)]
+    pub command: DecisionCommands,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum DecisionCommands {
+    /// Log a decision against a subject entity
+    Log(DecisionLogArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct DecisionLogArgs {
+    /// Subject entity identifier (e.g. E12S4, E12, AD-43)
+    #[arg(long = "subject")]
+    pub subject: String,
+
+    /// Decision type: human_ruling, agent_assumption, cross_team_override, pivot, review_rejection, lease_override
+    #[arg(long = "type")]
+    pub r#type: String,
+
+    /// Short decision topic
+    #[arg(long = "topic")]
+    pub topic: String,
+
+    /// Decision ruling or rationale
+    #[arg(long = "ruling")]
+    pub ruling: String,
+
+    /// Context or background for the decision (defaults to "Decision on <subject>")
+    #[arg(long = "context")]
+    pub context: Option<String>,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
 }
 
 /// Helper to check whether `--json` was passed in raw command-line arguments.

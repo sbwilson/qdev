@@ -871,10 +871,13 @@ SELECT
     s.epic_id, s.seq, s.appetite, s.safety_class, s.target_modules, e.stale
 FROM entities e
 LEFT JOIN stories s ON e.id = s.id
+LEFT JOIN decisions d ON e.id = d.id
 WHERE (?1 IS NULL OR e.kind = ?1)
   AND (?2 IS NULL OR e.status = ?2)
   AND (?3 IS NULL OR s.epic_id = ?3)
   AND (?4 IS NULL OR e.id IN (SELECT story_id FROM sprint_assignments WHERE sprint_id = ?4))
+  AND (?5 IS NULL OR d.subject_id = ?5)
+  AND (?6 IS NULL OR d.decision_type = ?6)
 ORDER BY e.id ASC;
 "#,
                 )
@@ -889,10 +892,19 @@ ORDER BY e.id ASC;
             let status_filter = filter.status.clone();
             let epic_filter = filter.epic_id.clone();
             let sprint_filter = filter.sprint;
+            let subject_filter = filter.subject.clone();
+            let decision_type_filter = filter.decision_type.clone();
 
             let rows = stmt
                 .query_map(
-                    rusqlite::params![kind_filter, status_filter, epic_filter, sprint_filter,],
+                    rusqlite::params![
+                        kind_filter,
+                        status_filter,
+                        epic_filter,
+                        sprint_filter,
+                        subject_filter,
+                        decision_type_filter,
+                    ],
                     |row| {
                         let kind_str: String = row.get(1)?;
                         let kind =

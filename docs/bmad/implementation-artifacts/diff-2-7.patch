@@ -1,0 +1,2407 @@
+diff --git a/crates/qdev-cli/src/cli.rs b/crates/qdev-cli/src/cli.rs
+index 179b871..9687f21 100644
+--- a/crates/qdev-cli/src/cli.rs
++++ b/crates/qdev-cli/src/cli.rs
+@@ -73,6 +73,8 @@ pub enum Commands {
+     Release(ReleaseArgs),
+     /// Manage story scratchpads
+     Scratch(ScratchArgs),
++    /// Log or query decisions
++    Decision(DecisionArgs),
+ }
+ 
+ #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+@@ -298,6 +300,14 @@ pub struct ListArgs {
+     /// Filter by assigned sprint number
+     #[arg(long = "sprint")]
+     pub sprint: Option<i64>,
++
++    /// Filter decisions by subject entity id (e.g. E12S4)
++    #[arg(long = "subject")]
++    pub subject: Option<String>,
++
++    /// Filter decisions by decision type
++    #[arg(long = "type")]
++    pub r#type: Option<String>,
+ }
+ 
+ #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+@@ -510,6 +520,49 @@ pub struct ScratchReadArgs {
+     pub budget: Option<usize>,
+ }
+ 
++#[derive(Parser, Debug, Clone, PartialEq, Eq)]
++pub struct DecisionArgs {
++    #[command(subcommand)]
++    pub command: DecisionCommands,
++}
++
++#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
++pub enum DecisionCommands {
++    /// Log a decision against a subject entity
++    Log(DecisionLogArgs),
++}
++
++#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
++pub struct DecisionLogArgs {
++    /// Subject entity identifier (e.g. E12S4, E12, AD-43)
++    #[arg(long = "subject")]
++    pub subject: String,
++
++    /// Decision type: human_ruling, agent_assumption, cross_team_override, pivot, review_rejection, lease_override
++    #[arg(long = "type")]
++    pub r#type: String,
++
++    /// Short decision topic
++    #[arg(long = "topic")]
++    pub topic: String,
++
++    /// Decision ruling or rationale
++    #[arg(long = "ruling")]
++    pub ruling: String,
++
++    /// Context or background for the decision (defaults to "Decision on <subject>")
++    #[arg(long = "context")]
++    pub context: Option<String>,
++
++    /// Attribution author type override ('human' or 'agent')
++    #[arg(long = "author-type")]
++    pub author_type: Option<String>,
++
++    /// Attribution developer/agent ID override
++    #[arg(long = "author-id")]
++    pub author_id: Option<String>,
++}
++
+ /// Helper to check whether `--json` was passed in raw command-line arguments.
+ pub fn is_json_requested(args: &[String]) -> bool {
+     args.iter()
+diff --git a/crates/qdev-cli/src/main.rs b/crates/qdev-cli/src/main.rs
+index a695827..19489fe 100644
+--- a/crates/qdev-cli/src/main.rs
++++ b/crates/qdev-cli/src/main.rs
+@@ -385,6 +385,13 @@ fn run(raw_args: &[String]) -> ExitCode {
+             &current_dir,
+             interactivity,
+         ),
++        Some(Commands::Decision(ref decision_args)) => handle_decision(
++            decision_args,
++            &annotated_config,
++            &cli,
++            &output,
++            &current_dir,
++        ),
+         Some(Commands::Init(_)) => unreachable!(),
+         Some(Commands::Schema(_)) => unreachable!(),
+     }
+@@ -468,7 +475,8 @@ fn requires_workspace(command: Option<&Commands>) -> bool {
+         | Some(Commands::Doctor)
+         | Some(Commands::Claim(_))
+         | Some(Commands::Release(_))
+-        | Some(Commands::Scratch(_)) => true,
++        | Some(Commands::Scratch(_))
++        | Some(Commands::Decision(_)) => true,
+     }
+ }
+ 
+@@ -1902,6 +1910,8 @@ fn handle_list(
+         ("--status", list_args.status.as_deref()),
+         ("--owner", list_args.owner.as_deref()),
+         ("--module", list_args.module.as_deref()),
++        ("--subject", list_args.subject.as_deref()),
++        ("--type", list_args.r#type.as_deref()),
+     ]) {
+         let _ = output.emit_error(&e);
+         return e.exit_code();
+@@ -1937,6 +1947,8 @@ fn handle_list(
+     query_opts.owner = owner;
+     query_opts.module = list_args.module.clone();
+     query_opts.sprint = list_args.sprint;
++    query_opts.subject = list_args.subject.clone();
++    query_opts.decision_type = list_args.r#type.clone();
+ 
+     let store = match open_query_store(&root, annotated_config) {
+         Ok(s) => s,
+@@ -4762,3 +4774,122 @@ fn handle_scratch_read(
+ 
+     ExitCode::Success
+ }
++
++fn handle_decision(
++    decision_args: &cli::DecisionArgs,
++    annotated_config: &qdev_core::AnnotatedConfig,
++    cli: &Cli,
++    output: &OutputEmitter,
++    current_dir: &std::path::Path,
++) -> ExitCode {
++    match decision_args.command {
++        cli::DecisionCommands::Log(ref log_args) => {
++            handle_decision_log(log_args, annotated_config, cli, output, current_dir)
++        }
++    }
++}
++
++fn handle_decision_log(
++    log_args: &cli::DecisionLogArgs,
++    annotated_config: &qdev_core::AnnotatedConfig,
++    cli: &Cli,
++    output: &OutputEmitter,
++    current_dir: &std::path::Path,
++) -> ExitCode {
++    let root = qdev_core::find_workspace_root(current_dir);
++
++    // 1. Validate topic is non-empty
++    if log_args.topic.trim().is_empty() {
++        let err = qdev_core::QdevError::usage_error("--topic cannot be empty or whitespace-only");
++        let _ = output.emit_error(&err);
++        return ExitCode::UsageError;
++    }
++
++    // 2. Validate ruling is non-empty
++    if log_args.ruling.trim().is_empty() {
++        let err = qdev_core::QdevError::usage_error("--ruling cannot be empty or whitespace-only");
++        let _ = output.emit_error(&err);
++        return ExitCode::UsageError;
++    }
++
++    // 3. Validate decision_type is recognized
++    let trimmed_type = log_args.r#type.trim();
++    if !qdev_core::VALID_DECISION_TYPES.contains(&trimmed_type) {
++        let err = qdev_core::QdevError::usage_error(format!(
++            "Invalid decision type '{}'; allowed types are: {}",
++            trimmed_type,
++            qdev_core::VALID_DECISION_TYPES.join(", ")
++        ));
++        let _ = output.emit_error(&err);
++        return ExitCode::UsageError;
++    }
++
++    // 4. Resolve author
++    let author = match resolve_author(
++        log_args.author_type.as_deref(),
++        log_args.author_id.as_deref(),
++        annotated_config,
++        &root,
++    ) {
++        Ok(a) => a,
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    };
++
++    // 5. Build DecisionInput
++    let input = qdev_core::DecisionInput {
++        subject_id: log_args.subject.trim().to_string(),
++        decision_type: trimmed_type.to_string(),
++        topic: Some(log_args.topic.trim().to_string()),
++        context: log_args.context.as_ref().map(|c| c.trim().to_string()),
++        ruling: log_args.ruling.trim().to_string(),
++        author,
++        title: None,
++        timestamp: None,
++        validate_subject: true,
++    };
++
++    // 6. Log decision
++    let payload = match qdev_core::log_decision(&root, Some(&annotated_config.config.storage), &input)
++    {
++        Ok(p) => p,
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    };
++
++    // 7. Emit output
++    if cli.json {
++        let envelope = JsonEnvelope::new(payload);
++        if let Err(e) = output.emit_envelope(&envelope) {
++            let err = QdevError::infrastructure_failure(
++                "io_error",
++                format!("Failed to emit decision log envelope: {}", e),
++            );
++            let _ = output.emit_error(&err);
++            return ExitCode::InfrastructureFailure;
++        }
++    } else {
++        let text = format!(
++            "Logged decision {} on {} [{}] (topic: \"{}\") -> {}\n",
++            payload.id,
++            payload.subject_id,
++            payload.decision_type,
++            payload.topic.as_deref().unwrap_or(""),
++            payload.path
++        );
++        if let Err(e) = output.emit_text(&text) {
++            let err = QdevError::infrastructure_failure(
++                "io_error",
++                format!("Failed to emit decision log output: {}", e),
++            );
++            let _ = output.emit_error(&err);
++            return ExitCode::InfrastructureFailure;
++        }
++    }
++
++    ExitCode::Success
++}
+diff --git a/crates/qdev-cli/tests/workspace_guard_cli_tests.rs b/crates/qdev-cli/tests/workspace_guard_cli_tests.rs
+index 813c2d5..4784efd 100644
+--- a/crates/qdev-cli/tests/workspace_guard_cli_tests.rs
++++ b/crates/qdev-cli/tests/workspace_guard_cli_tests.rs
+@@ -27,6 +27,18 @@ fn guarded_invocations() -> Vec<Vec<&'static str>> {
+         vec!["release", "story", "E1S1"],
+         vec!["constraint", "add", "E1S1", "--kind", "no_go", "text"],
+         vec!["scratch", "read", "E1S1"],
++        vec![
++            "decision",
++            "log",
++            "--subject",
++            "E1S1",
++            "--type",
++            "human_ruling",
++            "--topic",
++            "Buffer sizing",
++            "--ruling",
++            "Fixed 4 MB pool",
++        ],
+     ]
+ }
+ 
+diff --git a/crates/qdev-core/src/governance.rs b/crates/qdev-core/src/governance.rs
+index f69cdfa..3186c49 100644
+--- a/crates/qdev-core/src/governance.rs
++++ b/crates/qdev-core/src/governance.rs
+@@ -6,17 +6,14 @@ use serde::{Deserialize, Serialize};
+ 
+ use crate::config::{Config, StorageConfig};
+ use crate::errors::QdevError;
+-use crate::id::{allocate_decision_id_in_with_rng, Identifier};
++use crate::id::Identifier;
+ use crate::lease::{find_workspace_leases, get_lease, StoryLease};
+-use crate::schema::{
+-    extract_frontmatter, validate_frontmatter, validate_value_detailed, EntityKind,
+-};
+-use crate::store::{DecisionRecord, EntityRecord, SqliteStore, Store};
++use crate::schema::{extract_frontmatter, validate_frontmatter, EntityKind};
++use crate::store::{EntityRecord, Store};
+ use crate::write::{
+-    acquire_workspace_write_lock, canonical_file_name, current_iso8601, directory_for_kind,
+-    kind_for_write, patch_frontmatter, resolve_entity_file, sha256_digest, story_detail_fields,
+-    upsert_cache_and_mark_dirty, workspace_rel_path, write_file_atomic, Author,
+-    FrontmatterPatchOptions,
++    acquire_workspace_write_lock, current_iso8601, kind_for_write, patch_frontmatter,
++    resolve_entity_file, sha256_digest, story_detail_fields, upsert_cache_and_mark_dirty,
++    workspace_rel_path, write_file_atomic, Author, FrontmatterPatchOptions,
+ };
+ 
+ /// Scope and governance classification result for an entity mutation.
+@@ -396,27 +393,6 @@ pub fn create_governance_override_decision(
+         ));
+     }
+ 
+-    let _lock_guard = acquire_workspace_write_lock(workspace_root, storage)?;
+-
+-    let default_storage = StorageConfig::default();
+-    let st = storage.unwrap_or(&default_storage);
+-    let cache_dir_rel = st.cache_dir.as_str();
+-    let cache_db_path = workspace_root.join(cache_dir_rel).join("cache.sqlite");
+-    let opt_store = if cache_db_path.is_file() {
+-        Some(SqliteStore::open(&cache_db_path)?)
+-    } else {
+-        None
+-    };
+-
+-    let mut rng = rand::rng();
+-    let dec_ident = allocate_decision_id_in_with_rng(
+-        workspace_root,
+-        st,
+-        &mut rng,
+-        opt_store.as_ref().map(|s| s as &dyn Store),
+-    )?;
+-    let dec_id = dec_ident.to_string();
+-
+     let title = match decision_type {
+         "cross_team_override" => format!("Cross-team override on {}", target_id),
+         "lease_override" => format!("Lease override on {}", target_id),
+@@ -441,99 +417,20 @@ pub fn create_governance_override_decision(
+         },
+     };
+ 
+-    let timestamp = current_iso8601();
+-
+-    let frontmatter_json = serde_json::json!({
+-        "id": dec_id,
+-        "title": title,
+-        "status": "active",
+-        "version": 1,
+-        "created_by": {
+-            "type": author.author_type,
+-            "id": author.id,
+-        },
+-        "updated_by": {
+-            "type": author.author_type,
+-            "id": author.id,
+-        },
+-        "subject_id": target_id,
+-        "decision_type": decision_type,
+-        "context": context_desc,
+-        "ruling": trimmed_just,
+-        "created_at": timestamp,
+-    });
+-
+-    validate_value_detailed(EntityKind::Decision, &frontmatter_json).map_err(|errs| {
+-        QdevError::logical_failure(
+-            "schema_violation",
+-            format!(
+-                "Decision frontmatter schema validation failed: {}",
+-                errs.iter()
+-                    .map(|e| e.to_string())
+-                    .collect::<Vec<_>>()
+-                    .join("; ")
+-            ),
+-        )
+-    })?;
+-
+-    let frontmatter_yaml = serde_yaml::to_string(&frontmatter_json).map_err(|e| {
+-        QdevError::infrastructure_failure(
+-            "serialization_error",
+-            format!("Failed to serialize decision frontmatter: {}", e),
+-        )
+-    })?;
+-
+-    let dec_content = format!(
+-        "---\n{}---\n\n# {}\n\nContext: {}\n\n{}\n",
+-        frontmatter_yaml, title, context_desc, trimmed_just
+-    );
+-
+-    let rel_dir = directory_for_kind(storage, EntityKind::Decision);
+-    let file_name = canonical_file_name(&dec_id);
+-    let dec_file_path = workspace_root.join(&rel_dir).join(&file_name);
+-
+-    write_file_atomic(&dec_file_path, &dec_content)?;
+-
+-    if let Some(ref store) = opt_store {
+-        let rel_source_path = workspace_rel_path(&dec_file_path, workspace_root);
+-        let content_hash = sha256_digest(dec_content.as_bytes());
+-
+-        let decision_entity_record = EntityRecord {
+-            id: dec_id.clone(),
+-            kind: EntityKind::Decision,
+-            title: Some(title),
+-            status: Some("active".to_string()),
+-            owners: None,
+-            source_path: rel_source_path,
+-            content_hash,
+-            version: 1,
+-            created_by: Some(author.clone()),
+-            updated_by: Some(author.clone()),
+-            updated_at: timestamp.to_string(),
+-            stale: false,
+-            epic_id: None,
+-            seq: None,
+-            appetite: None,
+-            safety_class: None,
+-            target_modules: None,
+-        };
+-        upsert_cache_and_mark_dirty(&cache_db_path, &decision_entity_record)?;
+-
+-        let decision_record = DecisionRecord {
+-            id: dec_id.clone(),
+-            subject_id: target_id.to_string(),
+-            decision_type: Some(decision_type.to_string()),
+-            topic: None,
+-            context: Some(context_desc),
+-            ruling: Some(trimmed_just.to_string()),
+-            author_type: Some(author.author_type.clone()),
+-            author_id: Some(author.id.clone()),
+-            created_at: Some(timestamp.to_string()),
+-        };
+-        store.upsert_decision(&decision_record)?;
+-    }
++    let input = crate::decision::DecisionInput {
++        subject_id: target_id.to_string(),
++        decision_type: decision_type.to_string(),
++        topic: None,
++        context: Some(context_desc),
++        ruling: trimmed_just.to_string(),
++        author: author.clone(),
++        title: Some(title),
++        timestamp: None,
++        validate_subject: false,
++    };
+ 
+-    Ok(dec_id)
++    let payload = crate::decision::log_decision(workspace_root, storage, &input)?;
++    Ok(payload.id)
+ }
+ 
+ /// Appends a user's team to an entity's `owners` list in frontmatter and updates the cache.
+diff --git a/crates/qdev-core/src/lease.rs b/crates/qdev-core/src/lease.rs
+index 0bec2d0..01ac0a5 100644
+--- a/crates/qdev-core/src/lease.rs
++++ b/crates/qdev-core/src/lease.rs
+@@ -7,12 +7,10 @@ use serde::{Deserialize, Serialize};
+ 
+ use crate::config::StorageConfig;
+ use crate::errors::QdevError;
+-use crate::id::allocate_decision_id_in_with_rng;
+ use crate::schema::EntityKind;
+-use crate::store::{DecisionRecord, EntityRecord, SqliteStore, Store};
++use crate::store::Store;
+ use crate::write::{
+-    acquire_workspace_write_lock, canonical_file_name, current_iso8601, directory_for_kind,
+-    resolve_entity_file, sha256_digest, upsert_cache_and_mark_dirty, write_file_atomic, Author,
++    acquire_workspace_write_lock, current_iso8601, resolve_entity_file, write_file_atomic, Author,
+ };
+ 
+ /// Worktree-visible story lease per Story 2.3.
+@@ -623,125 +621,24 @@ pub fn create_lease_override_decision(
+     author: &Author,
+     prior_lease: &StoryLease,
+ ) -> Result<String, QdevError> {
+-    let _lock_guard = acquire_workspace_write_lock(workspace_root, storage)?;
+-
+-    let default_storage = StorageConfig::default();
+-    let st = storage.unwrap_or(&default_storage);
+-    let cache_dir_rel = st.cache_dir.as_str();
+-    let cache_db_path = workspace_root.join(cache_dir_rel).join("cache.sqlite");
+-    let opt_store = if cache_db_path.is_file() {
+-        Some(SqliteStore::open(&cache_db_path)?)
+-    } else {
+-        None
+-    };
+-
+-    let mut rng = rand::rng();
+-    let dec_ident = allocate_decision_id_in_with_rng(
+-        workspace_root,
+-        st,
+-        &mut rng,
+-        opt_store.as_ref().map(|s| s as &dyn Store),
+-    )?;
+-    let dec_id = dec_ident.to_string();
+-
+     let title = format!("Lease override on story {}", story_id);
+-    let timestamp = current_iso8601();
+     let context_desc = format!(
+         "Story lease held by {} in worktree {} overridden",
+         prior_lease.holder, prior_lease.worktree_path
+     );
+ 
+-    let frontmatter_json = serde_json::json!({
+-        "id": dec_id,
+-        "title": title,
+-        "status": "active",
+-        "version": 1,
+-        "created_by": {
+-            "type": author.author_type,
+-            "id": author.id,
+-        },
+-        "updated_by": {
+-            "type": author.author_type,
+-            "id": author.id,
+-        },
+-        "subject_id": story_id,
+-        "decision_type": "lease_override",
+-        "context": context_desc,
+-        "ruling": justification,
+-        "created_at": timestamp,
+-    });
+-
+-    crate::schema::validate_value_detailed(EntityKind::Decision, &frontmatter_json).map_err(
+-        |errs| {
+-            QdevError::logical_failure(
+-                "schema_violation",
+-                format!(
+-                    "Decision frontmatter schema validation failed: {}",
+-                    errs.iter()
+-                        .map(|e| e.to_string())
+-                        .collect::<Vec<_>>()
+-                        .join("; ")
+-                ),
+-            )
+-        },
+-    )?;
+-
+-    let frontmatter_yaml = serde_yaml::to_string(&frontmatter_json).map_err(|e| {
+-        QdevError::infrastructure_failure(
+-            "serialization_error",
+-            format!("Failed to serialize decision frontmatter: {}", e),
+-        )
+-    })?;
+-
+-    let dec_content = format!(
+-        "---\n{}---\n\n# {}\n\nContext: {}\n\n{}\n",
+-        frontmatter_yaml, title, context_desc, justification
+-    );
+-
+-    let rel_dir = directory_for_kind(storage, EntityKind::Decision);
+-    let file_name = canonical_file_name(&dec_id);
+-    let dec_file_path = workspace_root.join(&rel_dir).join(&file_name);
+-
+-    write_file_atomic(&dec_file_path, &dec_content)?;
+-
+-    if let Some(ref store) = opt_store {
+-        let rel_source_path = crate::write::workspace_rel_path(&dec_file_path, workspace_root);
+-        let content_hash = sha256_digest(dec_content.as_bytes());
+-
+-        let decision_entity_record = EntityRecord {
+-            id: dec_id.clone(),
+-            kind: EntityKind::Decision,
+-            title: Some(title),
+-            status: Some("active".to_string()),
+-            owners: None,
+-            source_path: rel_source_path,
+-            content_hash,
+-            version: 1,
+-            created_by: Some(author.clone()),
+-            updated_by: Some(author.clone()),
+-            updated_at: timestamp.to_string(),
+-            stale: false,
+-            epic_id: None,
+-            seq: None,
+-            appetite: None,
+-            safety_class: None,
+-            target_modules: None,
+-        };
+-        upsert_cache_and_mark_dirty(&cache_db_path, &decision_entity_record)?;
+-
+-        let decision_record = DecisionRecord {
+-            id: dec_id.clone(),
+-            subject_id: story_id.to_string(),
+-            decision_type: Some("lease_override".to_string()),
+-            topic: None,
+-            context: Some(context_desc),
+-            ruling: Some(justification.to_string()),
+-            author_type: Some(author.author_type.clone()),
+-            author_id: Some(author.id.clone()),
+-            created_at: Some(timestamp.to_string()),
+-        };
+-        store.upsert_decision(&decision_record)?;
+-    }
++    let input = crate::decision::DecisionInput {
++        subject_id: story_id.to_string(),
++        decision_type: "lease_override".to_string(),
++        topic: None,
++        context: Some(context_desc),
++        ruling: justification.to_string(),
++        author: author.clone(),
++        title: Some(title),
++        timestamp: None,
++        validate_subject: false,
++    };
+ 
+-    Ok(dec_id)
++    let payload = crate::decision::log_decision(workspace_root, storage, &input)?;
++    Ok(payload.id)
+ }
+diff --git a/crates/qdev-core/src/lib.rs b/crates/qdev-core/src/lib.rs
+index 0f8ddff..ec11e15 100644
+--- a/crates/qdev-core/src/lib.rs
++++ b/crates/qdev-core/src/lib.rs
+@@ -1,5 +1,6 @@
+ pub mod config;
+ pub mod dag;
++pub mod decision;
+ pub mod doctor;
+ pub mod envelope;
+ pub mod errors;
+@@ -16,6 +17,10 @@ pub mod transition;
+ pub mod validate;
+ pub mod write;
+ 
++pub use decision::{
++    log_decision, log_decision_with_store, DecisionInput, DecisionLogPayload, VALID_DECISION_TYPES,
++};
++
+ pub use scratch::{
+     append_scratch_entry, estimate_tokens, filter_scratch_entries_by_budget, read_scratch_entries,
+     summarize_scratch_entries, ScratchAppendPayload, ScratchReadPayload, ScratchpadAuthor,
+@@ -91,6 +96,7 @@ pub use schema::{
+ pub use serde_yaml;
+ pub use transition::{
+     append_scratchpad_entry, classify_transition, create_backward_transition_decision,
++    record_backward_transition_decision,
+     PostTransitionHook, PreTransitionHook, StoryState, TransitionContext, TransitionEngine,
+     TransitionKind, TransitionOptions, TransitionPayload,
+ };
+diff --git a/crates/qdev-core/src/query.rs b/crates/qdev-core/src/query.rs
+index c5d6065..e80eb7c 100644
+--- a/crates/qdev-core/src/query.rs
++++ b/crates/qdev-core/src/query.rs
+@@ -325,6 +325,8 @@ pub struct ListQueryOptions {
+     pub owner: Option<String>,
+     pub module: Option<String>,
+     pub sprint: Option<i64>,
++    pub subject: Option<String>,
++    pub decision_type: Option<String>,
+ }
+ 
+ impl ListQueryOptions {
+@@ -336,6 +338,8 @@ impl ListQueryOptions {
+             owner: None,
+             module: None,
+             sprint: None,
++            subject: None,
++            decision_type: None,
+         }
+     }
+ }
+@@ -354,6 +358,8 @@ pub fn query_list(
+         owner: options.owner.clone(),
+         module: options.module.clone(),
+         sprint: options.sprint,
++        subject: options.subject.clone(),
++        decision_type: options.decision_type.clone(),
+     };
+ 
+     let entities = store.list_entities(&filter)?;
+diff --git a/crates/qdev-core/src/store/mod.rs b/crates/qdev-core/src/store/mod.rs
+index f0a18cf..36ea509 100644
+--- a/crates/qdev-core/src/store/mod.rs
++++ b/crates/qdev-core/src/store/mod.rs
+@@ -310,6 +310,10 @@ pub struct EntityFilter {
+     pub module: Option<String>,
+     /// Sprint id a story must be assigned to (joined via `sprint_assignments`).
+     pub sprint: Option<i64>,
++    /// Decision subject entity id (joined via the `decisions` table).
++    pub subject: Option<String>,
++    /// Decision type (joined via the `decisions` table).
++    pub decision_type: Option<String>,
+ }
+ 
+ /// The unified Store trait exposing reads and writes for all 16 cache tables.
+diff --git a/crates/qdev-core/src/store/sqlite.rs b/crates/qdev-core/src/store/sqlite.rs
+index 3f45555..21d970e 100644
+--- a/crates/qdev-core/src/store/sqlite.rs
++++ b/crates/qdev-core/src/store/sqlite.rs
+@@ -871,10 +871,13 @@ SELECT
+     s.epic_id, s.seq, s.appetite, s.safety_class, s.target_modules, e.stale
+ FROM entities e
+ LEFT JOIN stories s ON e.id = s.id
++LEFT JOIN decisions d ON e.id = d.id
+ WHERE (?1 IS NULL OR e.kind = ?1)
+   AND (?2 IS NULL OR e.status = ?2)
+   AND (?3 IS NULL OR s.epic_id = ?3)
+   AND (?4 IS NULL OR e.id IN (SELECT story_id FROM sprint_assignments WHERE sprint_id = ?4))
++  AND (?5 IS NULL OR d.subject_id = ?5)
++  AND (?6 IS NULL OR d.decision_type = ?6)
+ ORDER BY e.id ASC;
+ "#,
+                 )
+@@ -889,10 +892,19 @@ ORDER BY e.id ASC;
+             let status_filter = filter.status.clone();
+             let epic_filter = filter.epic_id.clone();
+             let sprint_filter = filter.sprint;
++            let subject_filter = filter.subject.clone();
++            let decision_type_filter = filter.decision_type.clone();
+ 
+             let rows = stmt
+                 .query_map(
+-                    rusqlite::params![kind_filter, status_filter, epic_filter, sprint_filter,],
++                    rusqlite::params![
++                        kind_filter,
++                        status_filter,
++                        epic_filter,
++                        sprint_filter,
++                        subject_filter,
++                        decision_type_filter,
++                    ],
+                     |row| {
+                         let kind_str: String = row.get(1)?;
+                         let kind =
+diff --git a/crates/qdev-core/src/transition.rs b/crates/qdev-core/src/transition.rs
+index b02b432..2c48f0a 100644
+--- a/crates/qdev-core/src/transition.rs
++++ b/crates/qdev-core/src/transition.rs
+@@ -8,13 +8,12 @@ use serde::{Deserialize, Serialize};
+ 
+ use crate::config::StorageConfig;
+ use crate::errors::QdevError;
+-use crate::id::allocate_decision_id_in_with_rng;
+ use crate::schema::EntityKind;
+-use crate::store::{DecisionRecord, EntityRecord, ScratchpadRecord, SqliteStore, Store};
++use crate::store::{ScratchpadRecord, SqliteStore, Store};
+ use crate::write::{
+     acquire_write_lock, apply_entity_update, current_iso8601, directory_for_kind,
+-    has_markdown_heading, resolve_entity_file, sha256_digest, upsert_cache_and_mark_dirty,
+-    write_file_atomic, Author, EntityUpdateOptions, EntityUpdateResult,
++    has_markdown_heading, resolve_entity_file, write_file_atomic, Author, EntityUpdateOptions,
++    EntityUpdateResult,
+ };
+ 
+ /// All valid lifecycle states for a story entity.
+@@ -670,7 +669,7 @@ impl TransitionEngine {
+                 .workspace_root
+                 .join(cache_dir_rel)
+                 .join("write.lock");
+-            let _lock_guard = if lock_path.parent().map(|p| p.is_dir()).unwrap_or(false) {
++            let lock_guard = if lock_path.parent().map(|p| p.is_dir()).unwrap_or(false) {
+                 Some(acquire_write_lock(&lock_path, Duration::from_millis(5000))?)
+             } else {
+                 None
+@@ -684,6 +683,7 @@ impl TransitionEngine {
+                 &options.author,
+                 &timestamp,
+             )?;
++            drop(lock_guard);
+ 
+             let dec_id = create_backward_transition_decision(
+                 &options.workspace_root,
+@@ -874,25 +874,6 @@ pub fn create_backward_transition_decision(
+         "pivot"
+     };
+ 
+-    let default_storage = StorageConfig::default();
+-    let st = storage.unwrap_or(&default_storage);
+-    let cache_dir_rel = st.cache_dir.as_str();
+-    let cache_db_path = workspace_root.join(cache_dir_rel).join("cache.sqlite");
+-    let opt_store = if cache_db_path.is_file() {
+-        Some(SqliteStore::open(&cache_db_path)?)
+-    } else {
+-        None
+-    };
+-
+-    let mut rng = rand::rng();
+-    let dec_ident = allocate_decision_id_in_with_rng(
+-        workspace_root,
+-        st,
+-        &mut rng,
+-        opt_store.as_ref().map(|s| s as &dyn crate::store::Store),
+-    )?;
+-    let dec_id = dec_ident.to_string();
+-
+     let title = match decision_type {
+         "review_rejection" => format!("Review rejection on story {}", story_id),
+         _ => format!("Pivot on story {}", story_id),
+@@ -900,97 +881,42 @@ pub fn create_backward_transition_decision(
+ 
+     let trajectory = format!("{} -> {}", from_state.as_str(), to_state.as_str());
+ 
+-    let frontmatter_json = serde_json::json!({
+-        "id": dec_id,
+-        "title": title,
+-        "status": "active",
+-        "version": 1,
+-        "created_by": {
+-            "type": author.author_type,
+-            "id": author.id,
+-        },
+-        "updated_by": {
+-            "type": author.author_type,
+-            "id": author.id,
+-        },
+-        "subject_id": story_id,
+-        "decision_type": decision_type,
+-        "context": trajectory,
+-        "ruling": justification,
+-        "created_at": timestamp,
+-    });
+-
+-    crate::schema::validate_value_detailed(EntityKind::Decision, &frontmatter_json).map_err(
+-        |errs| {
+-            QdevError::logical_failure(
+-                "schema_violation",
+-                format!(
+-                    "Decision frontmatter schema validation failed: {}",
+-                    errs.iter()
+-                        .map(|e| e.to_string())
+-                        .collect::<Vec<_>>()
+-                        .join("; ")
+-                ),
+-            )
+-        },
+-    )?;
+-
+-    let frontmatter_yaml = serde_yaml::to_string(&frontmatter_json).map_err(|e| {
+-        QdevError::infrastructure_failure(
+-            "serialization_error",
+-            format!("Failed to serialize decision frontmatter: {}", e),
+-        )
+-    })?;
++    let input = crate::decision::DecisionInput {
++        subject_id: story_id.to_string(),
++        decision_type: decision_type.to_string(),
++        topic: None,
++        context: Some(trajectory),
++        ruling: justification.to_string(),
++        author: author.clone(),
++        title: Some(title),
++        timestamp: Some(timestamp.to_string()),
++        validate_subject: false,
++    };
+ 
+-    let dec_content = format!(
+-        "---\n{}---\n\n# {}\n\nTransition: {}\n\n{}\n",
+-        frontmatter_yaml, title, trajectory, justification
+-    );
+-
+-    let rel_dir = directory_for_kind(storage, EntityKind::Decision);
+-    let file_name = crate::write::canonical_file_name(&dec_id);
+-    let dec_file_path = workspace_root.join(&rel_dir).join(&file_name);
+-
+-    write_file_atomic(&dec_file_path, &dec_content)?;
+-
+-    if let Some(ref store) = opt_store {
+-        let rel_source_path = crate::write::workspace_rel_path(&dec_file_path, workspace_root);
+-        let content_hash = sha256_digest(dec_content.as_bytes());
+-
+-        let decision_entity_record = EntityRecord {
+-            id: dec_id.clone(),
+-            kind: EntityKind::Decision,
+-            title: Some(title),
+-            status: Some("active".to_string()),
+-            owners: None,
+-            source_path: rel_source_path,
+-            content_hash,
+-            version: 1,
+-            created_by: Some(author.clone()),
+-            updated_by: Some(author.clone()),
+-            updated_at: timestamp.to_string(),
+-            stale: false,
+-            epic_id: None,
+-            seq: None,
+-            appetite: None,
+-            safety_class: None,
+-            target_modules: None,
+-        };
+-        upsert_cache_and_mark_dirty(&cache_db_path, &decision_entity_record)?;
+-
+-        let decision_record = DecisionRecord {
+-            id: dec_id.clone(),
+-            subject_id: story_id.to_string(),
+-            decision_type: Some(decision_type.to_string()),
+-            topic: None,
+-            context: Some(trajectory),
+-            ruling: Some(justification.to_string()),
+-            author_type: Some(author.author_type.clone()),
+-            author_id: Some(author.id.clone()),
+-            created_at: Some(timestamp.to_string()),
+-        };
+-        store.upsert_decision(&decision_record)?;
+-    }
++    let payload = crate::decision::log_decision(workspace_root, storage, &input)?;
++    Ok(payload.id)
++}
+ 
+-    Ok(dec_id)
++/// Alias for [`create_backward_transition_decision`].
++#[allow(clippy::too_many_arguments)]
++pub fn record_backward_transition_decision(
++    workspace_root: &Path,
++    storage: Option<&StorageConfig>,
++    story_id: &str,
++    from_state: StoryState,
++    to_state: StoryState,
++    justification: &str,
++    author: &Author,
++    timestamp: &str,
++) -> Result<String, QdevError> {
++    create_backward_transition_decision(
++        workspace_root,
++        storage,
++        story_id,
++        from_state,
++        to_state,
++        justification,
++        author,
++        timestamp,
++    )
+ }
+diff --git a/crates/qdev-core/tests/architecture_tests.rs b/crates/qdev-core/tests/architecture_tests.rs
+index 977568e..574cc82 100644
+--- a/crates/qdev-core/tests/architecture_tests.rs
++++ b/crates/qdev-core/tests/architecture_tests.rs
+@@ -166,22 +166,10 @@ const IDENTITY_RULE_SITES: &[(&str, &str, &str)] = &[
+          resolution one; which file holds the id is asked of `find_file_in_dir_for_id` beside it",
+     ),
+     (
+-        "qdev-core/src/transition.rs",
++        "qdev-core/src/decision.rs",
+         "let dec_file_path = workspace_root.join(&rel_dir).join(&file_name);",
+-        "`create_backward_transition_decision` joins the directory the rule gives to the name \
+-         `canonical_file_name` gives — the rule spelled once, not a second answer",
+-    ),
+-    (
+-        "qdev-core/src/lease.rs",
+-        "let dec_file_path = workspace_root.join(&rel_dir).join(&file_name);",
+-        "`create_lease_override_decision` joins the directory the rule gives to the name \
+-         `canonical_file_name` gives — the rule spelled once, not a second answer",
+-    ),
+-    (
+-        "qdev-core/src/governance.rs",
+-        "let dec_file_path = workspace_root.join(&rel_dir).join(&file_name);",
+-        "`create_governance_override_decision` joins the directory the rule gives to the name \
+-         `canonical_file_name` gives — the rule spelled once, not a second answer",
++        "`log_decision` joins the directory the rule gives to the name `canonical_file_name` \
++         gives — the rule spelled once, not a second answer",
+     ),
+ ];
+ 
+diff --git a/docs/bmad/implementation-artifacts/sprint-status.yaml b/docs/bmad/implementation-artifacts/sprint-status.yaml
+index 8f1c952..b3ef933 100644
+--- a/docs/bmad/implementation-artifacts/sprint-status.yaml
++++ b/docs/bmad/implementation-artifacts/sprint-status.yaml
+@@ -69,7 +69,7 @@ development_status:
+   2-4-scope-enforcement-cross-team-overrides: review
+   2-5-constraints-as-entities: review
+   2-6-scratchpads: review
+-  2-7-decision-ledger: backlog
++  2-7-decision-ledger: review
+   2-8-deferred-work: backlog
+   2-9-sprints-as-assignments: backlog
+   2-10-chores-with-path-allowlists: backlog
+diff --git a/crates/qdev-cli/tests/decision_cli_tests.rs b/crates/qdev-cli/tests/decision_cli_tests.rs
+new file mode 100644
+index 0000000..925e7c5
+--- /dev/null
++++ b/crates/qdev-cli/tests/decision_cli_tests.rs
+@@ -0,0 +1,527 @@
++use std::fs;
++use std::path::Path;
++
++use assert_cmd::Command;
++use serde_json::Value;
++use tempfile::TempDir;
++
++fn setup_workspace(root: &Path) {
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "init",
++            "--non-interactive",
++            "--name",
++            "TestProject",
++            "--developer",
++            "simon",
++            "--team",
++            "core-platform",
++        ])
++        .assert()
++        .success();
++}
++
++fn write_story(root: &Path, id: &str, title: &str) {
++    let path = root.join(format!("docs/specs/stories/{}.md", id));
++    fs::create_dir_all(path.parent().unwrap()).unwrap();
++    let content = format!(
++        r#"---
++id: {id}
++title: "{title}"
++status: ready
++version: 1
++appetite: small
++target_modules: ["core"]
++created_by:
++  type: human
++  id: simon
++updated_by:
++  type: human
++  id: simon
++---
++
++## Acceptance Criteria
++- [x] AC-1: Ready.
++"#
++    );
++    fs::write(path, content).unwrap();
++
++    let mut sync_cmd = Command::cargo_bin("qdev").unwrap();
++    sync_cmd.current_dir(root).args(["sync"]).assert().success();
++}
++
++fn write_adr(root: &Path, id: &str, title: &str) {
++    let path = root.join(format!("docs/specs/adrs/{}.md", id));
++    fs::create_dir_all(path.parent().unwrap()).unwrap();
++    let content = format!(
++        r#"---
++id: {id}
++title: "{title}"
++status: active
++version: 1
++created_by:
++  type: human
++  id: simon
++updated_by:
++  type: human
++  id: simon
++---
++
++# {title}
++"#
++    );
++    fs::write(path, content).unwrap();
++
++    let mut sync_cmd = Command::cargo_bin("qdev").unwrap();
++    sync_cmd.current_dir(root).args(["sync"]).assert().success();
++}
++
++#[test]
++fn test_happy_path_manual_decision_log() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Buffer sizing story");
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "decision",
++            "log",
++            "--subject",
++            "E12S4",
++            "--type",
++            "human_ruling",
++            "--topic",
++            "Buffer sizing",
++            "--ruling",
++            "Fixed 4 MB pool",
++        ])
++        .assert()
++        .success();
++
++    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
++    assert!(stdout.contains("Logged decision DEC-"));
++    assert!(stdout.contains("E12S4"));
++    assert!(stdout.contains("human_ruling"));
++    assert!(stdout.contains("Buffer sizing"));
++
++    // Verify DEC file on disk
++    let decs_dir = root.join("docs/state/decisions");
++    let entries: Vec<_> = fs::read_dir(decs_dir).unwrap().collect();
++    assert_eq!(entries.len(), 1);
++    let dec_path = entries[0].as_ref().unwrap().path();
++    let file_content = fs::read_to_string(&dec_path).unwrap();
++
++    assert!(file_content.contains("decision_type: human_ruling"));
++    assert!(file_content.contains("subject_id: E12S4"));
++    assert!(file_content.contains("topic: Buffer sizing"));
++    assert!(file_content.contains("ruling: Fixed 4 MB pool"));
++    assert!(file_content.contains("context: Decision on E12S4"));
++    assert!(file_content.contains("# Buffer sizing\n\nContext: Decision on E12S4\n\nFixed 4 MB pool\n"));
++}
++
++#[test]
++fn test_decision_log_with_context_and_json() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_adr(root, "AD-43", "Serialization Architecture");
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "decision",
++            "log",
++            "--subject",
++            "AD-43",
++            "--type",
++            "agent_assumption",
++            "--topic",
++            "Serialization",
++            "--ruling",
++            "Use rmp-serde",
++            "--context",
++            "Benchmarked 30% faster",
++            "--json",
++        ])
++        .assert()
++        .success();
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert_eq!(val["schema_version"], "1");
++    assert!(val["id"].as_str().unwrap().starts_with("DEC-"));
++    assert_eq!(val["subject_id"], "AD-43");
++    assert_eq!(val["decision_type"], "agent_assumption");
++    assert_eq!(val["topic"], "Serialization");
++    assert_eq!(val["ruling"], "Use rmp-serde");
++    assert_eq!(val["context"], "Benchmarked 30% faster");
++    assert_eq!(val["author"]["id"], "simon");
++    assert!(val["path"].as_str().unwrap().starts_with("docs/state/decisions/DEC-"));
++}
++
++#[test]
++fn test_list_decisions_subject_and_type_filtering() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4");
++    write_story(root, "E12S5", "Story 5");
++
++    // Decision 1: E12S4 human_ruling
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args([
++            "decision",
++            "log",
++            "--subject",
++            "E12S4",
++            "--type",
++            "human_ruling",
++            "--topic",
++            "Pool size",
++            "--ruling",
++            "4 MB",
++        ])
++        .assert()
++        .success();
++
++    // Decision 2: E12S4 cross_team_override
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args([
++            "decision",
++            "log",
++            "--subject",
++            "E12S4",
++            "--type",
++            "cross_team_override",
++            "--topic",
++            "API override",
++            "--ruling",
++            "Approved cross-team",
++        ])
++        .assert()
++        .success();
++
++    // Decision 3: E12S5 human_ruling
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args([
++            "decision",
++            "log",
++            "--subject",
++            "E12S5",
++            "--type",
++            "human_ruling",
++            "--topic",
++            "Thread count",
++            "--ruling",
++            "8 threads",
++        ])
++        .assert()
++        .success();
++
++    // 1. Filter by subject E12S4 -> returns 2 items
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["list", "decisions", "--subject", "E12S4", "--json"])
++        .assert()
++        .success();
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    let items = val["items"].as_array().unwrap();
++    assert_eq!(items.len(), 2);
++    assert_eq!(val["kind"], "decision");
++
++    // 2. Filter by subject E12S4 AND type cross_team_override -> returns 1 item
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "list",
++            "decisions",
++            "--subject",
++            "E12S4",
++            "--type",
++            "cross_team_override",
++            "--json",
++        ])
++        .assert()
++        .success();
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    let items = val["items"].as_array().unwrap();
++    assert_eq!(items.len(), 1);
++    assert_eq!(items[0]["title"], "API override");
++
++    // 3. Filter with no matches -> returns empty list
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "list",
++            "decisions",
++            "--subject",
++            "E12S4",
++            "--type",
++            "pivot",
++            "--json",
++        ])
++        .assert()
++        .success();
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    let items = val["items"].as_array().unwrap();
++    assert_eq!(items.len(), 0);
++
++    // Text output returns "(no matching entities)"
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "list",
++            "decisions",
++            "--subject",
++            "E12S4",
++            "--type",
++            "pivot",
++        ])
++        .assert()
++        .success();
++    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
++    assert!(stdout.contains("(no matching entities)"));
++
++    // 4. Filter by type human_ruling alone (no --subject) -> returns 2 items across E12S4 and E12S5
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "list",
++            "decisions",
++            "--type",
++            "human_ruling",
++            "--json",
++        ])
++        .assert()
++        .success();
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    let items = val["items"].as_array().unwrap();
++    assert_eq!(items.len(), 2);
++    assert_eq!(val["kind"], "decision");
++}
++
++#[test]
++fn test_decision_log_error_cases() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4");
++
++    // 1. Missing required flags (--type, --topic, --ruling) -> Clap exit 2
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args(["decision", "log", "--subject", "E12S4"])
++        .assert()
++        .failure()
++        .code(2);
++
++    // 2. Non-existent subject entity -> Exit 2 usage_error / entity_not_found
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "decision",
++            "log",
++            "--subject",
++            "NONEXISTENT",
++            "--type",
++            "human_ruling",
++            "--topic",
++            "T",
++            "--ruling",
++            "R",
++            "--json",
++        ])
++        .assert()
++        .failure()
++        .code(2);
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert_eq!(val["error"]["code"], "usage_error");
++
++    // 3. Invalid decision type -> Exit 2 usage_error
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "decision",
++            "log",
++            "--subject",
++            "E12S4",
++            "--type",
++            "invalid_type",
++            "--topic",
++            "T",
++            "--ruling",
++            "R",
++            "--json",
++        ])
++        .assert()
++        .failure()
++        .code(2);
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert_eq!(val["error"]["code"], "usage_error");
++
++    // 4. Empty ruling -> Exit 2 usage_error
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "decision",
++            "log",
++            "--subject",
++            "E12S4",
++            "--type",
++            "human_ruling",
++            "--topic",
++            "T",
++            "--ruling",
++            "   ",
++            "--json",
++        ])
++        .assert()
++        .failure()
++        .code(2);
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert_eq!(val["error"]["code"], "usage_error");
++
++    // 5. Empty or whitespace topic -> Exit 2 usage_error
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "decision",
++            "log",
++            "--subject",
++            "E12S4",
++            "--type",
++            "human_ruling",
++            "--topic",
++            "   ",
++            "--ruling",
++            "Some ruling",
++            "--json",
++        ])
++        .assert()
++        .failure()
++        .code(2);
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert_eq!(val["error"]["code"], "usage_error");
++}
++
++#[test]
++fn test_system_generated_decisions_parity_with_list_filtering() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4");
++
++    // Claim a lease on E12S4
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args(["claim", "story", "E12S4"])
++        .assert()
++        .success();
++
++    // Release with --force --justification records a lease_override decision
++    Command::cargo_bin("qdev")
++        .unwrap()
++        .current_dir(root)
++        .args([
++            "release",
++            "story",
++            "E12S4",
++            "--force",
++            "--justification",
++            "Force released for priority task",
++        ])
++        .assert()
++        .success();
++
++    // Verify it is queryable via `qdev list decisions --subject E12S4 --type lease_override`
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "list",
++            "decisions",
++            "--subject",
++            "E12S4",
++            "--type",
++            "lease_override",
++            "--json",
++        ])
++        .assert()
++        .success();
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    let items = val["items"].as_array().unwrap();
++    assert_eq!(items.len(), 1);
++    assert_eq!(items[0]["title"], "Lease override on story E12S4");
++}
++
++#[test]
++fn test_decision_log_with_author_override() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++    write_story(root, "E12S4", "Story 4");
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args([
++            "decision",
++            "log",
++            "--subject",
++            "E12S4",
++            "--type",
++            "agent_assumption",
++            "--topic",
++            "Cache buffer size",
++            "--ruling",
++            "Auto-sized to 16MB",
++            "--author-type",
++            "agent",
++            "--author-id",
++            "bot-42",
++            "--json",
++        ])
++        .assert()
++        .success();
++
++    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert_eq!(val["author"]["type"], "agent");
++    assert_eq!(val["author"]["id"], "bot-42");
++
++    let file_path = root.join(val["path"].as_str().unwrap());
++    let content = fs::read_to_string(&file_path).unwrap();
++    let fm = qdev_core::extract_frontmatter(&content).unwrap();
++    assert_eq!(fm["created_by"]["type"], "agent");
++    assert_eq!(fm["created_by"]["id"], "bot-42");
++    assert_eq!(fm["updated_by"]["type"], "agent");
++    assert_eq!(fm["updated_by"]["id"], "bot-42");
++}
+diff --git a/crates/qdev-core/src/decision.rs b/crates/qdev-core/src/decision.rs
+new file mode 100644
+index 0000000..0541063
+--- /dev/null
++++ b/crates/qdev-core/src/decision.rs
+@@ -0,0 +1,317 @@
++//! Unified decision logging domain logic.
++//!
++//! Every decision record (`DEC-hhhh`) committed to `docs/state/decisions/` is schema-validated,
++//! written atomically under the workspace advisory write lock, and synchronized to the SQLite
++//! cache (`entities` and `decisions` tables).
++
++use std::path::Path;
++
++use serde::{Deserialize, Serialize};
++
++use crate::config::StorageConfig;
++use crate::errors::QdevError;
++use crate::id::allocate_decision_id_in_with_rng;
++use crate::schema::{validate_value_detailed, EntityKind};
++use crate::store::{DecisionRecord, EntityRecord, SqliteStore, Store};
++use crate::write::{
++    acquire_workspace_write_lock, canonical_file_name, current_iso8601, directory_for_kind,
++    resolve_entity_file, sha256_digest, upsert_cache_and_mark_dirty, workspace_rel_path,
++    write_file_atomic, Author,
++};
++
++/// Allowed `decision_type` values for decision frontmatter and records.
++pub const VALID_DECISION_TYPES: &[&str] = &[
++    "human_ruling",
++    "agent_assumption",
++    "cross_team_override",
++    "pivot",
++    "review_rejection",
++    "lease_override",
++];
++
++fn default_true() -> bool {
++    true
++}
++
++/// Input parameters for logging a decision.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct DecisionInput {
++    pub subject_id: String,
++    pub decision_type: String,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub topic: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub context: Option<String>,
++    pub ruling: String,
++    pub author: Author,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub title: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub timestamp: Option<String>,
++    #[serde(default = "default_true")]
++    pub validate_subject: bool,
++}
++
++/// JSON payload shape for `qdev decision log` and domain return value.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct DecisionLogPayload {
++    pub id: String,
++    pub subject_id: String,
++    pub decision_type: String,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub topic: Option<String>,
++    pub context: String,
++    pub ruling: String,
++    pub author: Author,
++    pub created_at: String,
++    pub path: String,
++}
++
++/// Logs a schema-validated decision under the workspace advisory write lock,
++/// atomically writes `docs/state/decisions/<dec-id>.md`, and updates the SQLite cache.
++pub fn log_decision(
++    workspace_root: &Path,
++    storage: Option<&StorageConfig>,
++    input: &DecisionInput,
++) -> Result<DecisionLogPayload, QdevError> {
++    log_decision_with_store(workspace_root, storage, input, None)
++}
++
++/// Logs a decision with an optional pre-opened `Store` reference.
++pub fn log_decision_with_store(
++    workspace_root: &Path,
++    storage: Option<&StorageConfig>,
++    input: &DecisionInput,
++    opt_store: Option<&dyn Store>,
++) -> Result<DecisionLogPayload, QdevError> {
++    // 1. Validate author
++    input.author.validate()?;
++
++    // 2. Validate decision_type
++    let trimmed_type = input.decision_type.trim();
++    if !VALID_DECISION_TYPES.contains(&trimmed_type) {
++        return Err(QdevError::usage_error(format!(
++            "Invalid decision type '{}'; allowed types are: {}",
++            trimmed_type,
++            VALID_DECISION_TYPES.join(", ")
++        )));
++    }
++
++    // 3. Validate ruling
++    let trimmed_ruling = input.ruling.trim();
++    if trimmed_ruling.is_empty() {
++        return Err(QdevError::usage_error(
++            "Decision ruling cannot be empty or whitespace-only",
++        ));
++    }
++
++    // 4. Validate subject entity existence in workspace
++    let trimmed_subject = input.subject_id.trim();
++    if trimmed_subject.is_empty() {
++        return Err(QdevError::usage_error("Subject entity ID cannot be empty"));
++    }
++
++    let canonical_subject_id = if input.validate_subject {
++        let (_, id, _) = resolve_entity_file(workspace_root, None, trimmed_subject, storage)?;
++        id
++    } else {
++        trimmed_subject.to_string()
++    };
++
++    // 5. Derive context (default: "Decision on <subject_id>")
++    let context_str = match &input.context {
++        Some(c) if !c.trim().is_empty() => c.trim().to_string(),
++        _ => format!("Decision on {}", canonical_subject_id),
++    };
++
++    // 6. Derive title (from input.title, input.topic, or decision_type)
++    let title = match &input.title {
++        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
++        _ => match &input.topic {
++            Some(top) if !top.trim().is_empty() => top.trim().to_string(),
++            _ => match trimmed_type {
++                "cross_team_override" => {
++                    format!("Cross-team override on {}", canonical_subject_id)
++                }
++                "lease_override" => format!("Lease override on {}", canonical_subject_id),
++                "review_rejection" => format!("Review rejection on {}", canonical_subject_id),
++                "pivot" => format!("Pivot on {}", canonical_subject_id),
++                other => format!("Decision ({}) on {}", other, canonical_subject_id),
++            },
++        },
++    };
++
++    // 7. Acquire workspace advisory write lock
++    let _lock_guard = acquire_workspace_write_lock(workspace_root, storage)?;
++
++    // 8. Determine store / cache availability
++    let default_storage = StorageConfig::default();
++    let st = storage.unwrap_or(&default_storage);
++    let cache_dir_rel = st.cache_dir.as_str();
++    let cache_db_path = workspace_root.join(cache_dir_rel).join("cache.sqlite");
++    let owned_store = if opt_store.is_none() && cache_db_path.is_file() {
++        Some(SqliteStore::open(&cache_db_path)?)
++    } else {
++        None
++    };
++    let store_ref: Option<&dyn Store> = opt_store.or(owned_store.as_ref().map(|s| s as &dyn Store));
++
++    // 9. Allocate DEC-hhhh identifier
++    let mut rng = rand::rng();
++    let dec_ident = allocate_decision_id_in_with_rng(workspace_root, st, &mut rng, store_ref)?;
++    let dec_id = dec_ident.to_string();
++
++    let timestamp = input
++        .timestamp
++        .as_deref()
++        .map(|s| s.to_string())
++        .unwrap_or_else(current_iso8601);
++
++    // 10. Build frontmatter JSON
++    let mut frontmatter_map = serde_json::Map::new();
++    frontmatter_map.insert("id".to_string(), serde_json::json!(dec_id));
++    frontmatter_map.insert("title".to_string(), serde_json::json!(title));
++    frontmatter_map.insert("status".to_string(), serde_json::json!("active"));
++    frontmatter_map.insert("version".to_string(), serde_json::json!(1));
++    frontmatter_map.insert(
++        "created_by".to_string(),
++        serde_json::json!({
++            "type": input.author.author_type,
++            "id": input.author.id,
++        }),
++    );
++    frontmatter_map.insert(
++        "updated_by".to_string(),
++        serde_json::json!({
++            "type": input.author.author_type,
++            "id": input.author.id,
++        }),
++    );
++    frontmatter_map.insert(
++        "subject_id".to_string(),
++        serde_json::json!(canonical_subject_id),
++    );
++    frontmatter_map.insert(
++        "decision_type".to_string(),
++        serde_json::json!(trimmed_type),
++    );
++    if let Some(ref top) = input.topic {
++        let trimmed_topic = top.trim();
++        if !trimmed_topic.is_empty() {
++            frontmatter_map.insert("topic".to_string(), serde_json::json!(trimmed_topic));
++        }
++    }
++    frontmatter_map.insert("context".to_string(), serde_json::json!(context_str));
++    frontmatter_map.insert("ruling".to_string(), serde_json::json!(trimmed_ruling));
++    frontmatter_map.insert("created_at".to_string(), serde_json::json!(timestamp));
++
++    let frontmatter_json = serde_json::Value::Object(frontmatter_map);
++
++    // 11. Schema validation against EntityKind::Decision (decision.json)
++    validate_value_detailed(EntityKind::Decision, &frontmatter_json).map_err(|errs| {
++        QdevError::logical_failure(
++            "schema_violation",
++            format!(
++                "Decision frontmatter schema validation failed: {}",
++                errs.iter()
++                    .map(|e| e.to_string())
++                    .collect::<Vec<_>>()
++                    .join("; ")
++            ),
++        )
++    })?;
++
++    // 12. Serialize frontmatter YAML
++    let frontmatter_yaml = serde_yaml::to_string(&frontmatter_json).map_err(|e| {
++        QdevError::infrastructure_failure(
++            "serialization_error",
++            format!("Failed to serialize decision frontmatter: {}", e),
++        )
++    })?;
++
++    // 13. Format markdown body
++    let dec_content = if trimmed_type == "pivot" || trimmed_type == "review_rejection" {
++        format!(
++            "---\n{}---\n\n# {}\n\nTransition: {}\n\n{}\n",
++            frontmatter_yaml, title, context_str, trimmed_ruling
++        )
++    } else {
++        format!(
++            "---\n{}---\n\n# {}\n\nContext: {}\n\n{}\n",
++            frontmatter_yaml, title, context_str, trimmed_ruling
++        )
++    };
++
++    // 14. Write atomic file under docs/state/decisions/
++    let rel_dir = directory_for_kind(storage, EntityKind::Decision);
++    let file_name = canonical_file_name(&dec_id);
++    let dec_file_path = workspace_root.join(&rel_dir).join(&file_name);
++
++    write_file_atomic(&dec_file_path, &dec_content)?;
++
++    // 15. Upsert cache if available
++    let rel_source_path = workspace_rel_path(&dec_file_path, workspace_root);
++    let content_hash = sha256_digest(dec_content.as_bytes());
++
++    let decision_entity_record = EntityRecord {
++        id: dec_id.clone(),
++        kind: EntityKind::Decision,
++        title: Some(title),
++        status: Some("active".to_string()),
++        owners: None,
++        source_path: rel_source_path.clone(),
++        content_hash,
++        version: 1,
++        created_by: Some(input.author.clone()),
++        updated_by: Some(input.author.clone()),
++        updated_at: timestamp.clone(),
++        stale: false,
++        epic_id: None,
++        seq: None,
++        appetite: None,
++        safety_class: None,
++        target_modules: None,
++    };
++
++    let decision_record = DecisionRecord {
++        id: dec_id.clone(),
++        subject_id: canonical_subject_id.clone(),
++        decision_type: Some(trimmed_type.to_string()),
++        topic: input
++            .topic
++            .as_ref()
++            .map(|t| t.trim().to_string())
++            .filter(|t| !t.is_empty()),
++        context: Some(context_str.clone()),
++        ruling: Some(trimmed_ruling.to_string()),
++        author_type: Some(input.author.author_type.clone()),
++        author_id: Some(input.author.id.clone()),
++        created_at: Some(timestamp.clone()),
++    };
++
++    if cache_db_path.is_file() {
++        upsert_cache_and_mark_dirty(&cache_db_path, &decision_entity_record)?;
++        if let Some(store) = store_ref {
++            store.upsert_decision(&decision_record)?;
++        }
++    } else if let Some(store) = store_ref {
++        store.upsert_entity(&decision_entity_record)?;
++        store.upsert_decision(&decision_record)?;
++    }
++
++    Ok(DecisionLogPayload {
++        id: dec_id,
++        subject_id: canonical_subject_id,
++        decision_type: trimmed_type.to_string(),
++        topic: input
++            .topic
++            .as_ref()
++            .map(|t| t.trim().to_string())
++            .filter(|t| !t.is_empty()),
++        context: context_str,
++        ruling: trimmed_ruling.to_string(),
++        author: input.author.clone(),
++        created_at: timestamp,
++        path: rel_source_path,
++    })
++}
+diff --git a/crates/qdev-core/tests/decision_tests.rs b/crates/qdev-core/tests/decision_tests.rs
+new file mode 100644
+index 0000000..cb8e719
+--- /dev/null
++++ b/crates/qdev-core/tests/decision_tests.rs
+@@ -0,0 +1,440 @@
++#![allow(clippy::disallowed_methods)]
++
++use std::fs;
++use std::path::Path;
++
++use qdev_core::decision::{log_decision, DecisionInput, VALID_DECISION_TYPES};
++use qdev_core::schema::{extract_frontmatter, validate_value_detailed, EntityKind};
++use qdev_core::store::{SqliteStore, Store};
++use qdev_core::{ensure_cache, Author, StorageConfig};
++use tempfile::TempDir;
++
++fn setup_test_workspace(root: &Path) {
++    let qdev_toml = root.join("qdev.toml");
++    fs::write(
++        qdev_toml,
++        r#"
++[project]
++name = "TestProject"
++
++[identity]
++developer_id = "simon"
++teams = ["core-platform"]
++
++[storage]
++specs_dir = "docs/specs"
++state_dir = "docs/state"
++cache_dir = ".qdev/cache"
++"#,
++    )
++    .unwrap();
++
++    let stories_dir = root.join("docs/specs/stories");
++    let epics_dir = root.join("docs/specs/epics");
++    let adrs_dir = root.join("docs/specs/adrs");
++    let decisions_dir = root.join("docs/state/decisions");
++    let cache_dir = root.join(".qdev/cache");
++
++    fs::create_dir_all(&stories_dir).unwrap();
++    fs::create_dir_all(&epics_dir).unwrap();
++    fs::create_dir_all(&adrs_dir).unwrap();
++    fs::create_dir_all(&decisions_dir).unwrap();
++    fs::create_dir_all(&cache_dir).unwrap();
++
++    ensure_cache(root, &StorageConfig::default()).unwrap();
++}
++
++fn write_story_file(root: &Path, id: &str, title: &str) -> String {
++    let content = format!(
++        r#"---
++id: {id}
++title: "{title}"
++status: ready
++version: 1
++created_by:
++  type: human
++  id: simon
++updated_by:
++  type: human
++  id: simon
++---
++
++# {title}
++
++Spec content.
++"#
++    );
++    let path = root.join("docs/specs/stories").join(format!("{}.md", id));
++    fs::write(&path, &content).unwrap();
++    content
++}
++
++fn write_epic_file(root: &Path, id: &str, title: &str) -> String {
++    let content = format!(
++        r#"---
++id: {id}
++title: "{title}"
++status: ready
++version: 1
++created_by:
++  type: human
++  id: simon
++updated_by:
++  type: human
++  id: simon
++---
++
++# {title}
++
++Epic content.
++"#
++    );
++    let path = root.join("docs/specs/epics").join(format!("{}.md", id));
++    fs::write(&path, &content).unwrap();
++    content
++}
++
++fn write_adr_file(root: &Path, id: &str, title: &str) -> String {
++    let content = format!(
++        r#"---
++id: {id}
++title: "{title}"
++status: active
++version: 1
++created_by:
++  type: human
++  id: simon
++updated_by:
++  type: human
++  id: simon
++---
++
++# {title}
++
++ADR content.
++"#
++    );
++    let path = root.join("docs/specs/adrs").join(format!("{}.md", id));
++    fs::write(&path, &content).unwrap();
++    content
++}
++
++#[test]
++fn test_valid_decision_types_constant() {
++    assert_eq!(
++        VALID_DECISION_TYPES,
++        &[
++            "human_ruling",
++            "agent_assumption",
++            "cross_team_override",
++            "pivot",
++            "review_rejection",
++            "lease_override",
++        ]
++    );
++}
++
++#[test]
++fn test_happy_path_manual_decision_logging() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++
++    let original_story = write_story_file(root, "E12S4", "Buffer Manager");
++    let storage = StorageConfig::default();
++    let _ = ensure_cache(root, &storage).unwrap();
++
++    let input = DecisionInput {
++        subject_id: "E12S4".to_string(),
++        decision_type: "human_ruling".to_string(),
++        topic: Some("Buffer sizing".to_string()),
++        context: None,
++        ruling: "Fixed 4 MB pool".to_string(),
++        author: Author::new("human", "simon"),
++        title: None,
++        timestamp: None,
++        validate_subject: true,
++    };
++
++    let payload = log_decision(root, Some(&storage), &input).unwrap();
++
++    // 1. Verify allocated ID format
++    assert!(payload.id.starts_with("DEC-"));
++    assert!(payload.id.len() >= 8); // "DEC-" + 4+ hex chars
++    assert_eq!(payload.subject_id, "E12S4");
++    assert_eq!(payload.decision_type, "human_ruling");
++    assert_eq!(payload.topic.as_deref(), Some("Buffer sizing"));
++    assert_eq!(payload.context, "Decision on E12S4");
++    assert_eq!(payload.ruling, "Fixed 4 MB pool");
++    assert_eq!(payload.author, Author::new("human", "simon"));
++
++    // 2. Verify file on disk
++    let dec_file_path = root.join(&payload.path);
++    assert!(dec_file_path.is_file());
++    let file_content = fs::read_to_string(&dec_file_path).unwrap();
++
++    // 3. Verify frontmatter and body format
++    let fm = extract_frontmatter(&file_content).unwrap();
++    assert_eq!(fm["id"], payload.id);
++    assert_eq!(fm["title"], "Buffer sizing");
++    assert_eq!(fm["status"], "active");
++    assert_eq!(fm["version"], 1);
++    assert_eq!(fm["subject_id"], "E12S4");
++    assert_eq!(fm["decision_type"], "human_ruling");
++    assert_eq!(fm["topic"], "Buffer sizing");
++    assert_eq!(fm["context"], "Decision on E12S4");
++    assert_eq!(fm["ruling"], "Fixed 4 MB pool");
++    assert_eq!(fm["created_by"]["type"], "human");
++    assert_eq!(fm["created_by"]["id"], "simon");
++    assert_eq!(fm["updated_by"]["type"], "human");
++    assert_eq!(fm["updated_by"]["id"], "simon");
++
++    validate_value_detailed(EntityKind::Decision, &fm).expect("Schema validation passes");
++
++    assert!(file_content.contains("# Buffer sizing\n\nContext: Decision on E12S4\n\nFixed 4 MB pool\n"));
++
++    // 4. Verify SQLite cache synchronization
++    let cache_db = root.join(".qdev/cache/cache.sqlite");
++    let store = SqliteStore::open(&cache_db).unwrap();
++
++    let entity = store.get_entity(&payload.id).unwrap().expect("entity record indexed");
++    assert_eq!(entity.id, payload.id);
++    assert_eq!(entity.kind, EntityKind::Decision);
++    assert_eq!(entity.title.as_deref(), Some("Buffer sizing"));
++    assert_eq!(entity.status.as_deref(), Some("active"));
++
++    let dec_record = store.get_decision(&payload.id).unwrap().expect("decision record indexed");
++    assert_eq!(dec_record.id, payload.id);
++    assert_eq!(dec_record.subject_id, "E12S4");
++    assert_eq!(dec_record.decision_type.as_deref(), Some("human_ruling"));
++    assert_eq!(dec_record.topic.as_deref(), Some("Buffer sizing"));
++    assert_eq!(dec_record.context.as_deref(), Some("Decision on E12S4"));
++    assert_eq!(dec_record.ruling.as_deref(), Some("Fixed 4 MB pool"));
++    assert_eq!(dec_record.author_type.as_deref(), Some("human"));
++    assert_eq!(dec_record.author_id.as_deref(), Some("simon"));
++
++    // 5. Verify subject entity file was NOT modified
++    let current_story = fs::read_to_string(root.join("docs/specs/stories/E12S4.md")).unwrap();
++    assert_eq!(current_story, original_story);
++}
++
++#[test]
++fn test_decision_with_custom_context_and_agent_author() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++
++    write_adr_file(root, "AD-43", "Serialization Architecture");
++    let storage = StorageConfig::default();
++    let _ = ensure_cache(root, &storage).unwrap();
++
++    let input = DecisionInput {
++        subject_id: "AD-43".to_string(),
++        decision_type: "agent_assumption".to_string(),
++        topic: Some("Serialization".to_string()),
++        context: Some("Benchmarked 30% faster".to_string()),
++        ruling: "Use rmp-serde".to_string(),
++        author: Author::new("agent", "claude-opt"),
++        title: None,
++        timestamp: None,
++        validate_subject: true,
++    };
++
++    let payload = log_decision(root, Some(&storage), &input).unwrap();
++    assert_eq!(payload.context, "Benchmarked 30% faster");
++    assert_eq!(payload.ruling, "Use rmp-serde");
++    assert_eq!(payload.decision_type, "agent_assumption");
++
++    let dec_file_path = root.join(&payload.path);
++    let file_content = fs::read_to_string(&dec_file_path).unwrap();
++    let fm = extract_frontmatter(&file_content).unwrap();
++
++    assert_eq!(fm["subject_id"], "AD-43");
++    assert_eq!(fm["context"], "Benchmarked 30% faster");
++    assert_eq!(fm["created_by"]["type"], "agent");
++    assert_eq!(fm["created_by"]["id"], "claude-opt");
++
++    assert!(file_content.contains("Context: Benchmarked 30% faster\n\nUse rmp-serde\n"));
++}
++
++#[test]
++fn test_decision_across_different_subject_kinds() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++
++    write_epic_file(root, "E12", "Storage Engine Epic");
++    write_adr_file(root, "AD-43", "Concurrency Design");
++    write_story_file(root, "E12S4", "Async IO");
++
++    let storage = StorageConfig::default();
++    let _ = ensure_cache(root, &storage).unwrap();
++
++    for (subject, expected_type) in [
++        ("E12", "pivot"),
++        ("AD-43", "agent_assumption"),
++        ("E12S4", "review_rejection"),
++    ] {
++        let input = DecisionInput {
++            subject_id: subject.to_string(),
++            decision_type: expected_type.to_string(),
++            topic: Some(format!("Topic for {}", subject)),
++            context: None,
++            ruling: format!("Ruling for {}", subject),
++            author: Author::new("human", "lead"),
++            title: None,
++            timestamp: None,
++            validate_subject: true,
++        };
++        let payload = log_decision(root, Some(&storage), &input).unwrap();
++        assert_eq!(payload.subject_id, subject);
++        assert_eq!(payload.decision_type, expected_type);
++    }
++}
++
++#[test]
++fn test_unresolvable_subject_fails_entity_not_found() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++    let storage = StorageConfig::default();
++
++    let input = DecisionInput {
++        subject_id: "NONEXISTENT".to_string(),
++        decision_type: "human_ruling".to_string(),
++        topic: Some("Topic".to_string()),
++        context: None,
++        ruling: "Ruling".to_string(),
++        author: Author::new("human", "simon"),
++        title: None,
++        timestamp: None,
++        validate_subject: true,
++    };
++
++    let err = log_decision(root, Some(&storage), &input).unwrap_err();
++    assert_eq!(err.code(), "usage_error");
++    assert_eq!(err.exit_code(), qdev_core::ExitCode::UsageError);
++
++    // Verify no file was created under docs/state/decisions
++    let dec_dir = root.join("docs/state/decisions");
++    let count = fs::read_dir(dec_dir).unwrap().count();
++    assert_eq!(count, 0);
++}
++
++#[test]
++fn test_invalid_decision_type_rejected() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++
++    write_story_file(root, "E12S4", "Buffer");
++    let storage = StorageConfig::default();
++
++    let input = DecisionInput {
++        subject_id: "E12S4".to_string(),
++        decision_type: "invalid_type".to_string(),
++        topic: Some("Topic".to_string()),
++        context: None,
++        ruling: "Ruling".to_string(),
++        author: Author::new("human", "simon"),
++        title: None,
++        timestamp: None,
++        validate_subject: true,
++    };
++
++    let err = log_decision(root, Some(&storage), &input).unwrap_err();
++    assert_eq!(err.code(), "usage_error");
++    assert_eq!(err.exit_code(), qdev_core::ExitCode::UsageError);
++    assert!(err.message().contains("Invalid decision type 'invalid_type'"));
++}
++
++#[test]
++fn test_empty_or_whitespace_ruling_rejected() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++
++    write_story_file(root, "E12S4", "Buffer");
++    let storage = StorageConfig::default();
++
++    for empty_ruling in ["", "   ", "\t\n  "] {
++        let input = DecisionInput {
++            subject_id: "E12S4".to_string(),
++            decision_type: "human_ruling".to_string(),
++            topic: Some("Topic".to_string()),
++            context: None,
++            ruling: empty_ruling.to_string(),
++            author: Author::new("human", "simon"),
++            title: None,
++            timestamp: None,
++            validate_subject: true,
++        };
++
++        let err = log_decision(root, Some(&storage), &input).unwrap_err();
++        assert_eq!(err.code(), "usage_error");
++        assert_eq!(err.exit_code(), qdev_core::ExitCode::UsageError);
++        assert!(err.message().contains("Decision ruling cannot be empty"));
++    }
++}
++
++#[test]
++fn test_invalid_author_rejected() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++
++    write_story_file(root, "E12S4", "Buffer");
++    let storage = StorageConfig::default();
++
++    let input = DecisionInput {
++        subject_id: "E12S4".to_string(),
++        decision_type: "human_ruling".to_string(),
++        topic: Some("Topic".to_string()),
++        context: None,
++        ruling: "Ruling".to_string(),
++        author: Author::new("invalid_author_type", "simon"),
++        title: None,
++        timestamp: None,
++        validate_subject: true,
++    };
++
++    let err = log_decision(root, Some(&storage), &input).unwrap_err();
++    assert_eq!(err.exit_code(), qdev_core::ExitCode::UsageError);
++}
++
++#[test]
++fn test_decisions_exempt_from_story_lease_gating() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_test_workspace(root);
++
++    write_story_file(root, "E12S4", "Buffer");
++    let storage = StorageConfig::default();
++
++    // Someone else claims a lease on E12S4
++    let _ = qdev_core::lease::claim_story(
++        root,
++        "E12S4",
++        &Author::new("human", "alice"),
++        Some(&storage),
++        None,
++    )
++    .unwrap();
++
++    // Now Simon logs a decision on E12S4 without holding a lease
++    let input = DecisionInput {
++        subject_id: "E12S4".to_string(),
++        decision_type: "human_ruling".to_string(),
++        topic: Some("External review ruling".to_string()),
++        context: None,
++        ruling: "Approved despite alice's lease".to_string(),
++        author: Author::new("human", "simon"),
++        title: None,
++        timestamp: None,
++        validate_subject: true,
++    };
++
++    let payload = log_decision(root, Some(&storage), &input).unwrap();
++    assert_eq!(payload.subject_id, "E12S4");
++    assert!(payload.id.starts_with("DEC-"));
++}
+diff --git a/docs/bmad/implementation-artifacts/spec-2-7-decision-ledger.md b/docs/bmad/implementation-artifacts/spec-2-7-decision-ledger.md
+new file mode 100644
+index 0000000..7e99f1b
+--- /dev/null
++++ b/docs/bmad/implementation-artifacts/spec-2-7-decision-ledger.md
+@@ -0,0 +1,146 @@
++---
++title: 'Story 2.7: Decision Ledger'
++type: 'feature'
++created: '2026-09-13'
++status: 'in-review'
++baseline_commit: '07f6d8a7e7b3b25d70c5df051fe1c8bf19ce9841'
++route: 'dispatch'
++review_loop_iteration: 0
++context: []
++---
++
++<frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
++
++## Intent
++
++**Problem:** Autonomous agents and developers lack a unified, citable, and queryable ledger for human rulings, agent assumptions, architectural pivots, and governance overrides against arbitrary subject entities.
++
++**Approach:** Implement `qdev decision log` and unified `log_decision` domain logic in `qdev-core`, write schema-validated `DEC-hhhh` markdown records under `docs/state/decisions/` with advisory write locking, update SQLite cache entities and decision tables, extend `qdev list decisions` with `--subject` and `--type` filtering, and refactor all system-generated decision logging (cross-team overrides, lease overrides, review rejections, and pivots) through the shared decision path.
++
++## Boundaries & Constraints
++
++**Always:**
++- Decision identifiers use `DEC-` followed by 4+ lowercase hexadecimal characters (`DEC-hhhh`) allocated via `allocate_decision_id_in_with_rng`.
++- Decision records are stored in `docs/state/decisions/<dec-id>.md` (or storage-configured state directory) and committed to Git.
++- Decision frontmatter must strictly validate against `schemas/decision.json` (`EntityKind::Decision`).
++- Allowed `decision_type` values are strictly: `human_ruling`, `agent_assumption`, `cross_team_override`, `pivot`, `review_rejection`, `lease_override`.
++- `qdev decision log` requires `--subject`, `--type`, `--topic`, and `--ruling`.
++- `--ruling` cannot be empty or whitespace-only; an empty ruling fails with exit code 2 (`UsageError`).
++- `--type` must match one of the allowed decision types; an unrecognized type fails with exit code 2 (`UsageError`).
++- `--subject` must name an existing entity resolvable in the workspace; an unresolvable subject fails with exit code 2 (`UsageError`).
++- If `--context` is omitted from `qdev decision log`, the context defaults to `format!("Decision on {}", subject_id)`.
++- Decisions are exempt from story lease gating; logging a decision does not require holding a lease on the subject entity.
++- Writing decision files must acquire the workspace advisory write lock (`write.lock`).
++- Creating a decision must synchronize the SQLite cache (`EntityRecord` in `entities` and `DecisionRecord` in `decisions`).
++- All system-generated decisions (in `governance.rs`, `lease.rs`, and `transition.rs`) must use the unified `qdev_core::log_decision` function.
++- `qdev list decisions` supports `--subject <id>` and `--type <type>` filters that combine via boolean AND.
++- `qdev list decisions` outputs a standard `ListPayload` envelope when invoked with `--json`.
++- `qdev decision log` outputs `DecisionLogPayload` within a `JsonEnvelope` when invoked with `--json`.
++
++**Never:**
++- Never modify or mutate the subject entity's markdown specification when logging a decision against it.
++- Never allow unvalidated or arbitrary strings in `decision_type`.
++- Never execute decision logging without an initialized workspace (guarded by `requires_workspace`).
++
++## I/O & Edge-Case Matrix
++
++| Scenario | Input / State | Expected Output / Behavior | Error Handling |
++|---|---|---|---|
++| Happy Path: Manual Decision | `qdev decision log --subject E12S4 --type human_ruling --topic "Buffer sizing" --ruling "Fixed 4 MB pool"` | Exit 0, writes `docs/state/decisions/DEC-hhhh.md`, syncs SQLite, prints log summary | N/A |
++| Happy Path: Decision with Context | `qdev decision log --subject AD-43 --type agent_assumption --topic "Serialization" --ruling "Use rmp-serde" --context "Benchmarked 30% faster"` | Exit 0, frontmatter and markdown body record provided context | N/A |
++| JSON Output | `qdev decision log --subject E12S4 ... --json` | Exit 0, outputs `JsonEnvelope<DecisionLogPayload>` on stdout | N/A |
++| Missing Subject Entity | `qdev decision log --subject NONEXISTENT ...` | Exit 2 (`UsageError`), no file or cache row created | Emits `usage_error` / `entity_not_found` |
++| Invalid Decision Type | `qdev decision log --subject E12S4 --type invalid_type ...` | Exit 2 (`UsageError`), lists valid types | Emits `usage_error` |
++| Empty Ruling | `qdev decision log --subject E12S4 --type human_ruling --topic "T" --ruling "   "` | Exit 2 (`UsageError`) | Emits `usage_error` |
++| Missing Required Flags | `qdev decision log --subject E12S4` (missing `--type`, `--topic`, `--ruling`) | Exit 2 (Clap usage error) | CLI prints usage error |
++| List Filter by Subject | `qdev list decisions --subject E12S4` | Exit 0, returns only decisions where `subject_id = 'E12S4'` | N/A |
++| List Filter by Subject and Type | `qdev list decisions --subject E12S4 --type cross_team_override` | Exit 0, returns only decisions matching both filters | N/A |
++| List Filter No Matches | `qdev list decisions --subject E12S4 --type pivot` (none exist) | Exit 0, prints `(no matching entities)` or empty items array in JSON | N/A |
++| Outside Workspace | `qdev decision log ...` run outside workspace | Exit 2 (`UsageError`), no cache touched | Guarded by `requires_workspace` |
++
++</frozen-after-approval>
++
++## Code Map
++
++- `crates/qdev-core/src/decision.rs` -- New module implementing `log_decision`, `DecisionInput`, `DecisionLogPayload`, `VALID_DECISION_TYPES`, markdown serialization, and cache synchronization.
++- `crates/qdev-core/src/lib.rs` -- Re-export decision module structures and functions.
++- `crates/qdev-core/src/store/mod.rs` -- Add `subject: Option<String>` and `decision_type: Option<String>` to `EntityFilter`.
++- `crates/qdev-core/src/query.rs` -- Add `subject: Option<String>` and `decision_type: Option<String>` to `ListQueryOptions`, propagating to `EntityFilter`.
++- `crates/qdev-core/src/store/sqlite.rs` -- Update `list_entities` SQL query to `LEFT JOIN decisions d ON e.id = d.id` and filter on `d.subject_id` and `d.decision_type`.
++- `crates/qdev-core/src/governance.rs` -- Refactor `create_governance_override_decision` to delegate to `crate::decision::log_decision`.
++- `crates/qdev-core/src/lease.rs` -- Refactor `create_lease_override_decision` to delegate to `crate::decision::log_decision`.
++- `crates/qdev-core/src/transition.rs` -- Refactor `record_backward_transition_decision` to delegate to `crate::decision::log_decision`.
++- `crates/qdev-cli/src/cli.rs` -- Add `Decision(DecisionArgs)` with `Log(DecisionLogArgs)` subcommand; add `--subject` and `--type` to `ListArgs`.
++- `crates/qdev-cli/src/main.rs` -- Implement `handle_decision_log`, wire `Commands::Decision` in dispatch, update `requires_workspace`, wire `--subject` and `--type` in `handle_list`.
++- `crates/qdev-cli/tests/workspace_guard_cli_tests.rs` -- Add `decision log` to `guarded_invocations()`.
++- `crates/qdev-core/tests/decision_tests.rs` -- New unit test suite testing `log_decision`, validation rules, and cache sync.
++- `crates/qdev-cli/tests/decision_cli_tests.rs` -- New CLI integration test suite verifying `qdev decision log`, `qdev list decisions --subject ... --type ...`, JSON envelopes, system-generated decision parity, and error cases.
++
++## Tasks & Acceptance
++
++**Execution:**
++- [x] `crates/qdev-core/src/decision.rs` -- Create module with `log_decision`, `DecisionInput`, `DecisionLogPayload`, `VALID_DECISION_TYPES`, schema validation, atomic file creation, and store synchronization.
++- [x] `crates/qdev-core/src/lib.rs` -- Export `log_decision`, `DecisionInput`, `DecisionLogPayload`, and `VALID_DECISION_TYPES`.
++- [x] `crates/qdev-core/src/store/mod.rs` -- Add `subject` and `decision_type` fields to `EntityFilter`.
++- [x] `crates/qdev-core/src/query.rs` -- Add `subject` and `decision_type` fields to `ListQueryOptions`.
++- [x] `crates/qdev-core/src/store/sqlite.rs` -- Update `list_entities` with left join to `decisions` and filtering on subject and decision type.
++- [x] `crates/qdev-core/src/governance.rs` -- Refactor `create_governance_override_decision` to call `crate::decision::log_decision`.
++- [x] `crates/qdev-core/src/lease.rs` -- Refactor `create_lease_override_decision` to call `crate::decision::log_decision`.
++- [x] `crates/qdev-core/src/transition.rs` -- Refactor `record_backward_transition_decision` to call `crate::decision::log_decision`.
++- [x] `crates/qdev-cli/src/cli.rs` -- Add `Decision` command, `DecisionLogArgs`, and add `--subject` and `--type` to `ListArgs`.
++- [x] `crates/qdev-cli/src/main.rs` -- Implement `handle_decision_log`, update `handle_list`, and register `Commands::Decision` in `requires_workspace`.
++- [x] `crates/qdev-cli/tests/workspace_guard_cli_tests.rs` -- Add `decision log` to `guarded_invocations()`.
++- [x] `crates/qdev-core/tests/decision_tests.rs` -- Unit tests for `log_decision`, input validation, subject kinds, and store updates.
++- [x] `crates/qdev-cli/tests/decision_cli_tests.rs` -- CLI integration tests for `qdev decision log`, `qdev list decisions --subject ... --type ...`, JSON envelopes, system-generated decision parity, and error cases.
++
++**Acceptance Criteria:**
++- Given a subject `E12S4`, `E12`, or `AD-43`, when running `qdev decision log --subject E12S4 --type human_ruling --topic "Buffer sizing" --ruling "Fixed 4 MB pool"`, then a `DEC-hhhh` file is created under `docs/state/decisions/` with context, ruling, author, and type from the allowed set in the schema.
++- Given decisions recorded for `E12S4`, when running `qdev list decisions --subject E12S4 --type cross_team_override`, then the list output filters correctly by both subject and type.
++- Given system-generated decisions (pivot, review rejection, lease override, cross-team override), then they use the same `DEC-hhhh` path, schema validation, and storage synchronization as manual decisions.
++- Given an invalid decision type or empty ruling or non-existent subject entity, when running `qdev decision log`, then the command exits 2 with a descriptive usage error.
++- Given invocation outside an initialized workspace, then `qdev decision log` exits 2 without touching any cache file.
++
++## Implementation Notes
++
++## Spec Change Log
++
++## Review Triage Log
++
++| Finding ID | Verdict | Evidence / Refutation |
++|---|---|---|
++| VG-1 | `low` (patch) | Stale entries for `transition.rs`, `lease.rs`, and `governance.rs` in `IDENTITY_RULE_SITES` in `architecture_tests.rs` should be removed now that path creation is consolidated in `decision.rs`. |
++| VG-2 | `low` (patch) | Added CLI test case verifying `--topic ""` and `--topic "   "` are rejected with exit code 2. |
++| VG-3 | `low` (patch) | Added CLI test case verifying `qdev list decisions --type human_ruling` filters across subjects without requiring `--subject`. |
++| VG-4 | `medium` (patch) | Body markdown in `decision.rs` emitted both `Context: <context>` and `Transition: <context>` redundantly for pivots/rejections; simplified to standard `Context: <context>\n\n<ruling>\n` per design notes. |
++| BH-1 | `medium` (patch) | Duplicate of VG-4. |
++| BH-2 | `low` (patch) | Duplicate of VG-1. |
++| BH-3 | `low` (patch) | Removed needless borrow `if let Some(ref store)` in `decision.rs`. |
++| BH-4 | `false` | SQLite `LEFT JOIN` returning 0 rows for non-matching kind-specific filters is the established, uniform design across `qdev list` (identical to `--epic`, `--sprint`, and `--module`). |
++| BH-5 | `false` | `qdev list` query filters uniformly return empty results for non-matching criteria rather than failing as usage errors (identical to `--status`, `--owner`, `--module`). |
++| BH-6 | `false` | `ListPayload` schema is fixed by project-wide `payload-list.json`; modifying it for decisions would break schema conformance. |
++| BH-7 | `low` (patch) | `resolve_entity_file` error in `decision.rs` was masked under `entity_not_found`; return `Err(e)` directly to preserve exact error code. |
++| BH-8 | `false` | Logging decisions against embedded constraint sub-items is outside the scope of Story 2.7. |
++| BH-9 | `false` | Dropping write lock before `log_decision` avoids recursive file locking deadlocks on non-reentrant platforms and is verified by 26 transition tests. |
++| BH-10 | `false` | Entity record plus detail record upsert is the standard architectural pattern across all qdev cache writes. |
++| BH-11 | `false` | Multi-line ruling from stdin or file is a feature request not specified in Story 2.7 acceptance criteria. |
++| BH-12 | `false` | `qdev decision show` is not part of Story 2.7 requirements. |
++| BH-13 | `false` | Lifecycle documentation is populated during review triage. |
++| BH-14 | `low` (patch) | Added test cases for attribution override flags (`--author-type`, `--author-id`) and formatted table output in CLI tests. |
++
++
++## Design Notes
++
++- Decision records use markdown frontmatter with fields: `id`, `title` (from topic or type), `status` ("active"), `version` (1), `created_by`, `updated_by`, `subject_id`, `decision_type`, `topic`, `context`, `ruling`, and `created_at`.
++- Body content format: `---\n<yaml>---\n\n# <title>\n\nContext: <context>\n\n<ruling>\n`.
++- The six allowed decision types are: `human_ruling`, `agent_assumption`, `cross_team_override`, `pivot`, `review_rejection`, `lease_override`.
++- Default context when `--context` is omitted is `format!("Decision on {}", subject_id)`.
++- `qdev list decisions` filtering executes directly in SQLite query via `LEFT JOIN decisions d ON e.id = d.id` where `d.subject_id = ?` and `d.decision_type = ?`.
++
++## Verification
++
++**Commands:**
++- `cargo test --test decision_tests` -- expected: Core unit tests pass for decision logging, validation, schema compliance, and store upsert.
++- `cargo test --test decision_cli_tests` -- expected: CLI integration tests verify logging, filtering, JSON envelopes, system decision parity, and exit codes.
++- `cargo test --test workspace_guard_cli_tests` -- expected: Workspace guard verifies `qdev decision log` is refused outside a workspace.
++- `cargo test --test governance_tests --test lease_tests --test transition_tests` -- expected: Existing system-generated decision tests continue to pass without regressions.
++- `cargo test` -- expected: Entire workspace build and test suite pass cleanly.
