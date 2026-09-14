@@ -75,6 +75,8 @@ pub enum Commands {
     Scratch(ScratchArgs),
     /// Log or query decisions
     Decision(DecisionArgs),
+    /// Manage deferred work debt and residual anomalies
+    Dw(DwArgs),
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
@@ -308,6 +310,10 @@ pub struct ListArgs {
     /// Filter decisions by decision type
     #[arg(long = "type")]
     pub r#type: Option<String>,
+
+    /// Filter deferred work by safety risk level
+    #[arg(long = "risk")]
+    pub risk: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
@@ -553,6 +559,106 @@ pub struct DecisionLogArgs {
     /// Context or background for the decision (defaults to "Decision on <subject>")
     #[arg(long = "context")]
     pub context: Option<String>,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct DwArgs {
+    #[command(subcommand)]
+    pub command: DwCommands,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum DwCommands {
+    /// Add a new deferred work record
+    Add(DwAddArgs),
+    /// List deferred work records
+    List(DwListArgs),
+    /// Close a deferred work record
+    Close(DwCloseArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct DwAddArgs {
+    /// Title of the deferred work
+    #[arg(short = 't', long = "title")]
+    pub title: String,
+
+    /// Target module (must exist in registered config modules)
+    #[arg(short = 'm', long = "module")]
+    pub module: String,
+
+    /// Safety risk level: negligible, acceptable_with_mitigation, unacceptable
+    #[arg(long = "risk")]
+    pub risk: String,
+
+    /// Origin story ID (e.g. E12S4)
+    #[arg(short = 's', long = "story")]
+    pub story: Option<String>,
+
+    /// Safety rationale (required for non-negligible risk)
+    #[arg(long = "rationale")]
+    pub rationale: Option<String>,
+
+    /// Associated gate ID
+    #[arg(long = "gate")]
+    pub gate: Option<String>,
+
+    /// Owners
+    #[arg(short = 'o', long = "owner")]
+    pub owners: Vec<String>,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct DwListArgs {
+    /// Filter by module ID
+    #[arg(short = 'm', long = "module")]
+    pub module: Option<String>,
+
+    /// Filter by safety risk level
+    #[arg(long = "risk")]
+    pub risk: Option<String>,
+
+    /// Filter by status (e.g. open, done, wont_fix)
+    #[arg(short = 's', long = "status")]
+    pub status: Option<String>,
+
+    /// Filter by origin story ID (e.g. E12S4)
+    #[arg(long = "story")]
+    pub story: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct DwCloseArgs {
+    /// Deferred work ID to close (e.g. DW-7f3a)
+    pub id: String,
+
+    /// Target close status ('done' or 'wont_fix', default: 'done')
+    #[arg(short = 's', long = "status")]
+    pub status: Option<String>,
+
+    /// Resolution description or story ID
+    #[arg(long = "resolution")]
+    pub resolution: Option<String>,
+
+    /// Justification (required for wont_fix if resolution is omitted)
+    #[arg(long = "justification")]
+    pub justification: Option<String>,
 
     /// Attribution author type override ('human' or 'agent')
     #[arg(long = "author-type")]

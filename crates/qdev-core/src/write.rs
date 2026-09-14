@@ -2106,7 +2106,14 @@ pub fn apply_entity_update(options: &EntityUpdateOptions) -> Result<EntityUpdate
         seq,
         appetite,
         safety_class,
-        target_modules,
+        target_modules: if kind == EntityKind::DeferredWork {
+            updated_frontmatter
+                .get("target_module")
+                .and_then(|v| v.as_str())
+                .map(|m| serde_json::to_string(&vec![m]).unwrap_or_default())
+        } else {
+            target_modules
+        },
     };
 
     let cache_db_path = options
@@ -2114,6 +2121,52 @@ pub fn apply_entity_update(options: &EntityUpdateOptions) -> Result<EntityUpdate
         .join(cache_dir_rel)
         .join("cache.sqlite");
     upsert_cache_and_mark_dirty(&cache_db_path, &record)?;
+
+    if kind == EntityKind::DeferredWork && cache_db_path.is_file() {
+        let origin = updated_frontmatter
+            .get("origin_story_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let target_module = updated_frontmatter
+            .get("target_module")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let dw_status = updated_frontmatter
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let safety_risk = updated_frontmatter
+            .get("safety_risk")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let rationale = updated_frontmatter
+            .get("rationale")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let gate = updated_frontmatter
+            .get("gate")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let resolution = updated_frontmatter
+            .get("resolution")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        let dw_record = crate::store::DeferredWorkRecord {
+            id: canonical_id.clone(),
+            origin_story_id: origin,
+            target_module,
+            status: dw_status,
+            safety_risk,
+            rationale,
+            gate,
+            resolution,
+        };
+        let store = crate::store::SqliteStore::open(&cache_db_path)?;
+        use crate::store::Store;
+        store.upsert_deferred_work(&dw_record)?;
+    }
 
     Ok(EntityUpdateResult {
         id: canonical_id,

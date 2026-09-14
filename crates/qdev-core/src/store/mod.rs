@@ -314,6 +314,8 @@ pub struct EntityFilter {
     pub subject: Option<String>,
     /// Decision type (joined via the `decisions` table).
     pub decision_type: Option<String>,
+    /// Safety risk level (joined via the `deferred_work` table).
+    pub safety_risk: Option<String>,
 }
 
 /// The unified Store trait exposing reads and writes for all 16 cache tables.

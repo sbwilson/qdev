@@ -327,6 +327,7 @@ pub struct ListQueryOptions {
     pub sprint: Option<i64>,
     pub subject: Option<String>,
     pub decision_type: Option<String>,
+    pub safety_risk: Option<String>,
 }
 
 impl ListQueryOptions {
@@ -340,6 +341,7 @@ impl ListQueryOptions {
             sprint: None,
             subject: None,
             decision_type: None,
+            safety_risk: None,
         }
     }
 }
@@ -360,6 +362,7 @@ pub fn query_list(
         sprint: options.sprint,
         subject: options.subject.clone(),
         decision_type: options.decision_type.clone(),
+        safety_risk: options.safety_risk.clone(),
     };
 
     let entities = store.list_entities(&filter)?;

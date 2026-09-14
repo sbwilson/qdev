@@ -2,6 +2,7 @@ pub mod config;
 pub mod dag;
 pub mod decision;
 pub mod doctor;
+pub mod dw;
 pub mod envelope;
 pub mod errors;
 pub mod governance;
@@ -16,6 +17,13 @@ pub mod store;
 pub mod transition;
 pub mod validate;
 pub mod write;
+
+pub use dw::{
+    add_deferred_work, add_deferred_work_with_store, close_deferred_work,
+    is_rationale_required, list_deferred_work_records, validate_safety_risk, AddDeferredWorkInput,
+    CloseDeferredWorkInput, DeferredWorkItem, DeferredWorkPayload, ListDeferredWorkFilter,
+    ListDeferredWorkPayload, VALID_SAFETY_RISKS,
+};
 
 pub use decision::{
     log_decision, log_decision_with_store, DecisionInput, DecisionLogPayload, VALID_DECISION_TYPES,

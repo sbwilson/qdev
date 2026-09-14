@@ -753,9 +753,12 @@ ON CONFLICT(id) DO UPDATE SET
 SELECT
     e.id, e.kind, e.title, e.status, e.owners, e.source_path, e.content_hash, e.version,
     e.created_by_type, e.created_by_id, e.updated_by_type, e.updated_by_id, e.updated_at,
-    s.epic_id, s.seq, s.appetite, s.safety_class, s.target_modules, e.stale
+    s.epic_id, s.seq, s.appetite, s.safety_class,
+    COALESCE(s.target_modules, CASE WHEN dw.target_module IS NOT NULL THEN json_array(dw.target_module) ELSE NULL END) AS target_modules,
+    e.stale
 FROM entities e
 LEFT JOIN stories s ON e.id = s.id
+LEFT JOIN deferred_work dw ON e.id = dw.id
 WHERE e.id = ?1;
 "#,
                 )
@@ -868,16 +871,21 @@ WHERE e.id = ?1;
 SELECT
     e.id, e.kind, e.title, e.status, e.owners, e.source_path, e.content_hash, e.version,
     e.created_by_type, e.created_by_id, e.updated_by_type, e.updated_by_id, e.updated_at,
-    s.epic_id, s.seq, s.appetite, s.safety_class, s.target_modules, e.stale
+    s.epic_id, s.seq, s.appetite, s.safety_class,
+    COALESCE(s.target_modules, CASE WHEN dw.target_module IS NOT NULL THEN json_array(dw.target_module) ELSE NULL END),
+    e.stale
 FROM entities e
 LEFT JOIN stories s ON e.id = s.id
 LEFT JOIN decisions d ON e.id = d.id
+LEFT JOIN deferred_work dw ON e.id = dw.id
 WHERE (?1 IS NULL OR e.kind = ?1)
   AND (?2 IS NULL OR e.status = ?2)
   AND (?3 IS NULL OR s.epic_id = ?3)
   AND (?4 IS NULL OR e.id IN (SELECT story_id FROM sprint_assignments WHERE sprint_id = ?4))
   AND (?5 IS NULL OR d.subject_id = ?5)
   AND (?6 IS NULL OR d.decision_type = ?6)
+  AND (?7 IS NULL OR dw.safety_risk = ?7)
+  AND (?8 IS NULL OR dw.target_module = ?8 OR e.kind != 'deferred_work')
 ORDER BY e.id ASC;
 "#,
                 )
@@ -894,6 +902,8 @@ ORDER BY e.id ASC;
             let sprint_filter = filter.sprint;
             let subject_filter = filter.subject.clone();
             let decision_type_filter = filter.decision_type.clone();
+            let safety_risk_filter = filter.safety_risk.clone();
+            let module_filter = filter.module.clone();
 
             let rows = stmt
                 .query_map(
@@ -904,6 +914,8 @@ ORDER BY e.id ASC;
                         sprint_filter,
                         subject_filter,
                         decision_type_filter,
+                        safety_risk_filter,
+                        module_filter,
                     ],
                     |row| {
                         let kind_str: String = row.get(1)?;
