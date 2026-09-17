@@ -21,11 +21,8 @@ use crate::write::{
 };
 
 /// Allowed `safety_risk` levels for deferred work frontmatter and records conforming to ISO 14971.
-pub const VALID_SAFETY_RISKS: &[&str] = &[
-    "negligible",
-    "acceptable_with_mitigation",
-    "unacceptable",
-];
+pub const VALID_SAFETY_RISKS: &[&str] =
+    &["negligible", "acceptable_with_mitigation", "unacceptable"];
 
 /// Validates that `risk` matches one of the ISO 14971 allowed risk levels.
 pub fn validate_safety_risk(risk: &str) -> Result<(), QdevError> {
@@ -303,7 +300,10 @@ pub fn add_deferred_work_with_store(
             "schema_violation",
             format!(
                 "Deferred work frontmatter schema validation failed: {}",
-                errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")
+                errs.iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ),
         )
     })?;
@@ -364,7 +364,11 @@ pub fn add_deferred_work_with_store(
         status: Some("open".to_string()),
         safety_risk: Some(trimmed_risk.to_string()),
         rationale: trimmed_rationale.map(str::to_string),
-        gate: input.gate.as_ref().map(|g| g.trim().to_string()).filter(|g| !g.is_empty()),
+        gate: input
+            .gate
+            .as_ref()
+            .map(|g| g.trim().to_string())
+            .filter(|g| !g.is_empty()),
         resolution: None,
     };
 
@@ -389,7 +393,11 @@ pub fn add_deferred_work_with_store(
         safety_risk: trimmed_risk.to_string(),
         origin_story_id: input.origin_story_id.as_ref().map(|s| s.trim().to_string()),
         rationale: trimmed_rationale.map(str::to_string),
-        gate: input.gate.as_ref().map(|g| g.trim().to_string()).filter(|g| !g.is_empty()),
+        gate: input
+            .gate
+            .as_ref()
+            .map(|g| g.trim().to_string())
+            .filter(|g| !g.is_empty()),
         resolution: None,
         owners: input.owners.clone(),
         version: 1,
@@ -461,7 +469,10 @@ pub fn close_deferred_work(
     // 5. Apply entity update
     let mut custom_fields = Vec::new();
     if let Some(ref res) = resolution_val {
-        custom_fields.push(("resolution".to_string(), serde_yaml::Value::String(res.clone())));
+        custom_fields.push((
+            "resolution".to_string(),
+            serde_yaml::Value::String(res.clone()),
+        ));
     }
 
     let opts = EntityUpdateOptions {
@@ -504,10 +515,7 @@ pub fn close_deferred_work(
         .get("rationale")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let gate = fm
-        .get("gate")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let gate = fm.get("gate").and_then(|v| v.as_str()).map(str::to_string);
     let resolution = fm
         .get("resolution")
         .and_then(|v| v.as_str())

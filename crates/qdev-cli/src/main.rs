@@ -403,6 +403,9 @@ fn run(raw_args: &[String]) -> ExitCode {
         Some(Commands::Sprint(ref sprint_args)) => {
             handle_sprint(sprint_args, &annotated_config, &cli, &output, &current_dir)
         }
+        Some(Commands::Chore(ref chore_args)) => {
+            handle_chore(chore_args, &annotated_config, &cli, &output, &current_dir)
+        }
         Some(Commands::Init(_)) => unreachable!(),
         Some(Commands::Schema(_)) => unreachable!(),
     }
@@ -489,7 +492,8 @@ fn requires_workspace(command: Option<&Commands>) -> bool {
         | Some(Commands::Scratch(_))
         | Some(Commands::Decision(_))
         | Some(Commands::Dw(_))
-        | Some(Commands::Sprint(_)) => true,
+        | Some(Commands::Sprint(_))
+        | Some(Commands::Chore(_)) => true,
     }
 }
 
@@ -5722,6 +5726,197 @@ fn handle_sprint_close(
             let err = qdev_core::QdevError::infrastructure_failure(
                 "io_error",
                 format!("Failed to emit sprint close text: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    }
+
+    ExitCode::Success
+}
+
+fn handle_chore(
+    chore_args: &cli::ChoreArgs,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+) -> ExitCode {
+    match chore_args.command {
+        cli::ChoreCommands::Start(ref start_args) => {
+            handle_chore_start(start_args, annotated_config, cli, output, current_dir)
+        }
+        cli::ChoreCommands::Commit(ref commit_args) => {
+            handle_chore_commit(commit_args, annotated_config, cli, output, current_dir)
+        }
+    }
+}
+
+fn handle_chore_start(
+    start_args: &cli::ChoreStartArgs,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+) -> ExitCode {
+    let root = qdev_core::find_workspace_root(current_dir);
+
+    let author = match resolve_author(
+        start_args.author_type.as_deref(),
+        start_args.author_id.as_deref(),
+        annotated_config,
+        &root,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let input = qdev_core::StartChoreInput {
+        workspace_root: &root,
+        storage: Some(&annotated_config.config.storage),
+        title: start_args.title.clone(),
+        paths: start_args.paths.clone(),
+        author,
+        alongside: start_args.alongside,
+    };
+
+    let record = match qdev_core::start_chore(&input) {
+        Ok(record) => record,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    if cli.json {
+        let envelope = JsonEnvelope::new(&record);
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = qdev_core::QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit chore start envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else {
+        let text = format!(
+            "Started chore {} ({}) under allowlist: {}\nRecord: {}/{}.json — run `qdev chore commit` to commit it\n",
+            record.id,
+            record.title,
+            record.paths.join(", "),
+            qdev_core::chore_dir(&root)
+                .strip_prefix(&root)
+                .unwrap_or(std::path::Path::new(".qdev/chores"))
+                .display(),
+            record.id,
+        );
+        if let Err(e) = output.emit_text(&text) {
+            let err = qdev_core::QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit chore start text: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    }
+
+    ExitCode::Success
+}
+
+fn handle_chore_commit(
+    commit_args: &cli::ChoreCommitArgs,
+    annotated_config: &qdev_core::AnnotatedConfig,
+    cli: &Cli,
+    output: &OutputEmitter,
+    current_dir: &std::path::Path,
+) -> ExitCode {
+    let root = qdev_core::find_workspace_root(current_dir);
+
+    let author = match resolve_author(
+        commit_args.author_type.as_deref(),
+        commit_args.author_id.as_deref(),
+        annotated_config,
+        &root,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    let input = qdev_core::CommitChoreInput {
+        workspace_root: &root,
+        storage: Some(&annotated_config.config.storage),
+        author,
+        strict: commit_args.strict,
+    };
+
+    let result = match qdev_core::commit_chore(&input) {
+        Ok(result) => result,
+        Err(e) => {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    };
+
+    if cli.json {
+        let envelope = JsonEnvelope::new(&result);
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = qdev_core::QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit chore commit envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
+    } else {
+        let mut text = format!(
+            "Committed chore {} as {}\n  included: {}\n",
+            result.chore_id,
+            result.commit.as_deref().unwrap_or("-"),
+            result.included.join(", "),
+        );
+        // Two lists, not one: calling an unstaged change "still staged" tells the reader
+        // something false about every path that was never in the index.
+        let staged: Vec<String> = result
+            .excluded
+            .iter()
+            .filter(|e| e.staged)
+            .map(|e| e.path.clone())
+            .collect();
+        let unstaged: Vec<String> = result
+            .excluded
+            .iter()
+            .filter(|e| !e.staged)
+            .map(|e| e.path.clone())
+            .collect();
+        if result.excluded.is_empty() {
+            text.push_str("  excluded: none\n");
+        } else {
+            if !staged.is_empty() {
+                text.push_str(&format!(
+                    "  NOT INCLUDED — still staged: {}\n",
+                    staged.join(", ")
+                ));
+            }
+            if !unstaged.is_empty() {
+                text.push_str(&format!(
+                    "  NOT INCLUDED — not staged: {}\n",
+                    unstaged.join(", ")
+                ));
+            }
+        }
+        if let (Some(id), Some(path)) = (&result.decision_id, &result.decision_path) {
+            text.push_str(&format!("  recorded: {} ({})\n", id, path));
+        }
+        if let Err(e) = output.emit_text(&text) {
+            let err = qdev_core::QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit chore commit text: {}", e),
             );
             let _ = output.emit_error(&err);
             return ExitCode::InfrastructureFailure;

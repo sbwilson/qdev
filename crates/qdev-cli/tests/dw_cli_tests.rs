@@ -123,10 +123,7 @@ fn test_cli_dw_add_happy_path_text_and_json() {
     assert_eq!(val["target_module"], "foundation");
     assert_eq!(val["safety_risk"], "acceptable_with_mitigation");
     assert_eq!(val["status"], "open");
-    assert_eq!(
-        val["rationale"],
-        "Bounded channel with drop-oldest policy"
-    );
+    assert_eq!(val["rationale"], "Bounded channel with drop-oldest policy");
 
     // Verify file created
     let dw_id = val["id"].as_str().unwrap();
@@ -218,7 +215,10 @@ fn test_cli_dw_add_unregistered_module_exit_2() {
 
     let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert_eq!(val["error"]["code"], "usage_error");
-    assert!(val["error"]["message"].as_str().unwrap().contains("nonexistent_mod"));
+    assert!(val["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("nonexistent_mod"));
 }
 
 #[test]
@@ -231,14 +231,7 @@ fn test_cli_dw_add_invalid_risk_exit_2() {
     let assert = cmd
         .current_dir(root)
         .args([
-            "dw",
-            "add",
-            "--module",
-            "bridge",
-            "--risk",
-            "critical",
-            "--title",
-            "Bad risk",
+            "dw", "add", "--module", "bridge", "--risk", "critical", "--title", "Bad risk",
             "--json",
         ])
         .assert()
@@ -247,7 +240,10 @@ fn test_cli_dw_add_invalid_risk_exit_2() {
 
     let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert_eq!(val["error"]["code"], "usage_error");
-    assert!(val["error"]["message"].as_str().unwrap().contains("valid risk levels are"));
+    assert!(val["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("valid risk levels are"));
 }
 
 #[test]
@@ -586,7 +582,11 @@ fn test_cli_dw_list_and_filters() {
 
     // Text mode list
     let mut list_txt = Command::cargo_bin("qdev").unwrap();
-    let assert_txt = list_txt.current_dir(root).args(["dw", "list"]).assert().success();
+    let assert_txt = list_txt
+        .current_dir(root)
+        .args(["dw", "list"])
+        .assert()
+        .success();
     let txt = std::str::from_utf8(&assert_txt.get_output().stdout).unwrap();
     assert!(txt.contains("DW-"));
     assert!(txt.contains("bridge"));
@@ -821,4 +821,3 @@ fn test_cli_dw_close_invalid_status_exit_2() {
         .unwrap()
         .contains("Invalid close status"));
 }
-

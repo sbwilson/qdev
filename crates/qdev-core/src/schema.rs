@@ -159,6 +159,7 @@ pub enum PayloadKind {
     Transition,
     Claim,
     Release,
+    Chore,
 }
 
 impl PayloadKind {
@@ -175,6 +176,7 @@ impl PayloadKind {
             PayloadKind::Transition => include_str!("../schemas/payload-transition.json"),
             PayloadKind::Claim => include_str!("../schemas/payload-claim.json"),
             PayloadKind::Release => include_str!("../schemas/payload-release.json"),
+            PayloadKind::Chore => include_str!("../schemas/payload-chore.json"),
         }
     }
 
@@ -202,11 +204,12 @@ impl PayloadKind {
             PayloadKind::Transition => "transition",
             PayloadKind::Claim => "claim",
             PayloadKind::Release => "release",
+            PayloadKind::Chore => "chore",
         }
     }
 
     /// Returns an array of all currently-supported payload kinds.
-    pub const fn all() -> &'static [PayloadKind; 10] {
+    pub const fn all() -> &'static [PayloadKind; 11] {
         &[
             PayloadKind::Story,
             PayloadKind::Error,
@@ -218,6 +221,7 @@ impl PayloadKind {
             PayloadKind::Transition,
             PayloadKind::Claim,
             PayloadKind::Release,
+            PayloadKind::Chore,
         ]
     }
 
@@ -246,6 +250,7 @@ impl PayloadKind {
             "transition" | "transitions" => Ok(PayloadKind::Transition),
             "claim" | "claims" => Ok(PayloadKind::Claim),
             "release" | "releases" => Ok(PayloadKind::Release),
+            "chore" | "chores" => Ok(PayloadKind::Chore),
             _ => Err(QdevError::usage_error(format!(
                 "Unknown payload name '{}'. Valid payload names: {}",
                 s,

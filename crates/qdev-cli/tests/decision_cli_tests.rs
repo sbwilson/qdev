@@ -120,7 +120,9 @@ fn test_happy_path_manual_decision_log() {
     assert!(file_content.contains("topic: Buffer sizing"));
     assert!(file_content.contains("ruling: Fixed 4 MB pool"));
     assert!(file_content.contains("context: Decision on E12S4"));
-    assert!(file_content.contains("# Buffer sizing\n\nContext: Decision on E12S4\n\nFixed 4 MB pool\n"));
+    assert!(
+        file_content.contains("# Buffer sizing\n\nContext: Decision on E12S4\n\nFixed 4 MB pool\n")
+    );
 }
 
 #[test]
@@ -160,7 +162,10 @@ fn test_decision_log_with_context_and_json() {
     assert_eq!(val["ruling"], "Use rmp-serde");
     assert_eq!(val["context"], "Benchmarked 30% faster");
     assert_eq!(val["author"]["id"], "simon");
-    assert!(val["path"].as_str().unwrap().starts_with("docs/state/decisions/DEC-"));
+    assert!(val["path"]
+        .as_str()
+        .unwrap()
+        .starts_with("docs/state/decisions/DEC-"));
 }
 
 #[test]
@@ -286,14 +291,7 @@ fn test_list_decisions_subject_and_type_filtering() {
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     let assert = cmd
         .current_dir(root)
-        .args([
-            "list",
-            "decisions",
-            "--subject",
-            "E12S4",
-            "--type",
-            "pivot",
-        ])
+        .args(["list", "decisions", "--subject", "E12S4", "--type", "pivot"])
         .assert()
         .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
@@ -303,13 +301,7 @@ fn test_list_decisions_subject_and_type_filtering() {
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     let assert = cmd
         .current_dir(root)
-        .args([
-            "list",
-            "decisions",
-            "--type",
-            "human_ruling",
-            "--json",
-        ])
+        .args(["list", "decisions", "--type", "human_ruling", "--json"])
         .assert()
         .success();
 

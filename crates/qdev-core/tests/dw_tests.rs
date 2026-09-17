@@ -133,13 +133,23 @@ fn test_add_deferred_work_negligible_risk_success() {
 
     // Check SQLite cache synchronization
     let store = open_store(root);
-    let entity = store.get_entity(&result.id).unwrap().expect("Entity must exist in store");
+    let entity = store
+        .get_entity(&result.id)
+        .unwrap()
+        .expect("Entity must exist in store");
     assert_eq!(entity.kind, EntityKind::DeferredWork);
     assert_eq!(entity.status.as_deref(), Some("open"));
-    assert!(entity.target_modules.as_deref().unwrap_or("").contains("bridge"));
+    assert!(entity
+        .target_modules
+        .as_deref()
+        .unwrap_or("")
+        .contains("bridge"));
 
     let records = store.list_deferred_work().unwrap();
-    let record = records.iter().find(|r| r.id == result.id).expect("Record in deferred_work table");
+    let record = records
+        .iter()
+        .find(|r| r.id == result.id)
+        .expect("Record in deferred_work table");
     assert_eq!(record.target_module, "bridge");
     assert_eq!(record.safety_risk.as_deref(), Some("negligible"));
     assert_eq!(record.status.as_deref(), Some("open"));
@@ -320,7 +330,10 @@ fn test_add_deferred_work_non_negligible_with_rationale_succeeds() {
     let store = open_store(root);
     let records = store.list_deferred_work().unwrap();
     let record = records.iter().find(|r| r.id == result.id).unwrap();
-    assert_eq!(record.safety_risk.as_deref(), Some("acceptable_with_mitigation"));
+    assert_eq!(
+        record.safety_risk.as_deref(),
+        Some("acceptable_with_mitigation")
+    );
     assert_eq!(
         record.rationale.as_deref(),
         Some("Covered by redundant hardware watchdog.")
@@ -405,8 +418,7 @@ fn test_close_deferred_work_done_success() {
     );
 
     // Verify file updated
-    let content =
-        fs::read_to_string(root.join(format!("docs/state/dw/{}.md", added.id))).unwrap();
+    let content = fs::read_to_string(root.join(format!("docs/state/dw/{}.md", added.id))).unwrap();
     assert!(content.contains("status: done"));
     assert!(content.contains("resolution: Implemented in follow-up."));
 
@@ -703,8 +715,16 @@ updated_by:
     // Verify DW was closed in file
     let dw_file = root.join(format!("docs/state/dw/{}.md", dw.id));
     let content = fs::read_to_string(&dw_file).unwrap();
-    assert!(content.contains("status: done"), "DW file status must be done: {}", content);
-    assert!(content.contains("resolution: E1S1"), "DW file resolution must be E1S1: {}", content);
+    assert!(
+        content.contains("status: done"),
+        "DW file status must be done: {}",
+        content
+    );
+    assert!(
+        content.contains("resolution: E1S1"),
+        "DW file resolution must be E1S1: {}",
+        content
+    );
 
     // Verify store deferred_work table was updated
     let store = open_store(root);

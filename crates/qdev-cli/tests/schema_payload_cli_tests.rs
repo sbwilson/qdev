@@ -632,6 +632,99 @@ fn test_round_trip_doctor_payload_against_doctor_output() {
     validate_against_schema(&schema, &instance);
 }
 
+#[test]
+fn test_schema_payload_chore_text_and_json() {
+    Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "chore"])
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains("Chore Payload Schema"))
+        .stdout(predicate::str::contains("schema_version"));
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "chore", "--json"])
+        .assert()
+        .success()
+        .code(0);
+    let val: Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be valid JSON");
+    assert_eq!(val["schema_version"], "1");
+    assert_eq!(val["title"], "Chore Payload Schema");
+}
+
+/// The `chore start` and `chore commit` payloads must both validate against the schema — the
+/// two commands return different shapes, which is why the schema uses `oneOf`.
+#[test]
+fn test_round_trip_chore_payload_against_actual_output() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    // A git repository is required: `chore commit` reads real `git status` output.
+    std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(root)
+        .status()
+        .expect("git init failed");
+    for args in [
+        vec!["config", "user.email", "simon@example.com"],
+        vec!["config", "user.name", "Simon"],
+        vec!["config", "commit.gpgsign", "false"],
+        vec!["add", "-A"],
+        vec!["commit", "-m", "base"],
+    ] {
+        std::process::Command::new("git")
+            .args(&args)
+            .current_dir(root)
+            .status()
+            .expect("git config failed");
+    }
+
+    let schema_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "chore", "--json"])
+        .assert()
+        .success();
+    let schema: Value = serde_json::from_slice(&schema_assert.get_output().stdout).unwrap();
+
+    // start
+    let start = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args([
+            "chore",
+            "start",
+            "widen the pool",
+            "--paths",
+            "src/**",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let instance: Value =
+        serde_json::from_slice(&start.get_output().stdout).expect("start must emit JSON");
+    assert_eq!(instance["id"], "chore-widen-the-pool");
+    validate_against_schema(&schema, &instance);
+
+    // commit
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/pool.rs"), "pool v2\n").unwrap();
+    let commit = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["chore", "commit", "--json"])
+        .assert()
+        .success();
+    let instance: Value =
+        serde_json::from_slice(&commit.get_output().stdout).expect("commit must emit JSON");
+    assert_eq!(instance["chore_id"], "chore-widen-the-pool");
+    assert_eq!(instance["committed"], true);
+    validate_against_schema(&schema, &instance);
+}
+
 /// Every payload kind the binary advertises must have a schema that compiles. This is the
 /// invariant that keeps a newly shipped `--json` payload from being neither schematized nor
 /// recorded as deferred.

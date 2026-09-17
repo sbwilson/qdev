@@ -454,3 +454,15 @@ document is not a work list. Nothing below may be marked done without a spec nam
 - source_spec: `docs/bmad/implementation-artifacts/spec-2-1-state-machine-lifecycle-hooks.md`
   summary: CLI `qdev transition` registers zero hooks, so AC #1's "registered pre/post hooks run" is only satisfiable against the library API.
   evidence: `handle_transition` builds the engine with `qdev_core::TransitionEngine::new()`; no config key or CLI flag resolves hook implementations, and every "hooks run" test constructs the engine in-process. Already ruled Epic 3 scope in the pass-1 review triage log; still true, still unimplemented.
+
+## Deferred from: planning of story 2.10 (2026-09-17)
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-2-10-chores-with-path-allowlists.md`
+  summary: Story 2.10's "the hygiene gate runs on the staged diff before commit" is unimplemented by choice — the hygiene linter is Story 3.9's deliverable, and `HygieneConfig` (`forbid_patterns`, `max_inline_comment_lines`) stays parsed-but-unenforced until then.
+  evidence: Nothing in the repo enforces comment hygiene; the only consumer of `hygiene.citation_pattern` is the `--fix-ids` renumber (`crates/qdev-cli/src/main.rs:4245-4269`), and no code reads `forbid_patterns` at all. Building a partial lint inside `chore commit` would be logic Story 3.9 replaces, so the user chose to leave the gate to 3.9 rather than half-build it here. Review by: story 3.9 (the hygiene linter), which owns `forbid_patterns` and `max_inline_comment_lines` — until then `qdev chore commit` runs no lint and never claims one ran.
+
+## Deferred from: review of story 2.10 (2026-09-17)
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-2-10-chores-with-path-allowlists.md`
+  summary: Chore records live at a hardcoded `.qdev/chores`, while `init` creates and gitignores a directory derived from the configured `cache_dir` — so a workspace that relocates its cache gets a chore directory that is created-but-ungitignored, and records land in git-visible space.
+  evidence: Verified with `cache_dir = "var/qdev-cache"`: `qdev init` creates and ignores `var/chores/`, while `chore_dir()` returns `workspace_root.join(".qdev/chores")`, so `start_chore` writes where nothing is ignored. The same hardcoding exists in `find_workspace_leases` (`.qdev/leases`) and D-1 chose the lease analogy deliberately, so deriving these directories from `StorageConfig` is a project-wide decision rather than a Story 2.10 fix. Review by: the first story that reads `StorageConfig` for a directory, or the first workspace that actually relocates `cache_dir`.

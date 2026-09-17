@@ -41,6 +41,8 @@ fn guarded_invocations() -> Vec<Vec<&'static str>> {
         ],
         vec!["dw", "list"],
         vec!["sprint", "open", "6", "--title", "Port"],
+        vec!["chore", "start", "x", "--paths", "**"],
+        vec!["chore", "commit"],
     ]
 }
 

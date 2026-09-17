@@ -189,6 +189,13 @@ const IDENTITY_RULE_SITES: &[(&str, &str, &str)] = &[
         "`open_sprint`'s refusal to clobber: an occupancy question about the path it is about \
          to write, asked of the path it just built",
     ),
+    (
+        "qdev-core/src/chore.rs",
+        "(Some(id), Some(path)) if root.join(path).exists()",
+        "`chore commit` asks whether the ruling a previous attempt wrote is still on disk. The \
+         path is read out of the chore record, not derived from an id, so this resolves nothing \
+         — it checks that a stored path still exists before reusing it.",
+    ),
 ];
 
 /// The rule's own helpers. A binding assigned from one of them holds an entity file name, so

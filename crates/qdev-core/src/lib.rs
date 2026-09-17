@@ -1,3 +1,4 @@
+pub mod chore;
 pub mod config;
 pub mod dag;
 pub mod decision;
@@ -18,6 +19,11 @@ pub mod store;
 pub mod transition;
 pub mod validate;
 pub mod write;
+
+pub use chore::{
+    chore_dir, commit_chore, derive_chore_id, find_open_chore, list_chore_records, start_chore,
+    ChoreCommitResult, ChoreRecord, CommitChoreInput, ExcludedPath, StartChoreInput,
+};
 
 pub use dw::{
     add_deferred_work, add_deferred_work_with_store, close_deferred_work, is_rationale_required,

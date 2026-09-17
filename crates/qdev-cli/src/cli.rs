@@ -79,6 +79,63 @@ pub enum Commands {
     Dw(DwArgs),
     /// Manage sprints and story assignments
     Sprint(SprintArgs),
+    /// Start and commit path-allowlisted chores
+    Chore(ChoreArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct ChoreArgs {
+    #[command(subcommand)]
+    pub command: ChoreCommands,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum ChoreCommands {
+    /// Record a chore with its path allowlist
+    Start(ChoreStartArgs),
+    /// Commit only the changes under the chore's allowlist
+    Commit(ChoreCommitArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChoreStartArgs {
+    /// Short description of the chore
+    pub title: String,
+
+    /// Workspace-relative path glob the chore may touch (repeatable)
+    ///
+    /// Not clap-`required`, and one value per flag: an invocation with no `--paths` must reach
+    /// `start_chore` to be refused there with `paths_required` (the code the spec's I/O matrix
+    /// promises), and an open-ended `num_args` would swallow the positional title.
+    #[arg(long = "paths", num_args = 1, action = clap::ArgAction::Append)]
+    pub paths: Vec<String>,
+
+    /// Start the chore even though this worktree holds a story lease
+    #[arg(long = "alongside")]
+    pub alongside: bool,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChoreCommitArgs {
+    /// Refuse (exit 3) instead of skipping any change outside the allowlist
+    #[arg(long = "strict")]
+    pub strict: bool,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]

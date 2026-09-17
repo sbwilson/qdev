@@ -19,6 +19,7 @@ pub const STANDARD_DIRECTORIES: &[&str] = &[
     ".qdev/cache",
     ".qdev/gates",
     ".qdev/leases",
+    ".qdev/chores",
     "docs/specs/prd",
     "docs/specs/requirements",
     "docs/specs/epics",
@@ -114,6 +115,7 @@ pub fn standard_directories(layout: &InitLayout) -> Vec<String> {
         layout.cache_dir().to_string(),
         format!("{}/gates", qdev_dir),
         format!("{}/leases", qdev_dir),
+        format!("{}/chores", qdev_dir),
     ];
     for sub in SPEC_SUBDIRECTORIES {
         dirs.push(format!("{}/{}", specs, sub));
@@ -138,6 +140,7 @@ pub fn gitignore_entries(layout: &InitLayout) -> Vec<String> {
         entries.push(format!("{}/", effective_cache));
     }
     entries.push(format!("{}/leases/", layout.qdev_dir()));
+    entries.push(format!("{}/chores/", layout.qdev_dir()));
     entries.push(crate::config::LOCAL_CONFIG_FILENAME.to_string());
     entries
 }
