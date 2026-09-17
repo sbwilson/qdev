@@ -40,6 +40,7 @@ fn guarded_invocations() -> Vec<Vec<&'static str>> {
             "Fixed 4 MB pool",
         ],
         vec!["dw", "list"],
+        vec!["sprint", "open", "6", "--title", "Port"],
     ]
 }
 

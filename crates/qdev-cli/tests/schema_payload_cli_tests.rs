@@ -637,9 +637,12 @@ fn test_round_trip_doctor_payload_against_doctor_output() {
 /// recorded as deferred.
 #[test]
 fn test_every_advertised_payload_name_has_a_compilable_schema() {
-    for name in [
-        "story", "error", "validate", "fix_ids", "list", "sync", "doctor",
-    ] {
+    use qdev_core::PayloadKind;
+
+    // Derived from the source of truth. The hardcoded list is how `transition`, `claim` and
+    // `release` went untested here while `PayloadKind` had already grown past it.
+    for kind in PayloadKind::all() {
+        let name = kind.as_str();
         let assert = Command::cargo_bin("qdev")
             .unwrap()
             .args(["schema", "payload", name, "--json"])

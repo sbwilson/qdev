@@ -27,6 +27,8 @@ pub const VALID_DECISION_TYPES: &[&str] = &[
     "pivot",
     "review_rejection",
     "lease_override",
+    "story_abandoned",
+    "story_superseded",
 ];
 
 fn default_true() -> bool {
@@ -136,6 +138,8 @@ pub fn log_decision_with_store(
                 "lease_override" => format!("Lease override on {}", canonical_subject_id),
                 "review_rejection" => format!("Review rejection on {}", canonical_subject_id),
                 "pivot" => format!("Pivot on {}", canonical_subject_id),
+                "story_abandoned" => format!("Story {} abandoned", canonical_subject_id),
+                "story_superseded" => format!("Story {} superseded", canonical_subject_id),
                 other => format!("Decision ({}) on {}", other, canonical_subject_id),
             },
         },
@@ -191,10 +195,7 @@ pub fn log_decision_with_store(
         "subject_id".to_string(),
         serde_json::json!(canonical_subject_id),
     );
-    frontmatter_map.insert(
-        "decision_type".to_string(),
-        serde_json::json!(trimmed_type),
-    );
+    frontmatter_map.insert("decision_type".to_string(), serde_json::json!(trimmed_type));
     if let Some(ref top) = input.topic {
         let trimmed_topic = top.trim();
         if !trimmed_topic.is_empty() {
@@ -230,7 +231,10 @@ pub fn log_decision_with_store(
     })?;
 
     // 13. Format markdown body
-    let dec_content = if trimmed_type == "pivot" || trimmed_type == "review_rejection" {
+    let dec_content = if matches!(
+        trimmed_type,
+        "pivot" | "review_rejection" | "story_abandoned" | "story_superseded"
+    ) {
         format!(
             "---\n{}---\n\n# {}\n\nTransition: {}\n\n{}\n",
             frontmatter_yaml, title, context_str, trimmed_ruling

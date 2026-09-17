@@ -13,16 +13,17 @@ pub mod lease;
 pub mod query;
 pub mod schema;
 pub mod scratch;
+pub mod sprint;
 pub mod store;
 pub mod transition;
 pub mod validate;
 pub mod write;
 
 pub use dw::{
-    add_deferred_work, add_deferred_work_with_store, close_deferred_work,
-    is_rationale_required, list_deferred_work_records, validate_safety_risk, AddDeferredWorkInput,
-    CloseDeferredWorkInput, DeferredWorkItem, DeferredWorkPayload, ListDeferredWorkFilter,
-    ListDeferredWorkPayload, VALID_SAFETY_RISKS,
+    add_deferred_work, add_deferred_work_with_store, close_deferred_work, is_rationale_required,
+    list_deferred_work_records, validate_safety_risk, AddDeferredWorkInput, CloseDeferredWorkInput,
+    DeferredWorkItem, DeferredWorkPayload, ListDeferredWorkFilter, ListDeferredWorkPayload,
+    VALID_SAFETY_RISKS,
 };
 
 pub use decision::{
@@ -93,6 +94,7 @@ pub use interactivity::Interactivity;
 pub use query::{
     query_entity, query_list, ConstraintProjection, EntityProjection, GetResult,
     ListEntryProjection, ListQueryOptions, QueryOptions, ScratchEntryProjection,
+    SprintAssignmentProjection,
 };
 pub use regex;
 pub use rusqlite;
@@ -102,19 +104,23 @@ pub use schema::{
     PayloadKind, SchemaError, ValidationError,
 };
 pub use serde_yaml;
+pub use sprint::{
+    assign_to_sprint, close_sprint, normalize_sprint_id, open_sprint, resolve_sprint_selection,
+    sprint_entity_id, SprintAssignOptions, SprintAssignResult, SprintCloseOptions,
+    SprintCloseResult, SprintOpenOptions, SprintOpenResult,
+};
 pub use transition::{
-    append_scratchpad_entry, classify_transition, create_backward_transition_decision,
-    record_backward_transition_decision,
-    PostTransitionHook, PreTransitionHook, StoryState, TransitionContext, TransitionEngine,
-    TransitionKind, TransitionOptions, TransitionPayload,
+    append_scratchpad_entry, classify_transition, create_transition_decision,
+    record_transition_decision, PostTransitionHook, PreTransitionHook, StoryState,
+    TransitionContext, TransitionEngine, TransitionKind, TransitionOptions, TransitionPayload,
 };
 pub use validate::{
-    collect_workspace_files_matching, filter_by_changed, find_duplicate_planning_ids,
-    find_dw_missing_rationale, find_off_convention_entity_files, find_orphan_deferred_work,
-    find_unregistered_target_modules, git_changed_files, glob_match, has_error_finding, ids_in_use,
-    ids_in_use_from_scan, module_path_patterns, next_available_id, rewrite_citations,
-    rewrite_frontmatter_id, run_validation, scan_duplicate_planning_ids, sort_findings,
-    DuplicateIdScan,
+    collect_workspace_files_matching, filter_by_changed, find_duplicate_active_sprint_assignments,
+    find_duplicate_planning_ids, find_dw_missing_rationale, find_off_convention_entity_files,
+    find_orphan_deferred_work, find_unregistered_target_modules, git_changed_files, glob_match,
+    has_error_finding, ids_in_use, ids_in_use_from_scan, module_path_patterns, next_available_id,
+    rewrite_citations, rewrite_frontmatter_id, run_validation, scan_duplicate_planning_ids,
+    sort_findings, DuplicateIdScan,
 };
 pub use write::{
     acquire_write_lock, apply_constraint_add, apply_constraint_remove, apply_entity_update,

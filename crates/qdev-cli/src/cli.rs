@@ -77,6 +77,8 @@ pub enum Commands {
     Decision(DecisionArgs),
     /// Manage deferred work debt and residual anomalies
     Dw(DwArgs),
+    /// Manage sprints and story assignments
+    Sprint(SprintArgs),
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
@@ -544,7 +546,7 @@ pub struct DecisionLogArgs {
     #[arg(long = "subject")]
     pub subject: String,
 
-    /// Decision type: human_ruling, agent_assumption, cross_team_override, pivot, review_rejection, lease_override
+    /// Decision type: human_ruling, agent_assumption, cross_team_override, pivot, review_rejection, lease_override, story_abandoned, story_superseded
     #[arg(long = "type")]
     pub r#type: String,
 
@@ -659,6 +661,87 @@ pub struct DwCloseArgs {
     /// Justification (required for wont_fix if resolution is omitted)
     #[arg(long = "justification")]
     pub justification: Option<String>,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct SprintArgs {
+    #[command(subcommand)]
+    pub command: SprintCommands,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum SprintCommands {
+    /// Open a new sprint
+    Open(SprintOpenArgs),
+    /// Assign stories to a sprint
+    Assign(SprintAssignArgs),
+    /// Close an active sprint with optional carry-over
+    Close(SprintCloseArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct SprintOpenArgs {
+    /// Sprint number or identifier (e.g. 6 or sprint-6)
+    pub id: String,
+
+    /// Sprint title
+    #[arg(long = "title")]
+    pub title: String,
+
+    /// Target release version (e.g. 0.1.0)
+    #[arg(long = "release")]
+    pub release: Option<String>,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct SprintAssignArgs {
+    /// Sprint number or first story
+    pub first: Option<String>,
+
+    /// Remaining stories or arguments
+    pub rest: Vec<String>,
+
+    /// Sprint number or ID override
+    #[arg(long = "sprint")]
+    pub sprint: Option<String>,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct SprintCloseArgs {
+    /// Sprint number or identifier to close (e.g. 5 or sprint-5)
+    pub id: Option<String>,
+
+    /// Sprint number or ID override
+    #[arg(long = "sprint")]
+    pub sprint: Option<String>,
+
+    /// Target sprint number or identifier for carry-over stories (e.g. 6 or sprint-6)
+    #[arg(long = "carry-over")]
+    pub carry_over: Option<String>,
 
     /// Attribution author type override ('human' or 'agent')
     #[arg(long = "author-type")]

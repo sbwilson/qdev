@@ -444,3 +444,13 @@ document is not a work list. Nothing below may be marked done without a spec nam
 - source_spec: `docs/bmad/implementation-artifacts/spec-1-29-one-gate-for-relation-writes.md`
   summary: Repository-wide `cargo fmt --check` fails on pre-existing formatting drift outside story 1-29.
   evidence: The formatter reports baseline differences in `crates/qdev-cli/tests/validate_cli_tests.rs`, `crates/qdev-core/src/store/sqlite.rs`, `crates/qdev-core/src/validate.rs`, `crates/qdev-core/src/write.rs`, and `crates/qdev-core/tests/sweep_tests.rs`; story 1-29's modified files do not appear in that output.
+
+## Deferred from: code review of story-2.1 (2026-09-17)
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-2-1-state-machine-lifecycle-hooks.md`
+  summary: Post-transition hook contract is unpinned — nothing tests that post-hooks run after `closes_dw` closure, and a post-hook error after a committed write still reports failure for work that succeeded.
+  evidence: `TransitionEngine::transition` runs steps 9-11 in the documented order (`crates/qdev-core/src/transition.rs:623-706`), but the only ordering test, `test_transition_pre_and_post_hooks`, uses story `E12S1`, which has no `closes_dw`. Nothing in the CLI registers hooks (`crates/qdev-cli/src/main.rs:1721` uses `TransitionEngine::new()` with empty registries), so the contract is unexercisable from a command. Deferred: hook registration and configuration are Epic 3 scope, where this becomes reachable and worth pinning.
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-2-1-state-machine-lifecycle-hooks.md`
+  summary: CLI `qdev transition` registers zero hooks, so AC #1's "registered pre/post hooks run" is only satisfiable against the library API.
+  evidence: `handle_transition` builds the engine with `qdev_core::TransitionEngine::new()`; no config key or CLI flag resolves hook implementations, and every "hooks run" test constructs the engine in-process. Already ruled Epic 3 scope in the pass-1 review triage log; still true, still unimplemented.

@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-15-2026 09:08
+last_updated: 09-17-2026 11:49
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -63,7 +63,7 @@ development_status:
   1-30-derivation-sites-are-enumerable: done            # P3-11
 
   epic-2: in-progress
-  2-1-state-machine-lifecycle-hooks: review
+  2-1-state-machine-lifecycle-hooks: done
   2-2-justified-backward-transitions: review
   2-3-story-leases: review
   2-4-scope-enforcement-cross-team-overrides: review
@@ -71,7 +71,7 @@ development_status:
   2-6-scratchpads: review
   2-7-decision-ledger: review
   2-8-deferred-work: review
-  2-9-sprints-as-assignments: backlog
+  2-9-sprints-as-assignments: review
   2-10-chores-with-path-allowlists: backlog
   2-11-qdev-next: backlog
   2-12-root-pulse: backlog

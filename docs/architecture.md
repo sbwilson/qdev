@@ -150,6 +150,7 @@ computed: blocked = any depends_on target not done
 - **draft**: being specified. `/qdev-create-story` produces a draft; it becomes `ready` when acceptance criteria and constraints validate.
 - **Forward transitions** fire `pre_transition` hooks (gates, lease check, dependency check) then `post_transition` hooks (evidence write, scratchpad note).
 - **Backward transitions** implement pivots and review rejections. They require `--justification`, which is appended to the scratchpad and logged as a `DEC-` record of type `pivot` or `review_rejection`.
+- **Terminal jumps** (`superseded` / `abandoned`, from any non-terminal state) require `--justification` too, and log the same way as a `DEC-` record of type `story_superseded` or `story_abandoned` — otherwise the reason a story was killed is validated and thrown away.
 - **superseded** is set automatically on the target of a `supersedes` relation when the source reaches `ready`.
 
 Epics derive status from their stories: `planning`, `active`, `done`. Sprints: `planning | active | completed | paused | abandoned`.
@@ -454,7 +455,7 @@ CREATE TABLE sprint_assignments (
 CREATE TABLE decisions (
     id TEXT PRIMARY KEY, subject_id TEXT NOT NULL,   -- story, epic, or ADR
     decision_type TEXT CHECK(decision_type IN
-      ('human_ruling','agent_assumption','cross_team_override','pivot','review_rejection','lease_override')),
+      ('human_ruling','agent_assumption','cross_team_override','pivot','review_rejection','lease_override','story_abandoned','story_superseded')),
     topic TEXT, context TEXT, ruling TEXT,
     author_type TEXT, author_id TEXT, created_at TEXT
 );

@@ -623,6 +623,88 @@ fn normalize_rel(path: &Path) -> String {
 /// sweep and a full rebuild of the same tree report the same list. Reads are deliberately
 /// untouched: `qdev get` and `qdev list` still return a stale entity with its `stale` flag set,
 /// which is what the retention exists for.
+/// `duplicate_active_sprint_assignment`: a story is assigned to more than one active sprint
+/// (`status == "active"`). One finding per participating active sprint.
+pub fn find_duplicate_active_sprint_assignments(
+    store: &dyn Store,
+) -> Result<Vec<FindingRecord>, QdevError> {
+    let found_at = current_iso8601();
+    let mut findings = Vec::new();
+
+    let sprints = store.list_sprints()?;
+    let mut active_sprint_ids = HashSet::new();
+    let mut sprint_paths = HashMap::new();
+
+    for sprint in sprints {
+        if sprint.status.as_deref() == Some("active") {
+            let entity_id = format!("sprint-{}", sprint.id);
+            if store
+                .entity_exists_for_derivation(&entity_id)
+                .unwrap_or(true)
+            {
+                active_sprint_ids.insert(sprint.id);
+                // The existence probe already treats a stale row as absent, so the matching read
+                // must too: taking the path from a retained row would derive a finding from
+                // content the file no longer has.
+                let sp_path = match store.get_live_entity_for_derivation(&entity_id)? {
+                    Some(e) => e.source_path,
+                    None => format!("(unknown path for {})", entity_id),
+                };
+                sprint_paths.insert(sprint.id, sp_path);
+            }
+        }
+    }
+
+    if active_sprint_ids.len() < 2 {
+        return Ok(findings);
+    }
+
+    let all_assignments = store.list_sprint_assignments()?;
+    let mut story_to_active_sprints: std::collections::BTreeMap<String, Vec<i64>> =
+        std::collections::BTreeMap::new();
+
+    for assignment in all_assignments {
+        if active_sprint_ids.contains(&assignment.sprint_id) {
+            story_to_active_sprints
+                .entry(assignment.story_id)
+                .or_default()
+                .push(assignment.sprint_id);
+        }
+    }
+
+    for (story_id, mut sprint_ids) in story_to_active_sprints {
+        sprint_ids.sort();
+        sprint_ids.dedup();
+        if sprint_ids.len() > 1 {
+            let sprint_names: Vec<String> = sprint_ids
+                .iter()
+                .map(|id| format!("sprint-{}", id))
+                .collect();
+            let joined_sprints = sprint_names.join(", ");
+
+            for &sprint_id in &sprint_ids {
+                let report_path = sprint_paths
+                    .get(&sprint_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("(unknown path for sprint-{})", sprint_id));
+                findings.push(FindingRecord {
+                    path: report_path,
+                    code: "duplicate_active_sprint_assignment".to_string(),
+                    severity: ERROR_SEVERITY.to_string(),
+                    message: Some(format!(
+                        "Story '{}' is assigned to multiple active sprints: {}",
+                        story_id, joined_sprints
+                    )),
+                    found_at: found_at.clone(),
+                });
+            }
+        }
+    }
+
+    findings.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.code.cmp(&b.code)));
+    Ok(findings)
+}
+
 pub fn run_validation(
     store: &dyn Store,
     workspace_root: &Path,
@@ -637,6 +719,7 @@ pub fn run_validation(
     findings.extend(find_dw_missing_rationale(store)?);
     findings.extend(find_unregistered_target_modules(store, config)?);
     findings.extend(find_off_convention_entity_files(store, &config.storage)?);
+    findings.extend(find_duplicate_active_sprint_assignments(store)?);
     Ok(findings)
 }
 

@@ -177,6 +177,18 @@ const IDENTITY_RULE_SITES: &[(&str, &str, &str)] = &[
         "`add_deferred_work` joins the directory the rule gives to the name `canonical_file_name` \
          gives — the rule spelled once, not a second answer",
     ),
+    (
+        "qdev-core/src/sprint.rs",
+        "let sprint_file_path = options.workspace_root.join(&rel_dir).join(&file_name);",
+        "`open_sprint` joins the directory the rule gives to the name `canonical_file_name` \
+         gives — the rule spelled once, not a second answer",
+    ),
+    (
+        "qdev-core/src/sprint.rs",
+        "if sprint_file_path.symlink_metadata().is_ok() {",
+        "`open_sprint`'s refusal to clobber: an occupancy question about the path it is about \
+         to write, asked of the path it just built",
+    ),
 ];
 
 /// The rule's own helpers. A binding assigned from one of them holds an entity file name, so

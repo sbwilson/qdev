@@ -139,6 +139,33 @@
           }
         }
       }
+    },
+    "assignments": {
+      "type": "array",
+      "description": "Sprint entities only: list of story assignments.",
+      "items": {
+        "type": "object",
+        "required": ["story", "assigned_at"],
+        "properties": {
+          "story": {
+            "type": "string"
+          },
+          "assigned_at": {
+            "type": "string"
+          },
+          "carried_from": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "status_counts": {
+      "type": "object",
+      "description": "Sprint entities only: count of assigned stories grouped by status.",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
     }
   }
 }

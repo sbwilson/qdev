@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::errors::QdevError;
 use crate::schema::EntityKind;
@@ -55,6 +55,15 @@ impl From<ScratchpadRecord> for ScratchEntryProjection {
     }
 }
 
+/// A single sprint story assignment, included in `EntityProjection` for sprint entities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SprintAssignmentProjection {
+    pub story: String,
+    pub assigned_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried_from: Option<i64>,
+}
+
 /// Isolated single-entity projection returned by `qdev get`.
 ///
 /// The default projection (no `--expand`) always carries `constraints` (own + inherited),
@@ -88,6 +97,10 @@ pub struct EntityProjection {
     pub stale: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scratch: Option<Vec<ScratchEntryProjection>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignments: Option<Vec<SprintAssignmentProjection>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_counts: Option<BTreeMap<String, usize>>,
 }
 
 /// Result of resolving a `qdev get` target: either a full entity projection, or — when the
@@ -212,6 +225,34 @@ fn build_entity_projection(
         None
     };
 
+    let (assignments, status_counts) = if entity.kind == EntityKind::Sprint {
+        let sprint_num: i64 = if let Some(rest) = entity.id.strip_prefix("sprint-") {
+            rest.parse().unwrap_or(0)
+        } else {
+            entity.id.parse().unwrap_or(0)
+        };
+        let assigned_records = store.get_sprint_assignments(sprint_num)?;
+        let mut proj_assignments = Vec::new();
+        let mut counts = BTreeMap::new();
+        for a in assigned_records {
+            // `status_counts` is derived from the stories, so a stale row is not evidence of a
+            // status: skip it rather than count a status that no longer exists on disk.
+            if let Some(story_entity) = store.get_live_entity_for_derivation(&a.story_id)? {
+                if let Some(st) = story_entity.status {
+                    *counts.entry(st).or_insert(0) += 1;
+                }
+            }
+            proj_assignments.push(SprintAssignmentProjection {
+                story: a.story_id,
+                assigned_at: a.assigned_at,
+                carried_from: a.carried_from,
+            });
+        }
+        (Some(proj_assignments), Some(counts))
+    } else {
+        (None, None)
+    };
+
     Ok(EntityProjection {
         id: entity.id.clone(),
         kind: entity.kind,
@@ -228,6 +269,8 @@ fn build_entity_projection(
         version: entity.version,
         stale: entity.stale,
         scratch,
+        assignments,
+        status_counts,
     })
 }
 
@@ -261,12 +304,35 @@ pub fn query_entity(
         return Ok(GetResult::Constraint(constraint));
     }
 
-    let entity = store.get_entity(trimmed)?.ok_or_else(|| {
-        QdevError::usage_error_with_code(
-            "entity_not_found",
-            format!("Entity '{}' not found", trimmed),
-        )
-    })?;
+    let mut resolved_id = trimmed.to_string();
+    if kind_hint == Some(EntityKind::Sprint)
+        && !trimmed.starts_with("sprint-")
+        && trimmed.chars().all(|c| c.is_ascii_digit())
+    {
+        resolved_id = format!("sprint-{}", trimmed);
+    }
+
+    let entity = match store.get_entity(&resolved_id)? {
+        Some(e) => e,
+        None if kind_hint.is_none() && trimmed.chars().all(|c| c.is_ascii_digit()) => {
+            let sprint_id = format!("sprint-{}", trimmed);
+            match store.get_entity(&sprint_id)? {
+                Some(e) if e.kind == EntityKind::Sprint => e,
+                _ => {
+                    return Err(QdevError::usage_error_with_code(
+                        "entity_not_found",
+                        format!("Entity '{}' not found", trimmed),
+                    ));
+                }
+            }
+        }
+        None => {
+            return Err(QdevError::usage_error_with_code(
+                "entity_not_found",
+                format!("Entity '{}' not found", trimmed),
+            ));
+        }
+    };
 
     if let Some(expected_kind) = kind_hint {
         if entity.kind != expected_kind {

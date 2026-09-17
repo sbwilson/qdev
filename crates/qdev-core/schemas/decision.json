@@ -79,7 +79,9 @@
         "cross_team_override",
         "pivot",
         "review_rejection",
-        "lease_override"
+        "lease_override",
+        "story_abandoned",
+        "story_superseded"
       ]
     },
     "topic": {

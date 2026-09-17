@@ -11,9 +11,9 @@ use crate::errors::QdevError;
 use crate::schema::EntityKind;
 use crate::store::{ScratchpadRecord, SqliteStore, Store};
 use crate::write::{
-    acquire_write_lock, apply_entity_update, current_iso8601, directory_for_kind,
-    has_markdown_heading, resolve_entity_file, write_file_atomic, Author, EntityUpdateOptions,
-    EntityUpdateResult,
+    acquire_write_lock, apply_entity_update, apply_entity_update_checked, current_iso8601,
+    directory_for_kind, has_markdown_heading, resolve_entity_file, write_file_atomic, Author,
+    EntityUpdateOptions, EntityUpdateResult,
 };
 
 /// All valid lifecycle states for a story entity.
@@ -360,17 +360,24 @@ fn validate_dependencies(
             })));
         }
     } else if !depends_on_ids.is_empty() {
+        // Nothing has been checked: with no cache there is no record of any dependency's
+        // status, so calling them unmet tells the operator the wrong thing. Say that the
+        // evidence is missing, where it lives, and how to build it.
         return Err(QdevError::policy_refusal(
             "story_blocked",
             format!(
-                "Story '{}' is blocked by unmet dependencies: {}",
+                "Story '{}' cannot move to in-progress: no cache at {}, so the status of {} dependencies ({}) has not been checked. Run `qdev sync` and retry.",
                 story_id,
+                cache_db_path.display(),
+                depends_on_ids.len(),
                 depends_on_ids.join(", ")
             ),
         )
         .with_details(serde_json::json!({
             "story_id": story_id,
             "blocking_ids": depends_on_ids,
+            "cache": cache_db_path.display().to_string(),
+            "checked": false,
         })));
     }
 
@@ -406,7 +413,139 @@ fn extract_closes_dw_ids(frontmatter: &serde_json::Value) -> Vec<String> {
     ids
 }
 
-/// Sets all target entities in `relations.closes_dw` to `status: done`, `resolution: "<story_id>"`.
+/// The outcome of judging a requested transition against a story file.
+struct TransitionDecision {
+    from_state: StoryState,
+    kind: TransitionKind,
+    /// `closes_dw` targets re-derived from the content that was judged.
+    dw_ids: Vec<String>,
+}
+
+/// Judges a requested story transition against story content as it currently stands: the state
+/// machine edge, the justification an out-of-line move needs, the `draft -> ready` readiness
+/// gate, the `ready -> in-progress` blocking dependency gate, and the existence of every
+/// `closes_dw` target.
+///
+/// `TransitionEngine::transition` calls this twice — once from the read that decides the
+/// transition, and again under the write lock via `apply_entity_update_checked`. The deciding
+/// read and the commit can straddle a concurrent commit, and the write path patches the
+/// caller's pre-computed status without judging it, so a single pre-lock decision lets two
+/// `qdev transition` runs on one story both succeed with the later one silently overwriting
+/// the first — including reviving a story that just moved to a terminal state.
+fn validate_story_transition(
+    workspace_root: &Path,
+    storage: Option<&StorageConfig>,
+    content: &str,
+    story_id: &str,
+    target_state: StoryState,
+    justification: &str,
+) -> Result<TransitionDecision, QdevError> {
+    let frontmatter = crate::schema::extract_frontmatter(content).map_err(|e| {
+        QdevError::logical_failure(
+            "parse_error",
+            format!("Failed to extract frontmatter from '{}': {}", story_id, e),
+        )
+    })?;
+
+    let current_status_str = frontmatter
+        .get("status")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            QdevError::logical_failure(
+                "missing_field",
+                format!("Story '{}' is missing required 'status' field", story_id),
+            )
+        })?;
+
+    let from_state = StoryState::parse(current_status_str).map_err(|_| {
+        QdevError::logical_failure(
+            "invalid_status",
+            format!(
+                "Story '{}' has invalid current status '{}'",
+                story_id, current_status_str
+            ),
+        )
+    })?;
+
+    // 1. State machine edge, and the justification a backward or terminal move needs.
+    let kind = classify_transition(from_state, target_state)?;
+
+    match kind {
+        TransitionKind::LegalForward => {}
+        TransitionKind::TerminalJump => {
+            if justification.is_empty() {
+                return Err(QdevError::policy_refusal(
+                    "needs_justification",
+                    format!(
+                        "Transition to terminal state '{}' requires non-empty justification (--justification <reason>)",
+                        target_state.as_str()
+                    ),
+                )
+                .with_details(serde_json::json!({
+                    "story_id": story_id,
+                    "target_status": target_state.as_str(),
+                })));
+            }
+        }
+        TransitionKind::Backward => {
+            if justification.is_empty() {
+                return Err(QdevError::policy_refusal(
+                    "needs_justification",
+                    format!(
+                        "Backward transition from '{}' to '{}' requires non-empty justification (--justification <reason>)",
+                        from_state.as_str(),
+                        target_state.as_str()
+                    ),
+                )
+                .with_details(serde_json::json!({
+                    "story_id": story_id,
+                    "from_status": from_state.as_str(),
+                    "target_status": target_state.as_str(),
+                })));
+            }
+        }
+    }
+
+    // 2. `draft -> ready` prerequisites, judged from the same content that decided the edge.
+    if from_state == StoryState::Draft && target_state == StoryState::Ready {
+        validate_readiness_criteria(content, &frontmatter, story_id)?;
+    }
+
+    // 3. `ready -> in-progress` blocking dependencies.
+    if from_state == StoryState::Ready && target_state == StoryState::InProgress {
+        validate_dependencies(workspace_root, storage, story_id, &frontmatter)?;
+    }
+
+    // 4. Every `closes_dw` target must exist before a story can reach `done`.
+    let dw_ids = if target_state == StoryState::Done {
+        let ids = extract_closes_dw_ids(&frontmatter);
+        for dw_id in &ids {
+            resolve_entity_file(
+                workspace_root,
+                Some(EntityKind::DeferredWork),
+                dw_id,
+                storage,
+            )?;
+        }
+        ids
+    } else {
+        Vec::new()
+    };
+
+    Ok(TransitionDecision {
+        from_state,
+        kind,
+        dw_ids,
+    })
+}
+
+/// Sets every not-yet-closed target in `relations.closes_dw` to `status: done`,
+/// `resolution: "<story_id>"`, and returns the IDs it actually closed.
+///
+/// This runs before the story is committed (see `TransitionEngine::transition`) so a DW that
+/// cannot be written fails while the story is still in its previous state and the transition
+/// can be re-driven. A DW someone else already closed is skipped rather than re-stamped, which
+/// keeps a retry idempotent and leaves the `resolution` that closed it first intact.
 fn close_deferred_work(
     workspace_root: &Path,
     storage: Option<&StorageConfig>,
@@ -417,6 +556,43 @@ fn close_deferred_work(
     let mut closed = Vec::new();
 
     for dw_id in dw_ids {
+        let (_kind, _id, file_path) = resolve_entity_file(
+            workspace_root,
+            Some(EntityKind::DeferredWork),
+            dw_id,
+            storage,
+        )?;
+
+        let content = fs::read_to_string(&file_path).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "io_error",
+                format!(
+                    "Failed to read entity file '{}': {}",
+                    file_path.display(),
+                    e
+                ),
+            )
+        })?;
+
+        let frontmatter = crate::schema::extract_frontmatter(&content).map_err(|e| {
+            QdevError::logical_failure(
+                "parse_error",
+                format!(
+                    "Failed to extract frontmatter from '{}': {}",
+                    file_path.display(),
+                    e
+                ),
+            )
+        })?;
+
+        if frontmatter
+            .get("status")
+            .and_then(|v| v.as_str())
+            .is_some_and(|status| status == "done")
+        {
+            continue;
+        }
+
         let dw_opts = EntityUpdateOptions {
             workspace_root: workspace_root.to_path_buf(),
             storage: storage.cloned(),
@@ -483,7 +659,13 @@ impl TransitionEngine {
         // 2. Parse requested target status
         let target_state = StoryState::from_str(&options.target_status)?;
 
-        // 3. Resolve and read story file
+        let justification = options
+            .justification
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("");
+
+        // 3. Resolve and read the story file, then judge the transition from it.
         let (_kind, id, file_path) = resolve_entity_file(
             &options.workspace_root,
             Some(EntityKind::Story),
@@ -502,114 +684,41 @@ impl TransitionEngine {
             )
         })?;
 
-        let frontmatter = crate::schema::extract_frontmatter(&content).map_err(|e| {
-            QdevError::logical_failure(
-                "parse_error",
-                format!(
-                    "Failed to extract frontmatter from '{}': {}",
-                    file_path.display(),
-                    e
-                ),
-            )
-        })?;
+        let decision = validate_story_transition(
+            &options.workspace_root,
+            options.storage.as_ref(),
+            &content,
+            &id,
+            target_state,
+            justification,
+        )?;
 
-        let current_status_str = frontmatter
-            .get("status")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                QdevError::logical_failure(
-                    "missing_field",
-                    format!("Story '{}' is missing required 'status' field", id),
-                )
-            })?;
-
-        let from_state = StoryState::parse(current_status_str).map_err(|_| {
-            QdevError::logical_failure(
-                "invalid_status",
-                format!(
-                    "Story '{}' has invalid current status '{}'",
-                    id, current_status_str
-                ),
-            )
-        })?;
-
-        // 4. Validate transition against state machine graph and justification requirement
-        let transition_kind = classify_transition(from_state, target_state)?;
-
-        match transition_kind {
-            TransitionKind::TerminalJump => {
-                let justification = options.justification.as_deref().unwrap_or("").trim();
-                if justification.is_empty() {
-                    return Err(QdevError::policy_refusal(
-                        "needs_justification",
-                        format!(
-                            "Transition to terminal state '{}' requires non-empty justification (--justification <reason>)",
-                            target_state.as_str()
-                        ),
-                    )
-                    .with_details(serde_json::json!({
-                        "story_id": id,
-                        "target_status": target_state.as_str(),
-                    })));
-                }
-            }
-            TransitionKind::Backward => {
-                let justification = options.justification.as_deref().unwrap_or("").trim();
-                if justification.is_empty() {
-                    return Err(QdevError::policy_refusal(
-                        "needs_justification",
-                        format!(
-                            "Backward transition from '{}' to '{}' requires non-empty justification (--justification <reason>)",
-                            from_state.as_str(),
-                            target_state.as_str()
-                        ),
-                    )
-                    .with_details(serde_json::json!({
-                        "story_id": id,
-                        "from_status": from_state.as_str(),
-                        "target_status": target_state.as_str(),
-                    })));
-                }
-            }
-            TransitionKind::LegalForward => {}
-        }
-
-        // 5. Enforce draft -> ready prerequisites
-        if from_state == StoryState::Draft && target_state == StoryState::Ready {
-            validate_readiness_criteria(&content, &frontmatter, &id)?;
-        }
-
-        // 6. Enforce ready -> in-progress dependencies
-        if from_state == StoryState::Ready && target_state == StoryState::InProgress {
-            validate_dependencies(
+        // 4. Close `closes_dw` targets before committing the story: a DW that cannot be
+        //    written then fails while the story is still where it was, so the transition can
+        //    be re-driven instead of leaving a `done` story with open debt.
+        let closed_dw = if target_state == StoryState::Done {
+            close_deferred_work(
                 &options.workspace_root,
                 options.storage.as_ref(),
                 &id,
-                &frontmatter,
-            )?;
-        }
-
-        // 7. Pre-validate closes_dw targets if transitioning to done
-        let dw_ids_to_close = if target_state == StoryState::Done {
-            let ids = extract_closes_dw_ids(&frontmatter);
-            for dw_id in &ids {
-                resolve_entity_file(
-                    &options.workspace_root,
-                    Some(EntityKind::DeferredWork),
-                    dw_id,
-                    options.storage.as_ref(),
-                )?;
-            }
-            ids
+                &decision.dw_ids,
+                &options.author,
+            )?
         } else {
             Vec::new()
         };
 
-        // 8. Execute pre_transition hooks synchronously in order
+        // 5. Auto-release the story's lease on a terminal target (Story 2.3).
+        if target_state.is_terminal() {
+            let _ = crate::lease::auto_release_lease(&options.workspace_root, &id);
+        }
+
+        // 6. Execute pre_transition hooks synchronously in order; the first error aborts
+        //    before any mutation.
         let ctx = TransitionContext {
             workspace_root: options.workspace_root.clone(),
             story_id: id.clone(),
-            from_state,
+            from_state: decision.from_state,
             to_state: target_state,
             justification: options.justification.clone(),
             author: options.author.clone(),
@@ -620,7 +729,10 @@ impl TransitionEngine {
             hook.run(&ctx)?;
         }
 
-        // 9. Mutate story frontmatter through apply_entity_update
+        // 7. Commit through the write path that re-validates under the lock. The decision
+        //    above was taken from a read made before the lock, and the patch below carries a
+        //    status computed from it, so the same judgement runs again against the content
+        //    this write actually reads and patches.
         let update_opts = EntityUpdateOptions {
             workspace_root: options.workspace_root.clone(),
             storage: options.storage.clone(),
@@ -635,29 +747,26 @@ impl TransitionEngine {
             author: options.author.clone(),
         };
 
-        let update_res = apply_entity_update(&update_opts)?;
-
-        // 10. If target is done, resolve closes_dw targets
-        let closed_dw = if target_state == StoryState::Done {
-            close_deferred_work(
+        let (update_res, revalidated) = apply_entity_update_checked(&update_opts, |fresh| {
+            validate_story_transition(
                 &options.workspace_root,
                 options.storage.as_ref(),
+                fresh,
                 &id,
-                &dw_ids_to_close,
-                &options.author,
-            )?
-        } else {
-            Vec::new()
-        };
+                target_state,
+                justification,
+            )
+        })?;
 
-        // 10a. If target is terminal, auto-release story lease if present per Story 2.3
-        if target_state.is_terminal() {
-            let _ = crate::lease::auto_release_lease(&options.workspace_root, &id);
-        }
-
-        // 10b. If transition is backward, record scratchpad entry and decision entity under write lock
-        let decision_id = if transition_kind == TransitionKind::Backward {
-            let justification = options.justification.as_deref().unwrap_or("").trim();
+        // 8. Record why an out-of-line move happened: a backward move or a jump to a terminal
+        //    state stays on the decision ledger and in the story's scratchpad. Judged from the
+        //    revalidated decision so the record describes the transition that actually
+        //    committed, and runs after the story commit — a record of a transition that did
+        //    not happen would be worse than none.
+        let decision_id = if matches!(
+            revalidated.kind,
+            TransitionKind::Backward | TransitionKind::TerminalJump
+        ) {
             let timestamp = current_iso8601();
 
             let cache_dir_rel = options
@@ -685,11 +794,11 @@ impl TransitionEngine {
             )?;
             drop(lock_guard);
 
-            let dec_id = create_backward_transition_decision(
+            let dec_id = create_transition_decision(
                 &options.workspace_root,
                 options.storage.as_ref(),
                 &id,
-                from_state,
+                revalidated.from_state,
                 target_state,
                 justification,
                 &options.author,
@@ -701,14 +810,20 @@ impl TransitionEngine {
             None
         };
 
-        // 11. Execute post_transition hooks
+        // 9. Execute post_transition hooks in registered order, seeing the state the write
+        //    actually landed in.
+        let post_ctx = TransitionContext {
+            from_state: revalidated.from_state,
+            ..ctx
+        };
+
         for hook in &self.post_hooks {
-            hook.run(&ctx, &update_res)?;
+            hook.run(&post_ctx, &update_res)?;
         }
 
         Ok(TransitionPayload {
             id,
-            from_status: from_state.as_str().to_string(),
+            from_status: revalidated.from_state.as_str().to_string(),
             to_status: target_state.as_str().to_string(),
             version: update_res.new_version,
             closed_dw,
@@ -856,9 +971,10 @@ pub fn append_scratchpad_entry(
 }
 
 /// Creates a committed DEC- record in `docs/state/decisions/` recording the rationale for a
-/// backward story transition, validated against `decision.json` schema, and synced to SQLite cache if present.
+/// story transition that needed justification — a backward move or a jump to a terminal state.
+/// Validated against the `decision.json` schema and synced to the SQLite cache when one exists.
 #[allow(clippy::too_many_arguments)]
-pub fn create_backward_transition_decision(
+pub fn create_transition_decision(
     workspace_root: &Path,
     storage: Option<&StorageConfig>,
     story_id: &str,
@@ -868,13 +984,18 @@ pub fn create_backward_transition_decision(
     author: &Author,
     timestamp: &str,
 ) -> Result<String, QdevError> {
-    let decision_type = if from_state == StoryState::Review {
-        "review_rejection"
-    } else {
-        "pivot"
+    // A terminal jump is its own kind of ruling: the story is not being moved back or
+    // rejected, it is being ended. Recording it as `pivot` would hide the difference.
+    let decision_type = match to_state {
+        StoryState::Abandoned => "story_abandoned",
+        StoryState::Superseded => "story_superseded",
+        _ if from_state == StoryState::Review => "review_rejection",
+        _ => "pivot",
     };
 
     let title = match decision_type {
+        "story_abandoned" => format!("Story {} abandoned", story_id),
+        "story_superseded" => format!("Story {} superseded", story_id),
         "review_rejection" => format!("Review rejection on story {}", story_id),
         _ => format!("Pivot on story {}", story_id),
     };
@@ -897,9 +1018,9 @@ pub fn create_backward_transition_decision(
     Ok(payload.id)
 }
 
-/// Alias for [`create_backward_transition_decision`].
+/// Alias for [`create_transition_decision`].
 #[allow(clippy::too_many_arguments)]
-pub fn record_backward_transition_decision(
+pub fn record_transition_decision(
     workspace_root: &Path,
     storage: Option<&StorageConfig>,
     story_id: &str,
@@ -909,7 +1030,7 @@ pub fn record_backward_transition_decision(
     author: &Author,
     timestamp: &str,
 ) -> Result<String, QdevError> {
-    create_backward_transition_decision(
+    create_transition_decision(
         workspace_root,
         storage,
         story_id,

@@ -1827,3 +1827,520 @@ updated_by:
         assert_eq!(fs::read_dir(decisions_dir).unwrap().count(), 0);
     }
 }
+
+#[test]
+fn test_concurrent_transition_does_not_commit_on_a_stale_decision() {
+    // Story starts `ready`. A background thread holds the workspace write lock and, halfway
+    // through, hand-edits the story to `abandoned`. The transition to `in-progress` decides
+    // its course from the read it took before the lock, so that decision must be re-checked
+    // against the content the write actually reads: patching the pre-computed
+    // `status: in-progress` over a story that just went terminal would revive it with exit 0,
+    // and the file, version and cache would all agree afterwards, so nothing would see it.
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    write_story_file(
+        tmp.path(),
+        "E12S1",
+        r#"---
+id: E12S1
+title: Story 1
+status: ready
+version: 1
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    let lock_path = tmp.path().join(".qdev/cache/write.lock");
+    let story_path = tmp.path().join("docs/specs/stories/E12S1.md");
+    let lock_held = Arc::new(AtomicBool::new(false));
+    let edited = Arc::new(AtomicBool::new(false));
+
+    let lock_held_clone = lock_held.clone();
+    let edited_clone = edited.clone();
+    let lock_path_clone = lock_path.clone();
+    let story_path_clone = story_path.clone();
+
+    let bg_thread = thread::spawn(move || {
+        let _guard = acquire_write_lock(&lock_path_clone, Duration::from_millis(2000)).unwrap();
+        lock_held_clone.store(true, Ordering::SeqCst);
+        // Hold the lock past the transition's deciding read, kill the story, then hold on a
+        // little longer so the write must observe the edited file.
+        thread::sleep(Duration::from_millis(300));
+        let content = fs::read_to_string(&story_path_clone).unwrap();
+        fs::write(
+            &story_path_clone,
+            content.replace("status: ready", "status: abandoned"),
+        )
+        .unwrap();
+        edited_clone.store(true, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(300));
+    });
+
+    while !lock_held.load(Ordering::SeqCst) {
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let engine = TransitionEngine::new();
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S1".to_string(),
+        target_status: "in-progress".to_string(),
+        justification: Some("Decided before the story was killed".to_string()),
+        author: Author::new("human", "simon"),
+        if_version: None,
+    };
+
+    let err = engine.transition(&opts).unwrap_err();
+    bg_thread.join().unwrap();
+
+    assert_eq!(err.code(), "invalid_transition");
+    assert_eq!(err.exit_code(), ExitCode::LogicalFailure);
+    assert!(err.message().contains("terminal"));
+
+    // The story stays where the concurrent edit left it — no stale patch landed on top.
+    let final_content = fs::read_to_string(&story_path).unwrap();
+    assert!(final_content.contains("status: abandoned"));
+    assert!(!final_content.contains("status: in-progress"));
+}
+
+#[test]
+fn test_draft_to_ready_rejects_acceptance_criteria_only_in_a_code_block() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    // The only `## Acceptance Criteria` heading sits inside a fenced code block (a pasted
+    // template), so the story has no acceptance criteria section and must not go `ready`.
+    write_story_file(
+        tmp.path(),
+        "E12S1",
+        r#"---
+id: E12S1
+title: Story with a template only
+status: draft
+version: 1
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Notes
+
+```
+## Acceptance Criteria
+- Copy-pasted from the template.
+```
+"#,
+    );
+
+    let engine = TransitionEngine::new();
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S1".to_string(),
+        target_status: "ready".to_string(),
+        justification: None,
+        author: Author::new("human", "simon"),
+        if_version: None,
+    };
+
+    let err = engine.transition(&opts).unwrap_err();
+    assert_eq!(err.code(), "readiness_criteria_unmet");
+    assert_eq!(err.exit_code(), ExitCode::LogicalFailure);
+    assert_eq!(
+        err.details().unwrap()["missing"],
+        serde_json::json!(["acceptance_criteria"])
+    );
+
+    // Story unchanged.
+    let content = fs::read_to_string(tmp.path().join("docs/specs/stories/E12S1.md")).unwrap();
+    assert!(content.contains("status: draft"));
+
+    // And the same for an indented code block.
+    write_story_file(
+        tmp.path(),
+        "E12S2",
+        "---\n\
+         id: E12S2\n\
+         title: Story with an indented template\n\
+         status: draft\n\
+         version: 1\n\
+         appetite: small\n\
+         target_modules: [\"bridge\"]\n\
+         created_by:\n\
+         \x20type: human\n\
+         \x20id: simon\n\
+         updated_by:\n\
+         \x20type: human\n\
+         \x20id: simon\n\
+         ---\n\n\
+         ## Notes\n\n\
+         Some prose.\n\n\
+         \x20   ## Acceptance Criteria\n\
+         \x20   - Indented, so still a code block.\n",
+    );
+
+    let opts2 = TransitionOptions {
+        story_id: "E12S2".to_string(),
+        ..opts
+    };
+
+    let err2 = engine.transition(&opts2).unwrap_err();
+    assert_eq!(err2.code(), "readiness_criteria_unmet");
+}
+
+#[test]
+fn test_transition_to_done_leaves_the_story_retryable_when_a_dw_cannot_be_written() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    // A DW whose `safety_risk` is not a value the schema allows: it exists, so pre-validation
+    // passes, and the write itself fails on schema validation.
+    write_dw_file(
+        tmp.path(),
+        "DW-bad",
+        r#"---
+id: DW-bad
+title: "Half-configured debt"
+status: open
+version: 1
+origin_story_id: E12S4
+target_module: bridge
+safety_risk: catastrophic
+rationale: Deferred while the enum is wrong.
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Description
+Nothing here closes yet.
+"#,
+    );
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: Story 4
+status: review
+version: 2
+appetite: small
+target_modules: ["bridge"]
+relations:
+  closes_dw:
+    - DW-bad
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    let engine = TransitionEngine::new();
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "done".to_string(),
+        justification: None,
+        author: Author::new("human", "simon"),
+        if_version: None,
+    };
+
+    let err = engine.transition(&opts).unwrap_err();
+    assert_eq!(err.code(), "schema_validation_failed");
+    assert_eq!(err.exit_code(), ExitCode::LogicalFailure);
+
+    // The story is still `review`, so the transition can be re-driven once the DW is fixed.
+    let story_path = tmp.path().join("docs/specs/stories/E12S4.md");
+    let story_content = fs::read_to_string(&story_path).unwrap();
+    assert!(story_content.contains("status: review"));
+    assert!(story_content.contains("version: 2"));
+
+    // Fix the DW and re-drive: it self-heals, and the DW closes on the second attempt.
+    write_dw_file(
+        tmp.path(),
+        "DW-bad",
+        r#"---
+id: DW-bad
+title: "Half-configured debt"
+status: open
+version: 1
+origin_story_id: E12S4
+target_module: bridge
+safety_risk: negligible
+rationale: Fixed the enum.
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Description
+Now it closes.
+"#,
+    );
+
+    let payload = engine.transition(&opts).unwrap();
+    assert_eq!(payload.to_status, "done");
+    assert_eq!(payload.closed_dw, vec!["DW-bad".to_string()]);
+    let dw_content = fs::read_to_string(tmp.path().join("docs/state/dw/DW-bad.md")).unwrap();
+    assert!(dw_content.contains("status: done"));
+    assert!(dw_content.contains("resolution: E12S4"));
+}
+
+#[test]
+fn test_already_closed_dw_is_skipped_and_keeps_its_original_resolution() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    // A DW already closed by another story: re-stamping it to `done` with this story as the
+    // `resolution` would lose who actually resolved it.
+    write_dw_file(
+        tmp.path(),
+        "DW-closed",
+        r#"---
+id: DW-closed
+title: "Debt settled elsewhere"
+status: done
+version: 3
+origin_story_id: E12S4
+target_module: bridge
+safety_risk: negligible
+rationale: Closed by E12S1.
+resolution: E12S1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Description
+Already handled.
+"#,
+    );
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: Story 4
+status: review
+version: 2
+appetite: small
+target_modules: ["bridge"]
+relations:
+  closes_dw:
+    - DW-closed
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    let engine = TransitionEngine::new();
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "done".to_string(),
+        justification: None,
+        author: Author::new("human", "simon"),
+        if_version: None,
+    };
+
+    let payload = engine.transition(&opts).unwrap();
+    assert_eq!(payload.to_status, "done");
+    assert!(
+        payload.closed_dw.is_empty(),
+        "a DW someone else closed must not be reported as newly closed"
+    );
+
+    let dw_content = fs::read_to_string(tmp.path().join("docs/state/dw/DW-closed.md")).unwrap();
+    assert!(dw_content.contains("resolution: E12S1"));
+    assert!(dw_content.contains("version: 3"));
+}
+
+#[test]
+fn test_terminal_jump_to_abandoned_records_decision_and_scratchpad() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+    populate_cache_for_story(tmp.path(), "E12S4", "review");
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: CoreResponse Buffer Layout
+status: review
+version: 3
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- Buffers round-trip.
+"#,
+    );
+
+    let engine = TransitionEngine::new();
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "abandoned".to_string(),
+        justification: Some("Superseded by the rewrite".to_string()),
+        author: Author::new("human", "simon"),
+        if_version: None,
+    };
+
+    let payload = engine.transition(&opts).unwrap();
+    assert_eq!(payload.to_status, "abandoned");
+
+    // The reason a story was killed must survive the command that killed it.
+    let dec_id = payload
+        .decision_id
+        .expect("a terminal jump must record its justification");
+    assert!(dec_id.starts_with("DEC-"));
+
+    let dec_file = tmp
+        .path()
+        .join(format!("docs/state/decisions/{}.md", dec_id));
+    let dec_content = fs::read_to_string(&dec_file).unwrap();
+    let dec_frontmatter = qdev_core::extract_frontmatter(&dec_content).unwrap();
+    assert_eq!(dec_frontmatter["decision_type"], "story_abandoned");
+    assert_eq!(dec_frontmatter["subject_id"], "E12S4");
+    assert_eq!(dec_frontmatter["ruling"], "Superseded by the rewrite");
+    assert_eq!(dec_frontmatter["context"], "review -> abandoned");
+    assert_eq!(dec_frontmatter["title"], "Story E12S4 abandoned");
+    assert!(dec_content.contains("Transition: review -> abandoned"));
+
+    qdev_core::validate_value_detailed(EntityKind::Decision, &dec_frontmatter)
+        .expect("a terminal-jump record must satisfy the decision schema");
+
+    // Cache rows exist, which also proves the widened `decisions.decision_type` CHECK accepted
+    // the new value.
+    let cache_db = tmp.path().join(".qdev/cache/cache.sqlite");
+    let store = SqliteStore::open(&cache_db).unwrap();
+    let dec_rec = store
+        .get_decision(&dec_id)
+        .unwrap()
+        .expect("Decision record must exist in cache");
+    assert_eq!(dec_rec.decision_type.as_deref(), Some("story_abandoned"));
+
+    let scratch_entries = store.get_scratchpad_entries("E12S4").unwrap();
+    assert_eq!(scratch_entries.len(), 1);
+    assert_eq!(scratch_entries[0].kind.as_deref(), Some("transition"));
+    assert_eq!(
+        scratch_entries[0].text.as_deref(),
+        Some("Superseded by the rewrite")
+    );
+}
+
+#[test]
+fn test_terminal_jump_to_superseded_records_story_superseded_decision() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    // No cache: the record still lands on disk, and `superseded` is its own kind of ruling.
+    write_story_file(
+        tmp.path(),
+        "E12S5",
+        r#"---
+id: E12S5
+title: Replaced approach
+status: draft
+version: 1
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    let engine = TransitionEngine::new();
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S5".to_string(),
+        target_status: "superseded".to_string(),
+        justification: Some("Story 2.9 does this instead".to_string()),
+        author: Author::new("human", "simon"),
+        if_version: None,
+    };
+
+    let payload = engine.transition(&opts).unwrap();
+    assert_eq!(payload.to_status, "superseded");
+
+    let dec_id = payload
+        .decision_id
+        .expect("a terminal jump must record its justification");
+    let dec_content = tmp
+        .path()
+        .join(format!("docs/state/decisions/{}.md", dec_id));
+    let content = fs::read_to_string(&dec_content).unwrap();
+    let frontmatter = qdev_core::extract_frontmatter(&content).unwrap();
+    assert_eq!(frontmatter["decision_type"], "story_superseded");
+    assert_eq!(frontmatter["title"], "Story E12S5 superseded");
+}

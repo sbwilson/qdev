@@ -1944,6 +1944,26 @@ pub struct EntityUpdateResult {
 
 /// High-level write path engine orchestrating locking, patching, atomic writes, and cache sync.
 pub fn apply_entity_update(options: &EntityUpdateOptions) -> Result<EntityUpdateResult, QdevError> {
+    apply_entity_update_checked(options, |_fresh_content: &str| Ok(())).map(|(res, _)| res)
+}
+
+/// The [`apply_entity_update`] variant that re-validates the caller's decision under the
+/// write lock.
+///
+/// `revalidate` runs after the advisory write lock is acquired and the entity file is
+/// re-read fresh, and before any patch is applied. Its result value is returned alongside
+/// the update result. Stateful callers (the story transition engine) use this to re-run
+/// their decision against the state that will actually be written: this write path
+/// serializes file I/O, not the caller's decision, so a transition classified from a
+/// pre-lock read would otherwise commit on top of a concurrent commit — e.g. a stale
+/// forward move landing over a terminal story state, with both commands reporting success.
+pub fn apply_entity_update_checked<R, F>(
+    options: &EntityUpdateOptions,
+    revalidate: F,
+) -> Result<(EntityUpdateResult, R), QdevError>
+where
+    F: FnOnce(&str) -> Result<R, QdevError>,
+{
     options.author.validate()?;
 
     // Verify that at least one modification is requested
@@ -2013,6 +2033,10 @@ pub fn apply_entity_update(options: &EntityUpdateOptions) -> Result<EntityUpdate
             ),
         )
     })?;
+
+    // 3a. Re-validate the caller's decision against the state under the lock, before any
+    // patch is applied (no-op for the plain `apply_entity_update` wrapper).
+    let revalidated = revalidate(&existing_content)?;
 
     // The version this reports must be the one `patch_frontmatter` fenced and bumped against, so
     // it comes from the same reader — see `frontmatter_version`. Reading it a second way here
@@ -2168,15 +2192,18 @@ pub fn apply_entity_update(options: &EntityUpdateOptions) -> Result<EntityUpdate
         store.upsert_deferred_work(&dw_record)?;
     }
 
-    Ok(EntityUpdateResult {
-        id: canonical_id,
-        kind,
-        path: file_path,
-        rel_path,
-        old_version,
-        new_version,
-        updated_frontmatter,
-    })
+    Ok((
+        EntityUpdateResult {
+            id: canonical_id,
+            kind,
+            path: file_path,
+            rel_path,
+            old_version,
+            new_version,
+            updated_frontmatter,
+        },
+        revalidated,
+    ))
 }
 
 /// Derives the `stories` table detail fields (`epic_id`, `seq`, `appetite`, `safety_class`,

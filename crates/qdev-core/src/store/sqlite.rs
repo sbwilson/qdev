@@ -19,6 +19,12 @@ use crate::store::{
 };
 use crate::write::Author;
 
+// v4 widens `decisions.decision_type` to allow `story_abandoned` and `story_superseded`, the
+// records a terminal story transition now writes. That CHECK lives in the table definition, so
+// a v3 cache keeps the old list and would reject a `story_*` row no matter which binary opens
+// it: bumping the stamp makes `ensure_cache` rebuild the cache on first open instead of
+// writing through a constraint it no longer honours.
+//
 // v3 widened the `findings` primary key from (path, code) to (path, code, message_key): the
 // narrower key silently collapsed a path's several dangling relations, or its membership in
 // two disjoint dependency cycles, down to whichever row was written last. A v2 cache is
@@ -30,7 +36,7 @@ use crate::write::Author;
 // owned nor safe to write. Cache validity is `user_version` plus the table-presence and column
 // checks in `inspect_cache_schema`. A second version dimension, if ever wanted, belongs in
 // `sync_meta` as an ordinary row.
-pub const CACHE_SCHEMA_VERSION: u32 = 3;
+pub const CACHE_SCHEMA_VERSION: u32 = 4;
 pub const BUSY_TIMEOUT_MS: u64 = 5000;
 
 pub const ALL_TABLE_NAMES: &[&str] = &[
@@ -115,7 +121,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     id TEXT PRIMARY KEY,
     subject_id TEXT NOT NULL,
     decision_type TEXT CHECK(decision_type IN
-      ('human_ruling','agent_assumption','cross_team_override','pivot','review_rejection','lease_override')),
+      ('human_ruling','agent_assumption','cross_team_override','pivot','review_rejection','lease_override','story_abandoned','story_superseded')),
     topic TEXT,
     context TEXT,
     ruling TEXT,

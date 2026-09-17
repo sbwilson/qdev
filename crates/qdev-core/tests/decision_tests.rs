@@ -130,6 +130,8 @@ fn test_valid_decision_types_constant() {
             "pivot",
             "review_rejection",
             "lease_override",
+            "story_abandoned",
+            "story_superseded",
         ]
     );
 }
@@ -191,19 +193,27 @@ fn test_happy_path_manual_decision_logging() {
 
     validate_value_detailed(EntityKind::Decision, &fm).expect("Schema validation passes");
 
-    assert!(file_content.contains("# Buffer sizing\n\nContext: Decision on E12S4\n\nFixed 4 MB pool\n"));
+    assert!(
+        file_content.contains("# Buffer sizing\n\nContext: Decision on E12S4\n\nFixed 4 MB pool\n")
+    );
 
     // 4. Verify SQLite cache synchronization
     let cache_db = root.join(".qdev/cache/cache.sqlite");
     let store = SqliteStore::open(&cache_db).unwrap();
 
-    let entity = store.get_entity(&payload.id).unwrap().expect("entity record indexed");
+    let entity = store
+        .get_entity(&payload.id)
+        .unwrap()
+        .expect("entity record indexed");
     assert_eq!(entity.id, payload.id);
     assert_eq!(entity.kind, EntityKind::Decision);
     assert_eq!(entity.title.as_deref(), Some("Buffer sizing"));
     assert_eq!(entity.status.as_deref(), Some("active"));
 
-    let dec_record = store.get_decision(&payload.id).unwrap().expect("decision record indexed");
+    let dec_record = store
+        .get_decision(&payload.id)
+        .unwrap()
+        .expect("decision record indexed");
     assert_eq!(dec_record.id, payload.id);
     assert_eq!(dec_record.subject_id, "E12S4");
     assert_eq!(dec_record.decision_type.as_deref(), Some("human_ruling"));
@@ -345,7 +355,9 @@ fn test_invalid_decision_type_rejected() {
     let err = log_decision(root, Some(&storage), &input).unwrap_err();
     assert_eq!(err.code(), "usage_error");
     assert_eq!(err.exit_code(), qdev_core::ExitCode::UsageError);
-    assert!(err.message().contains("Invalid decision type 'invalid_type'"));
+    assert!(err
+        .message()
+        .contains("Invalid decision type 'invalid_type'"));
 }
 
 #[test]
