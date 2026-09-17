@@ -3,8 +3,10 @@
 //! A *chore* is a trivial change that belongs to no story: `qdev chore start` records a title and
 //! the path globs the change is confined to, and `qdev chore commit` stages and commits **only**
 //! what falls under those globs, then records the chore as a `DEC-` of type `human_ruling`.
+//! `qdev chore list` shows the records, and `qdev chore close` / `qdev chore abort` settle one
+//! that is never going to be committed, so a mistyped allowlist is not a dead end.
 //!
-//! The in-flight record lives in `<qdev>/chores/<id>.json` — gitignored, like `.qdev/leases/`
+//! The in-flight record lives in `<qdev>/chores/<id>.json` — gitignored, like `<qdev>/leases/`
 //! (decision D-1), so nothing outside the declared allowlist ever reaches Git except the `DEC-`
 //! record itself, which is the single permitted exception (decision D-5).
 
@@ -17,11 +19,9 @@ use serde::{Deserialize, Serialize};
 use crate::config::StorageConfig;
 use crate::decision::{log_decision, DecisionInput};
 use crate::errors::QdevError;
+use crate::init::qdev_dir;
 use crate::validate::glob_match;
 use crate::write::{acquire_workspace_write_lock, current_iso8601, write_file_atomic, Author};
-
-/// Directory (relative to the workspace root) holding in-flight chore records.
-const CHORE_DIR: &str = ".qdev/chores";
 
 /// A recorded fast-track change: the declared allowlist and, once committed, where it landed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,7 +31,7 @@ pub struct ChoreRecord {
     pub paths: Vec<String>,
     pub author: Author,
     pub started_at: String,
-    /// `open` until `qdev chore commit` closes it.
+    /// `open` until `qdev chore commit` closes it, or `close`/`abort` settle it without one.
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
@@ -40,6 +40,13 @@ pub struct ChoreRecord {
     /// Where that ruling was written, so a retry after a failed commit reuses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_path: Option<String>,
+    /// When `close`/`abort` settled the chore, who did it, and the reason they gave.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_by: Option<Author>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// A changed path that the allowlist did not cover, with whether it was sitting in the index.
@@ -84,13 +91,34 @@ pub struct CommitChoreInput<'a> {
     pub strict: bool,
 }
 
-/// The directory holding chore records, relative to `workspace_root`.
-pub fn chore_dir(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(CHORE_DIR)
+/// Inputs to [`close_chore`] and [`abort_chore`], which share everything but the outcome.
+#[derive(Debug, Clone)]
+pub struct FinishChoreInput<'a> {
+    pub workspace_root: &'a Path,
+    pub storage: Option<&'a StorageConfig>,
+    /// Why the chore is being settled without a commit, if the caller gave a reason.
+    pub reason: Option<String>,
+    /// Whoever settles a chore is usually not whoever started it.
+    pub author: Author,
 }
 
-/// Persists a chore record to `.qdev/chores/<id>.json`.
-fn write_record(root: &Path, record: &ChoreRecord) -> Result<(), QdevError> {
+/// The directory holding chore records, relative to `workspace_root`.
+///
+/// Derived from the configured `cache_dir` — the same rule `qdev init` uses to create and
+/// gitignore `<qdev>/chores` — so a workspace that relocated its cache keeps its records in
+/// gitignored space, which is what decision D-1 promises. No config means the default layout.
+pub fn chore_dir(workspace_root: &Path, storage: Option<&StorageConfig>) -> PathBuf {
+    let default_storage = StorageConfig::default();
+    let st = storage.unwrap_or(&default_storage);
+    workspace_root.join(qdev_dir(st)).join("chores")
+}
+
+/// Persists a chore record to `<qdev>/chores/<id>.json`.
+fn write_record(
+    root: &Path,
+    storage: Option<&StorageConfig>,
+    record: &ChoreRecord,
+) -> Result<(), QdevError> {
     let content = serde_json::to_string_pretty(record).map_err(|e| {
         QdevError::infrastructure_failure(
             "serialization_error",
@@ -98,7 +126,7 @@ fn write_record(root: &Path, record: &ChoreRecord) -> Result<(), QdevError> {
         )
     })?;
     write_file_atomic(
-        &chore_dir(root).join(format!("{}.json", record.id)),
+        &chore_dir(root, storage).join(format!("{}.json", record.id)),
         &content,
     )
 }
@@ -139,8 +167,11 @@ pub fn derive_chore_id(title: &str) -> String {
 /// Lists every recorded chore in the workspace, by id. Records that fail to parse are skipped
 /// rather than failing the whole listing — the same tolerance [`crate::lease::find_workspace_leases`]
 /// shows, so one corrupt file cannot hide every other chore.
-pub fn list_chore_records(workspace_root: &Path) -> Result<Vec<ChoreRecord>, QdevError> {
-    let dir = chore_dir(workspace_root);
+pub fn list_chore_records(
+    workspace_root: &Path,
+    storage: Option<&StorageConfig>,
+) -> Result<Vec<ChoreRecord>, QdevError> {
+    let dir = chore_dir(workspace_root, storage);
     let mut records = Vec::new();
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -160,8 +191,11 @@ pub fn list_chore_records(workspace_root: &Path) -> Result<Vec<ChoreRecord>, Qde
 
 /// The one open chore, if any. Records that failed to parse are skipped, exactly as
 /// [`crate::lease::find_workspace_leases`] skips an unreadable lease.
-pub fn find_open_chore(workspace_root: &Path) -> Result<Option<ChoreRecord>, QdevError> {
-    Ok(list_chore_records(workspace_root)?
+pub fn find_open_chore(
+    workspace_root: &Path,
+    storage: Option<&StorageConfig>,
+) -> Result<Option<ChoreRecord>, QdevError> {
+    Ok(list_chore_records(workspace_root, storage)?
         .into_iter()
         .find(|r| r.status == "open"))
 }
@@ -198,7 +232,7 @@ pub fn start_chore(input: &StartChoreInput) -> Result<ChoreRecord, QdevError> {
     // otherwise both see no open record and the second would overwrite the first's file.
     let _lock = acquire_workspace_write_lock(root, input.storage)?;
 
-    if let Some(open) = find_open_chore(root)? {
+    if let Some(open) = find_open_chore(root, input.storage)? {
         return Err(QdevError::conflict(
             "chore_in_progress",
             format!(
@@ -211,28 +245,25 @@ pub fn start_chore(input: &StartChoreInput) -> Result<ChoreRecord, QdevError> {
     // Every lease in this worktree blocks a new chore, so all of them are named — picking one
     // out of a set would point at a story this worktree may not even be working on.
     let leases = crate::lease::find_workspace_leases(root)?;
-    if !input.alongside {
-        if let Some(first) = leases.first() {
-            let named: Vec<String> = leases
-                .iter()
-                .map(|l| format!("{} (held by {})", l.story_id, l.holder))
-                .collect();
-            let _ = first;
-            return Err(QdevError::policy_refusal(
-                "lease_held",
-                format!(
-                    "This worktree holds a story lease on {}; pass --alongside to start a chore \
-                     alongside it",
-                    named.join(", ")
-                ),
-            ));
-        }
+    if !input.alongside && !leases.is_empty() {
+        let named: Vec<String> = leases
+            .iter()
+            .map(|l| format!("{} (held by {})", l.story_id, l.holder))
+            .collect();
+        return Err(QdevError::policy_refusal(
+            "lease_held",
+            format!(
+                "This worktree holds a story lease on {}; pass --alongside to start a chore \
+                 alongside it",
+                named.join(", ")
+            ),
+        ));
     }
 
     let slug = derive_chore_id(title);
     // An id already on disk — from an earlier chore with the same title — stays as history: take
     // the next free `-2`, `-3`, … rather than overwriting the old record.
-    let dir = chore_dir(root);
+    let dir = chore_dir(root, input.storage);
     let mut id = slug.clone();
     let mut attempt = 2;
     while dir.join(format!("{}.json", id)).exists() {
@@ -249,9 +280,12 @@ pub fn start_chore(input: &StartChoreInput) -> Result<ChoreRecord, QdevError> {
         commit: None,
         decision_id: None,
         decision_path: None,
+        closed_at: None,
+        closed_by: None,
+        reason: None,
     };
 
-    write_record(root, &record)?;
+    write_record(root, input.storage, &record)?;
     Ok(record)
 }
 
@@ -353,7 +387,7 @@ pub fn commit_chore(input: &CommitChoreInput) -> Result<ChoreCommitResult, QdevE
     // No write lock is taken here: `log_decision` below acquires the same lock, and holding it
     // across that call would time out. `start_chore` holds it, which is where the
     // check-then-write of a new record actually happens.
-    let record = match find_open_chore(root)? {
+    let record = match find_open_chore(root, input.storage)? {
         Some(record) => record,
         None => {
             return Err(QdevError::usage_error_with_code(
@@ -455,7 +489,7 @@ pub fn commit_chore(input: &CommitChoreInput) -> Result<ChoreCommitResult, QdevE
             };
             // Persisted before the commit is attempted, so a retry finds the ruling already
             // written instead of logging a second one.
-            write_record(root, &with_decision)?;
+            write_record(root, input.storage, &with_decision)?;
             (payload.id, payload.path)
         }
     };
@@ -483,7 +517,7 @@ pub fn commit_chore(input: &CommitChoreInput) -> Result<ChoreCommitResult, QdevE
         decision_path: Some(decision.1.clone()),
         ..record.clone()
     };
-    write_record(root, &closed)?;
+    write_record(root, input.storage, &closed)?;
 
     Ok(ChoreCommitResult {
         chore_id: record.id.clone(),
@@ -494,6 +528,64 @@ pub fn commit_chore(input: &CommitChoreInput) -> Result<ChoreCommitResult, QdevE
         decision_id: Some(decision.0),
         decision_path: Some(decision.1),
     })
+}
+
+/// Settles the open chore without a commit, under `status` (`closed` or `abandoned`).
+///
+/// This is the way out of a chore whose allowlist was wrong, or whose work turned out not to
+/// be worth doing: without it the record stays `open` forever, `nothing_to_commit` blocks the
+/// commit, and every later `chore start` is refused with `chore_in_progress`. Only the first
+/// open record is settled per call — more than one exists only if someone hand-created a
+/// second, and running the command again takes the next one.
+fn finish_chore(input: &FinishChoreInput, status: &str) -> Result<ChoreRecord, QdevError> {
+    let root = input.workspace_root;
+    input.author.validate()?;
+
+    // The same lock `start_chore` takes: checking for an open record and settling it must not
+    // race a second `chore close`, or both settle the same chore and the second write
+    // overwrites the first with a different reason.
+    let _lock = acquire_workspace_write_lock(root, input.storage)?;
+
+    let record = match find_open_chore(root, input.storage)? {
+        Some(record) => record,
+        None => {
+            return Err(QdevError::usage_error_with_code(
+                "no_active_chore",
+                "No open chore found; start one with `qdev chore start` first",
+            ));
+        }
+    };
+
+    // The record stays on disk as history, exactly as a re-used title keeps its earlier record:
+    // `qdev chore list` is how anyone sees what this workspace decided to skip.
+    let settled = ChoreRecord {
+        status: status.to_string(),
+        closed_at: Some(current_iso8601()),
+        closed_by: Some(input.author.clone()),
+        reason: input
+            .reason
+            .as_ref()
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty()),
+        ..record.clone()
+    };
+    write_record(root, input.storage, &settled)?;
+    Ok(settled)
+}
+
+/// Marks the open chore `closed`: its work was finished some other way, or deliberately
+/// stopped. No `DEC-` is written — only `qdev chore commit` records a ruling (D-5).
+///
+/// The story's rationale is that a chore belongs to no story, so a settled one is a local
+/// bookkeeping fact, not a decision anyone else has to be told about.
+pub fn close_chore(input: &FinishChoreInput) -> Result<ChoreRecord, QdevError> {
+    finish_chore(input, "closed")
+}
+
+/// Marks the open chore `abandoned`: the work is not happening. Same contract as
+/// [`close_chore`], a different outcome for whoever reads `qdev chore list` later.
+pub fn abort_chore(input: &FinishChoreInput) -> Result<ChoreRecord, QdevError> {
+    finish_chore(input, "abandoned")
 }
 
 /// Stages exactly the given paths. Nothing else is touched, so work that was already in the

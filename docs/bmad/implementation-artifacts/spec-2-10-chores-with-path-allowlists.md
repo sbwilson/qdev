@@ -58,6 +58,11 @@ context:
 | DEC record outside the allowlist | Allowlist is `README.md` only | `docs/state/decisions/DEC-xxxx.md` is still staged and committed with the change | N/A |
 | Malformed/empty glob list | `chore start "t"` with no `--paths` | Exit 2 `paths_required` | Nothing recorded |
 | Untracked file under the allowlist | New `docs/new.md` matching `docs/**` | Staged and committed | N/A |
+| Settle a chore that never gets committed | `chore start "docs left untouched" --paths 'docs/ghost.*'`; `chore commit` → `nothing_to_commit`; `chore close --reason "superseded by a real story"`; `chore start "second attempt" --paths README.md` | Record `status: "closed"` with the reason; the second chore starts, exit 0 | N/A (D-6) |
+| Abandon a chore | `chore abort --reason "not worth the time" --author-type agent --author-id bot-9` | Record `status: "abandoned"`, `closed_by: {type: agent, id: bot-9}`; no commit, no `DEC-`; slot freed | N/A (D-6) |
+| Settle with nothing open | `chore close` / `chore abort` with no open record | Nothing recorded | Exit 2 `no_active_chore` (D-6) |
+| List records | `chore list` with two settled records | Both printed with status and reason; `--json` returns `chores: [ … ]` plus `record_dir` | An empty listing is success, not an error (D-6) |
+| Relocated cache dir | `qdev.toml` with `cache_dir = "var/qdev-cache"`; `qdev init`; `chore start …` | Record at `var/chores/<id>.json`, gitignored there exactly as `init` set it up | `git status` never lists a record (D-7) |
 
 ## Decisions
 
@@ -68,6 +73,9 @@ _Resolved during planning; recorded here so implementation does not re-open them
 - **D-3 (was OQ-3) — nothing under the allowlist changed is a failure.** Exit 1, code `nothing_to_commit` (`LogicalFailure`), and no `DEC-` record is written. Covers all three shapes: the globs match no changed file, the only changes sit outside the allowlist, or an allowlisted file was deleted.
 - **D-4 (was OQ-4) — pathspec commit, loud exclusion; committing closes the chore.** Stage and commit only the allowlisted set with `git commit -- <paths…>`; never `git reset` or otherwise repair the index for anything else. A change already staged before the command ran therefore stays staged, so it must print under `NOT INCLUDED — still staged:` and appear in the JSON payload as `{path, staged: true}` — impossible to skim past, because the next `git commit` by anyone picks it up. "Change" means anything `git status --porcelain` reports, so `--strict` also refuses a staged-only change (exit 3). After a successful commit the chore is closed, so re-running `qdev chore commit` gives `no_active_chore` (exit 2) instead of re-committing or a confusing exit 1.
 - **D-5 (was OQ-5) — the `DEC-` record is committed as the single exception to the allowlist.** `docs/state/decisions/DEC-xxxx.md` is staged and included in the commit even when no declared glob covers it, so the audit trail lands in Git like every other `DEC-`/`DW-` record. This is the **only** permitted exception, and under `--strict` the record is not counted as an out-of-allowlist change.
+
+- **D-6 (added at the reviewer's direction, 2026-09-18) — `qdev chore list`, `qdev chore close`, and `qdev chore abort` exist so a chore that is never going to be committed can still be settled.** Without them a mistyped glob was a dead end: `commit` refused with `nothing_to_commit` (D-3), the record stayed `open`, and every later `chore start` was refused with `chore_in_progress` — the only escape was deleting the record file by hand, which no command mentioned. `close` records the work as finished some other way (`status: "closed"`), `abort` as not happening (`status: "abandoned"`). Both keep the record on disk as history, free the slot for the next chore, and write **no** `DEC-` — only `commit` records a ruling (D-5). `list` shows every record with its status, so skipped work stays visible instead of vanishing.
+- **D-7 (added at the reviewer's direction, 2026-09-18) — the record directory follows the configured `cache_dir`, not a hardcoded `.qdev`.** `init` derives `<qdev>/chores` from `storage.cache_dir` and gitignores that path, so `chore_dir` must derive the same path from the `StorageConfig` it is handed. With `cache_dir = "var/qdev-cache"` the record belongs in `var/chores/`; writing it to `.qdev/chores` left it in git-visible space, in a directory nothing created — breaking the one guarantee D-1 exists to provide. `init`'s layout rule is now a shared `qdev_dir(storage)` rather than a copy in two places.
 
 </frozen-after-approval>
 
@@ -101,6 +109,11 @@ _Resolved during planning; recorded here so implementation does not re-open them
 - [x] `crates/qdev-core/tests/chore_tests.rs` — Unit tests: glob matching (`**`, plain dir, repeated globs), allowlist selection over `git status`, decision-record contents, and the nothing-under-allowlist case (D-3). No hygiene test — D-2.
 - [x] `crates/qdev-cli/tests/chore_cli_tests.rs` — Integration tests against a real `git init` fixture: happy path with one excluded path, `--strict` exit 3, lease refusal without `--alongside`, `--alongside` success, commit contents verified with `git show --stat`, the `DEC-` record committed outside the allowlist (D-5), a pre-staged out-of-allowlist change reported but left staged (D-4), and `no_active_chore` after a successful commit.
 - [x] `crates/qdev-cli/tests/schema_payload_cli_tests.rs` — Add the `payload-chore.json` round-trip and confirm the invariant test covers `chore`.
+- [x] `crates/qdev-core/src/chore.rs` — (post-review) Take the configured `StorageConfig` in `chore_dir`/`list_chore_records`/`find_open_chore`, and add `close_chore`/`abort_chore` with `FinishChoreInput` (D-6, D-7).
+- [x] `crates/qdev-core/src/init.rs` — (post-review) Share one `qdev_dir(storage)` rule between `InitLayout` and the record directory (D-7).
+- [x] `crates/qdev-cli/src/cli.rs` + `crates/qdev-cli/src/main.rs` — (post-review) Add `List`, `Close`, `Abort` subcommands and their handlers, including the record directory in `list` output (D-6).
+- [x] `crates/qdev-core/schemas/payload-chore.json` — (post-review) Add the list shape and the `closed`/`abandoned` statuses; the record shape is defined once in `definitions` and reused (D-6).
+- [x] `crates/qdev-core/tests/chore_tests.rs` + `crates/qdev-cli/tests/chore_cli_tests.rs` — (post-review) Cover the closed loop (wedge → `close` → start again), `abort` attribution, settling with nothing open, and a relocated cache dir.
 
 **Acceptance Criteria:**
 - Given `chore start "fix readme typo" --paths README.md "docs/**"` with `README.md` and `src/main.rs` modified, when running `qdev chore commit`, then only the `README.md` change is committed, `src/main.rs` is listed as excluded, and the command exits 0.
@@ -109,6 +122,9 @@ _Resolved during planning; recorded here so implementation does not re-open them
 - Given a successful `chore commit`, when running `qdev chore commit` again, then it exits 2 with `no_active_chore` — committing closes the chore (D-4).
 - Given a successful `chore commit`, then a `DEC-` record exists with `decision_type: 'human_ruling'`, `topic: 'chore'`, and the declared paths, that record is in the commit even when outside the allowlist (D-5), and no story file or story state changed.
 - Given this worktree holds a lease on `E12S4`, when running `qdev chore start` without `--alongside`, then the start is refused naming `E12S4`; with `--alongside` it succeeds and the lease is unchanged.
+- Given a chore whose allowlist matches nothing, when running `qdev chore close` (or `abort`), then the record is settled (`closed` / `abandoned`), a later `qdev chore start` succeeds, and `qdev chore list` still shows the settled record (D-6).
+- Given no open chore, when running `qdev chore close` or `qdev chore abort`, then the command exits 2 with `no_active_chore` and records nothing (D-6).
+- Given a workspace whose `cache_dir` is relocated, when starting a chore, then its record is written under the configured cache directory and never appears in `git status` (D-7).
 
 ## Implementation Notes
 
@@ -124,6 +140,11 @@ Done as specified; two places where the implementation had to decide something t
 - Paths under `.qdev/` are filtered out of the change set. Without that, the chore's own record file (and cache/lease churn) counts as an out-of-allowlist change, and `--strict` would refuse any commit in a workspace that somehow lost its `.gitignore`.
 - Record ids are not `Identifier` values, so `log_decision` is called with `validate_subject: false` — a chore record is not an entity, and `qdev get <chore-id>` cannot resolve one (D-1).
 
+**Added at the reviewer's direction after the first review (2026-09-18):**
+- `list`/`close`/`abort` exist because D-3 plus the one-open-chore rule made a wrong glob a dead end. `close` and `abort` keep the record as history and write no `DEC-` — a settled chore is local bookkeeping, not a ruling anyone else has to be told about (D-6).
+- `chore_dir`, `list_chore_records`, `find_open_chore`, and both input structs now carry/derive from `StorageConfig`, so the record directory is wherever the configured cache says it is. `init` creates and gitignores that same path, so `git status` never sees a record — including with `cache_dir = "var/qdev-cache"`, which is now tested (D-7).
+- `payload-chore.json` puts the record and commit shapes in `definitions` and reuses them, so the `list` shape (`{ chores: [ … ], record_dir }`) does not restate the record. `status` gained `closed` and `abandoned`; `closed_by` reuses the same author shape.
+
 **Added in the review cycle (all `patch` rows in the triage log):**
 - The `DEC-` a failed attempt wrote is now recorded in the chore record and reused, instead of a fresh ruling per attempt — and its path is excluded from the change set, so it can neither be counted out of the allowlist nor wedge `--strict`.
 - `--author-type`/`--author-id` at commit time reach the decision record; previously the start-time author was always used.
@@ -133,7 +154,10 @@ Done as specified; two places where the implementation had to decide something t
 
 ## Spec Change Log
 
-_(empty until the first review loopback)_
+| Date | Source | What was flagged | What changed |
+|------|--------|------------------|--------------|
+| 2026-09-18 | reviewer (walkthrough) | A wrong allowlist was a dead end: `commit` → `nothing_to_commit` (D-3), the record stayed `open`, every later `start` → `chore_in_progress`, and no command could list or settle it | Added D-6 — `chore list`, `chore close`, `chore abort`; implemented with tests, and the matrix gained rows for each |
+| 2026-09-18 | reviewer (walkthrough) | `chore_dir` hardcoded `.qdev/chores` while `init` derives `<qdev>/chores` from `cache_dir`; with a relocated cache the record was git-visible, breaking the D-1 guarantee | Added D-7 — derive the record directory from the configured `StorageConfig`, sharing `init`'s `qdev_dir` rule; verified against `cache_dir = "var/qdev-cache"` |
 
 ## Review Triage Log
 
@@ -166,6 +190,13 @@ _Review 1 (three layers, `baseline_commit: ccd00a2`). One row per finding; verdi
 
 **No `intent_gap` or `bad_spec` entries: nothing here required re-opening the frozen intent, so there was no loopback.** All `patch` rows are implemented; row 7 is recorded in `docs/bmad/implementation-artifacts/deferred-work.md`; rows 3, 9, 12, 14, 16, 18, 20 are rejected with their refutations.
 
+_Review 2 (walkthrough, after implementation and approval). The two entries the reviewer raised were agreed by the story owner and implemented the same day; both were reproducible against the built binary._
+
+| ID | Source | Location | Description | Verdict | Evidence | Route |
+|---|--------|----------|-----------|---------|----------|-------|
+| W-1 | reviewer (walkthrough) | `crates/qdev-core/src/chore.rs:24`, `crates/qdev-cli/src/cli.rs:93` | Nothing could list or close a chore: a record with a mistyped glob stayed `open` forever, so `commit` gave `nothing_to_commit` and every later `start` gave `chore_in_progress` | agreed — added | Ran against the built binary: `start` with `--paths 'docs/ghost.*'` → `commit` exit 1 `nothing_to_commit` → `start` exit 5 `chore_in_progress`, with only `start`/`commit` in `chore --help` | patch — fixed: added `list`, `close`, `abort` (D-6), with core and CLI tests for the whole loop |
+| W-2 | reviewer (walkthrough) | `crates/qdev-core/src/chore.rs:24` vs `crates/qdev-core/src/init.rs:118` | `CHORE_DIR` was hardcoded while `init` derived the directory from `cache_dir`; a relocated cache left the record in git-visible space (already deferred, re-confirmed as real) | agreed — deferred item still open, now fixed | After `qdev init` with `cache_dir = "var/qdev-cache"`, `.gitignore` listed `var/chores/` and the record was written to `.qdev/chores/chore-relocated.json`, shown as `?? .qdev/` by `git status` | patch — fixed: `chore_dir` derives from the configured `StorageConfig` (D-7); `deferred-work.md` entry closed |
+
 ## Design Notes
 
 Selection algorithm, as built: get every changed path from `git status --porcelain=v1 -z --untracked-files=all` (modified, staged, **and** untracked — untracked files under the allowlist must still be committable; for a rename or copy both endpoints are offered to the allowlist, so a renamed file cannot escape it by changing names); partition it by `any(glob_match(g, path))` over the declared globs; commit the matched set with an explicit pathspec (`git commit -- <paths…>`), leaving everything else exactly as it was — which is what `--strict` exists to enforce and what D-4 settles for already-staged work.
@@ -175,8 +206,8 @@ Commit message: use the chore title, prefixed `chore: `, with the declared globs
 ## Verification
 
 **Commands:**
-- `cargo test --test chore_tests` — expected: glob matching, allowlist partitioning, and decision-record tests pass (no hygiene lint — D-2).
-- `cargo test --test chore_cli_tests` — expected: end-to-end start/commit against a real git repo, including `--strict`, lease gating, and `git show --stat` proof of commit contents.
+- `cargo test --test chore_tests` — expected: glob matching, allowlist partitioning, decision-record tests, `close`/`abort` freeing the slot, and the configured-cache-dir case (no hygiene lint — D-2).
+- `cargo test --test chore_cli_tests` — expected: end-to-end start/commit against a real git repo, including `--strict`, lease gating, `git show --stat` proof of commit contents, and the whole wedge → `close` → start-again loop.
 - `cargo test --test schema_payload_cli_tests` — expected: `payload-chore.json` round-trips and the `PayloadKind::all()` invariant test includes `chore`.
 - `cargo test --test workspace_guard_cli_tests` — expected: both chore commands are refused outside an initialized workspace.
 - `cargo test --workspace` — expected: full suite green.

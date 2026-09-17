@@ -1,12 +1,13 @@
 //! Unit tests for the Story 2.10 chore module: allowlist derivation, glob selection over real
-//! `git status` output, the `DEC-` record, and the decided edge cases (D-1 … D-5).
+//! `git status` output, the `DEC-` record, the decided edge cases (D-1 … D-5), and the ways a
+//! chore that never gets committed can still be settled.
 
 use std::fs;
 use std::path::Path;
 
 use qdev_core::chore::{
-    commit_chore, derive_chore_id, find_open_chore, list_chore_records, start_chore,
-    CommitChoreInput, StartChoreInput,
+    abort_chore, chore_dir, close_chore, commit_chore, derive_chore_id, find_open_chore,
+    list_chore_records, start_chore, CommitChoreInput, FinishChoreInput, StartChoreInput,
 };
 use qdev_core::config::StorageConfig;
 use qdev_core::decision::{log_decision, DecisionInput};
@@ -79,6 +80,26 @@ fn commit(root: &Path, strict: bool) -> Result<qdev_core::ChoreCommitResult, qde
         author: author(),
         strict,
     })
+}
+
+/// Settles the open chore: `abort` when `abandon` is set, `close` otherwise.
+fn finish(
+    root: &Path,
+    abandon: bool,
+    reason: Option<&str>,
+) -> Result<qdev_core::ChoreRecord, qdev_core::QdevError> {
+    let storage = StorageConfig::default();
+    let input = FinishChoreInput {
+        workspace_root: root,
+        storage: Some(&storage),
+        reason: reason.map(|r| r.to_string()),
+        author: author(),
+    };
+    if abandon {
+        abort_chore(&input)
+    } else {
+        close_chore(&input)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +185,7 @@ fn start_without_paths_is_a_usage_error() {
     assert_eq!(err.code(), "paths_required");
     assert_eq!(err.exit_code(), qdev_core::ExitCode::UsageError);
     assert_eq!(
-        find_open_chore(root).unwrap(),
+        find_open_chore(root, Some(&StorageConfig::default())).unwrap(),
         None,
         "a refused start must record nothing"
     );
@@ -336,7 +357,7 @@ fn nothing_under_the_allowlist_changed_fails_and_records_nothing() {
     assert_eq!(err.code(), "nothing_to_commit");
     assert_eq!(err.exit_code(), qdev_core::ExitCode::LogicalFailure);
 
-    let records = list_chore_records(root).unwrap();
+    let records = list_chore_records(root, Some(&StorageConfig::default())).unwrap();
     assert_eq!(records.len(), 1, "the chore record stays for the retry");
     let decisions = fs::read_dir(root.join("docs/state/decisions"))
         .unwrap()
@@ -421,9 +442,9 @@ fn commit_closes_the_chore_so_rerun_reports_no_active_chore() {
     assert_eq!(err.code(), "no_active_chore");
     assert_eq!(err.exit_code(), qdev_core::ExitCode::UsageError);
 
-    let open = find_open_chore(root).unwrap();
+    let open = find_open_chore(root, Some(&StorageConfig::default())).unwrap();
     assert!(open.is_none(), "the record must be closed, not open");
-    let records = list_chore_records(root).unwrap();
+    let records = list_chore_records(root, Some(&StorageConfig::default())).unwrap();
     assert_eq!(records[0].status, "committed");
     assert!(records[0].commit.is_some(), "the sha is recorded");
 }
@@ -540,7 +561,7 @@ fn a_reused_title_takes_the_next_free_id_and_keeps_the_old_record() {
     // Same title again: the committed record stays as history, the new one takes `-2`.
     let again = start(root, "fix readme typo", &["README.md"]);
     assert_eq!(again.id, "chore-fix-readme-typo-2");
-    let ids: Vec<String> = list_chore_records(root)
+    let ids: Vec<String> = list_chore_records(root, Some(&StorageConfig::default()))
         .unwrap()
         .iter()
         .map(|r| r.id.clone())
@@ -554,7 +575,7 @@ fn a_reused_title_takes_the_next_free_id_and_keeps_the_old_record() {
         "the first record must still be there, closed"
     );
     assert_eq!(
-        list_chore_records(root).unwrap()[0].status,
+        list_chore_records(root, Some(&StorageConfig::default())).unwrap()[0].status,
         "committed",
         "and must not have been reopened"
     );
@@ -652,4 +673,151 @@ fn commit_touches_no_story_state() {
     assert!(fs::read_to_string(root.join("docs/specs/stories/E12S4.md"))
         .unwrap()
         .contains("status: in-progress"));
+}
+
+// ---------------------------------------------------------------------------
+// Settling a chore that is never going to be committed
+// ---------------------------------------------------------------------------
+
+#[test]
+fn closing_a_chore_frees_the_slot_that_nothing_to_commit_had_wedged() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    // The dead end `close` exists for: an allowlist that matches nothing, so `commit` refuses
+    // and — while the record stays open — every later `start` is refused too.
+    start(root, "docs left untouched", &["docs/ghost.*"]);
+    assert_eq!(commit(root, false).unwrap_err().code(), "nothing_to_commit");
+    let stuck = start_chore(&StartChoreInput {
+        workspace_root: root,
+        storage: Some(&StorageConfig::default()),
+        title: "second attempt".to_string(),
+        paths: vec!["README.md".to_string()],
+        author: author(),
+        alongside: false,
+    })
+    .unwrap_err();
+    assert_eq!(stuck.code(), "chore_in_progress");
+
+    let settled = finish(root, false, Some("superseded by a real story")).unwrap();
+    assert_eq!(settled.status, "closed");
+    assert_eq!(
+        settled.reason.as_deref(),
+        Some("superseded by a real story")
+    );
+
+    // The slot is free again, and the settled record is still listed — as history, not as a
+    // wedge.
+    let next = start(root, "second attempt", &["README.md"]);
+    assert_eq!(next.id, "chore-second-attempt");
+
+    let records = list_chore_records(root, Some(&StorageConfig::default())).unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].status, "closed");
+    assert_eq!(records[1].status, "open");
+    assert!(find_open_chore(root, Some(&StorageConfig::default()))
+        .unwrap()
+        .is_some_and(|r| r.id == "chore-second-attempt"));
+}
+
+#[test]
+fn aborting_a_chore_records_it_as_abandoned() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    start(root, "chase a flaky test", &["tests/**"]);
+
+    let settled = finish(root, true, Some("not worth the time")).unwrap();
+    assert_eq!(settled.status, "abandoned");
+    assert_eq!(settled.reason.as_deref(), Some("not worth the time"));
+    assert!(
+        settled.closed_at.is_some(),
+        "when it was settled is recorded"
+    );
+    assert_eq!(
+        settled.closed_by,
+        Some(author()),
+        "and who settled it, which is usually not whoever started it"
+    );
+
+    // A different outcome from `close`, and the same way out of the wedge.
+    assert_eq!(
+        list_chore_records(root, Some(&StorageConfig::default())).unwrap()[0].status,
+        "abandoned"
+    );
+    assert_eq!(
+        start(root, "next small thing", &["README.md"]).id,
+        "chore-next-small-thing"
+    );
+}
+
+#[test]
+fn a_settled_chore_cannot_be_settled_again() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    start(root, "fix readme typo", &["README.md"]);
+    let settled = finish(root, true, None).unwrap();
+    assert!(
+        settled.reason.is_none(),
+        "no reason given is recorded as none, not as a blank excuse"
+    );
+
+    // Nothing is open any more: the same code and exit `commit` gives once the chore is
+    // committed, so a repeated `close` is not mistaken for a second chore.
+    let err = finish(root, false, None).unwrap_err();
+    assert_eq!(err.code(), "no_active_chore");
+    assert_eq!(err.exit_code(), qdev_core::ExitCode::UsageError);
+}
+
+#[test]
+fn records_follow_the_configured_cache_dir() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    // A workspace that relocated its cache: `qdev init` creates and gitignores `var/chores`,
+    // so that is where the record has to land. Writing it to the hardcoded `.qdev/chores`
+    // would put it in git-visible space, in a directory nothing created.
+    let relocated = StorageConfig {
+        cache_dir: "var/qdev-cache".to_string(),
+        ..StorageConfig::default()
+    };
+    assert_eq!(chore_dir(root, Some(&relocated)), root.join("var/chores"));
+
+    let record = start_chore(&StartChoreInput {
+        workspace_root: root,
+        storage: Some(&relocated),
+        title: "relocated record".to_string(),
+        paths: vec!["docs/**".to_string()],
+        author: author(),
+        alongside: false,
+    })
+    .unwrap();
+
+    assert!(root
+        .join("var/chores")
+        .join(format!("{}.json", record.id))
+        .exists());
+    assert!(
+        !root
+            .join(".qdev/chores")
+            .join(format!("{}.json", record.id))
+            .exists(),
+        "and not in the default directory on top of it"
+    );
+    assert_eq!(
+        find_open_chore(root, Some(&relocated))
+            .unwrap()
+            .map(|r| r.id),
+        Some(record.id.clone()),
+        "listing and commit-time lookup must read the configured directory"
+    );
+    assert!(list_chore_records(root, None)
+        .unwrap()
+        .iter()
+        .all(|r| r.id != record.id));
 }

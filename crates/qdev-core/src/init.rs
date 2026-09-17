@@ -86,8 +86,18 @@ impl InitLayout {
     /// `.qdev` in the default layout: the parent of the *project* cache directory, which hosts the
     /// committed gate scripts and the lease files.
     pub fn qdev_dir(&self) -> String {
-        parent_dir_of(trim_dir(&self.project.cache_dir))
+        qdev_dir(&self.project)
     }
+}
+
+/// The `<qdev>` directory that hosts the lease files, the gate scripts, and the chore records —
+/// the parent of a `[storage]` section's `cache_dir`, whatever directory that is.
+///
+/// Commands derive it from the configuration they actually run with, and `init` creates and
+/// gitignores `<qdev>/leases` and `<qdev>/chores` from the same rule, so a relocated
+/// `cache_dir` cannot leave records in git-visible space.
+pub fn qdev_dir(storage: &StorageConfig) -> String {
+    parent_dir_of(trim_dir(&storage.cache_dir))
 }
 
 /// Was `init`'s private normalization of a `[storage]` value. The loader now normalizes once, so

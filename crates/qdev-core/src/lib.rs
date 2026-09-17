@@ -21,8 +21,9 @@ pub mod validate;
 pub mod write;
 
 pub use chore::{
-    chore_dir, commit_chore, derive_chore_id, find_open_chore, list_chore_records, start_chore,
-    ChoreCommitResult, ChoreRecord, CommitChoreInput, ExcludedPath, StartChoreInput,
+    abort_chore, chore_dir, close_chore, commit_chore, derive_chore_id, find_open_chore,
+    list_chore_records, start_chore, ChoreCommitResult, ChoreRecord, CommitChoreInput,
+    ExcludedPath, FinishChoreInput, StartChoreInput,
 };
 
 pub use dw::{
@@ -92,7 +93,7 @@ pub use id::{
     IdentifierKind,
 };
 pub use init::{
-    gitignore_entries, init, standard_directories, verify_cache_compatible, InitLayout,
+    gitignore_entries, init, qdev_dir, standard_directories, verify_cache_compatible, InitLayout,
     InitOptions, InitResult, CACHE_SCHEMA_VERSION, SPEC_SUBDIRECTORIES, STANDARD_DIRECTORIES,
     STATE_SUBDIRECTORIES,
 };

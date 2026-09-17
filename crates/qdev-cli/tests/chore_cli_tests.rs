@@ -665,3 +665,235 @@ fn chore_is_not_an_entity_kind() {
         stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// Settling a chore that is never going to be committed
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_mistyped_allowlist_is_a_way_out_not_a_dead_end() {
+    // The whole reason `close` exists: with an allowlist that matches nothing, `commit` refuses
+    // (`nothing_to_commit`) and every later `start` is refused (`chore_in_progress`) — with
+    // nothing but deleting `.qdev/chores/<id>.json` by hand as the way out.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let (code, stdout) = run(
+        root,
+        &[
+            "chore",
+            "start",
+            "docs left untouched",
+            "--paths",
+            "docs/ghost.*",
+        ],
+    );
+    assert_eq!(code, 0, "got: {}", stdout);
+
+    let (code, stdout) = run(root, &["chore", "commit", "--json"]);
+    assert_eq!(code, 1, "got: {}", stdout);
+    assert!(stdout.contains("nothing_to_commit"), "got: {}", stdout);
+
+    let (code, stdout) = run(
+        root,
+        &[
+            "chore",
+            "start",
+            "second attempt",
+            "--paths",
+            "README.md",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 5, "got: {}", stdout);
+    assert!(stdout.contains("chore_in_progress"), "got: {}", stdout);
+
+    let (code, stdout) = run(
+        root,
+        &[
+            "chore",
+            "close",
+            "--reason",
+            "superseded by a real story",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "got: {}", stdout);
+    let value: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(value["status"], json!("closed"));
+    assert_eq!(value["reason"], json!("superseded by a real story"));
+    // The record shape is the same one `start` returns, so it must still validate.
+    validate_against_schema(&load_schema(root, "chore"), &value);
+
+    // The slot is free, the settled record is still listed, and nothing was committed.
+    let (code, stdout) = run(
+        root,
+        &["chore", "start", "second attempt", "--paths", "README.md"],
+    );
+    assert_eq!(code, 0, "got: {}", stdout);
+
+    let (code, stdout) = run(root, &["chore", "list"]);
+    assert_eq!(code, 0, "got: {}", stdout);
+    assert!(
+        stdout.contains("[closed]  docs left untouched"),
+        "the settled record must still be listed:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("[open]  second attempt"),
+        "and a new chore must be open:\n{}",
+        stdout
+    );
+    assert_eq!(
+        git(root, &["log", "--oneline"]).lines().count(),
+        1,
+        "closing a chore commits nothing: {}",
+        git(root, &["log", "--oneline"])
+    );
+}
+
+#[test]
+fn aborting_a_chore_records_it_as_abandoned_by_whoever_ran_it() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let (code, stdout) = run(
+        root,
+        &[
+            "chore",
+            "start",
+            "chase a flaky test",
+            "--paths",
+            "tests/**",
+        ],
+    );
+    assert_eq!(code, 0, "got: {}", stdout);
+
+    let (code, value) = json_of(
+        root,
+        &[
+            "chore",
+            "abort",
+            "--reason",
+            "not worth the time",
+            "--author-type",
+            "agent",
+            "--author-id",
+            "bot-9",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "got: {:?}", value);
+    assert_eq!(value["status"], json!("abandoned"));
+    assert_eq!(value["reason"], json!("not worth the time"));
+    assert_eq!(
+        value["closed_by"],
+        json!({ "type": "agent", "id": "bot-9" }),
+        "whoever settled it is recorded, not whoever started it"
+    );
+    validate_against_schema(&load_schema(root, "chore"), &value);
+
+    // Same record on disk, and no decision was written: only `chore commit` records a ruling.
+    let record: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".qdev/chores/chore-chase-a-flaky-test.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["status"], json!("abandoned"));
+    assert_eq!(record["reason"], json!("not worth the time"));
+    assert_eq!(
+        fs::read_dir(root.join("docs/state/decisions"))
+            .map(|rd| rd.count())
+            .unwrap_or(0),
+        0,
+        "a settled chore writes no DEC record"
+    );
+
+    // And the listing shows it, so skipped work stays visible.
+    let (code, value) = json_of(root, &["chore", "list", "--json"]);
+    assert_eq!(code, 0, "got: {:?}", value);
+    assert_eq!(value["record_dir"], json!(".qdev/chores"));
+    assert_eq!(value["chores"][0]["status"], json!("abandoned"));
+}
+
+#[test]
+fn close_and_abort_without_an_open_chore_give_no_active_chore() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    for verb in ["close", "abort"] {
+        let (code, stdout) = run(root, &["chore", verb, "--json"]);
+        assert_eq!(code, 2, "`chore {}` got: {}", verb, stdout);
+        assert!(
+            stdout.contains("no_active_chore"),
+            "`chore {}` must give `no_active_chore`, got: {}",
+            verb,
+            stdout
+        );
+    }
+
+    // `list` works with nothing recorded, and says so.
+    let (code, value) = json_of(root, &["chore", "list", "--json"]);
+    assert_eq!(code, 0, "got: {:?}", value);
+    assert_eq!(value["chores"].as_array().unwrap().len(), 0);
+    validate_against_schema(&load_schema(root, "chore"), &value);
+}
+
+#[test]
+fn records_follow_the_relocated_cache_dir() {
+    // D-1 with a moved cache: `init` creates and gitignores `var/chores`, so the record has to
+    // land there — writing it to `.qdev/chores` would leave it git-visible and uncreated.
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    fs::write(
+        root.join("qdev.toml"),
+        "[project]\nname = \"TestProject\"\n\n[identity]\ndeveloper_id = \"simon\"\nteams = [\"core-platform\"]\n\n[storage]\nspecs_dir = \"docs/specs\"\nstate_dir = \"docs/state\"\ncache_dir = \"var/qdev-cache\"\n",
+    )
+    .unwrap();
+    let (code, stdout) = run(
+        root,
+        &[
+            "init",
+            "--non-interactive",
+            "--name",
+            "TestProject",
+            "--developer",
+            "simon",
+            "--team",
+            "core-platform",
+        ],
+    );
+    assert_eq!(code, 0, "got: {}", stdout);
+
+    let (code, stdout) = run(
+        root,
+        &["chore", "start", "relocated record", "--paths", "docs/**"],
+    );
+    assert_eq!(code, 0, "got: {}", stdout);
+    assert!(
+        stdout.contains("var/chores/chore-relocated-record.json"),
+        "the record must be reported where it was written: {}",
+        stdout
+    );
+    assert!(root.join("var/chores/chore-relocated-record.json").exists());
+    assert!(!root
+        .join(".qdev/chores/chore-relocated-record.json")
+        .exists());
+
+    let status = git(root, &["status", "--porcelain"]);
+    assert!(
+        !status.contains("chores"),
+        "no record may reach git, wherever the cache lives:\n{}",
+        status
+    );
+
+    // Listing reads the configured directory too.
+    let (code, value) = json_of(root, &["chore", "list", "--json"]);
+    assert_eq!(code, 0, "got: {:?}", value);
+    assert_eq!(value["record_dir"], json!("var/chores"));
+    assert_eq!(value["chores"].as_array().unwrap().len(), 1);
+}

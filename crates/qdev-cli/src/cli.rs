@@ -95,6 +95,12 @@ pub enum ChoreCommands {
     Start(ChoreStartArgs),
     /// Commit only the changes under the chore's allowlist
     Commit(ChoreCommitArgs),
+    /// List this workspace's chore records and how each one ended
+    List,
+    /// Settle the open chore without committing it (work done another way, or dropped)
+    Close(ChoreFinishArgs),
+    /// Drop the open chore: the work is not happening
+    Abort(ChoreFinishArgs),
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
@@ -128,6 +134,23 @@ pub struct ChoreCommitArgs {
     /// Refuse (exit 3) instead of skipping any change outside the allowlist
     #[arg(long = "strict")]
     pub strict: bool,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
+}
+
+/// Arguments for `qdev chore close` and `qdev chore abort`, which differ only in the outcome
+/// they record.
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChoreFinishArgs {
+    /// Why this chore is being settled without a commit
+    #[arg(long = "reason")]
+    pub reason: Option<String>,
 
     /// Attribution author type override ('human' or 'agent')
     #[arg(long = "author-type")]

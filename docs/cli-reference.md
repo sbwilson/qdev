@@ -186,7 +186,7 @@ on it, and be refused if anything moved in between.
 | `qdev decision log --subject E12S4 --type human_ruling --topic ... --ruling ...` | Record a decision |
 | `qdev dw add --story E12S4 --module bridge --risk negligible --title ...` | Register deferred work |
 | `qdev dw list [--module --risk --status]` / `qdev dw close DW-7f3a --resolution ...` | Manage deferred work |
-| `qdev chore start "fix readme typo" --paths README.md docs/**` / `qdev chore commit` | Fast-track with path allowlist |
+| `qdev chore start "fix readme typo" --paths README.md docs/**` / `qdev chore commit` / `qdev chore list` / `qdev chore close --reason ...` / `qdev chore abort --reason ...` | Fast-track with path allowlist; list records; settle one that never gets committed |
 | `qdev sprint open 6 --title ... --release 0.1.0` | Create sprint |
 | `qdev sprint assign 6 E12S4 ...` | Assign stories |
 | `qdev sprint close 5 --status completed --carry-over 6` | Baseline and carry open work forward |

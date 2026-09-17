@@ -1,10 +1,30 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Chore Payload Schema",
-  "description": "Output shape of `qdev chore start --json` (the recorded chore) and `qdev chore commit --json` (the commit that honoured it). The two commands return different shapes, so the schema picks between them with oneOf: a start always carries `id`/`title`/`paths`, a commit always carries `chore_id`/`committed`/`included`/`excluded`. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "description": "Output shapes of the `qdev chore` commands. `start`, `close` and `abort` all return a chore record, `commit` returns the commit that honoured it, and `list` returns every record in the workspace — three shapes, so the schema picks between them with oneOf: a record always carries `id`/`title`/`paths`, a commit always carries `chore_id`/`committed`/`included`/`excluded`, a list always carries `chores`. Schema changes follow semver on schema_version; additive fields do not bump the major.",
   "type": "object",
   "oneOf": [
-    {
+    { "$ref": "#/definitions/choreRecord" },
+    { "$ref": "#/definitions/choreCommitResult" },
+    { "$ref": "#/definitions/choreList" }
+  ],
+  "definitions": {
+    "author": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["human", "agent"]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "choreRecord": {
       "required": [
         "schema_version",
         "id",
@@ -36,19 +56,7 @@
           }
         },
         "author": {
-          "type": "object",
-          "required": ["type", "id"],
-          "properties": {
-            "type": {
-              "type": "string",
-              "enum": ["human", "agent"]
-            },
-            "id": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/definitions/author"
         },
         "started_at": {
           "type": "string",
@@ -56,7 +64,7 @@
         },
         "status": {
           "type": "string",
-          "enum": ["open", "committed"]
+          "enum": ["open", "committed", "closed", "abandoned"]
         },
         "commit": {
           "type": "string",
@@ -65,11 +73,26 @@
         "decision_id": {
           "type": "string",
           "pattern": "^DEC-[0-9a-f]{4,}$"
+        },
+        "decision_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "closed_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "closed_by": {
+          "$ref": "#/definitions/author"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
         }
       },
       "additionalProperties": false
     },
-    {
+    "choreCommitResult": {
       "required": [
         "schema_version",
         "chore_id",
@@ -128,6 +151,25 @@
         }
       },
       "additionalProperties": false
+    },
+    "choreList": {
+      "required": ["schema_version", "chores", "record_dir"],
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "chores": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/choreRecord"
+          }
+        },
+        "record_dir": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
     }
-  ]
+  }
 }
