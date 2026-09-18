@@ -81,6 +81,8 @@ pub enum Commands {
     Sprint(SprintArgs),
     /// Start and commit path-allowlisted chores
     Chore(ChoreArgs),
+    /// Deterministically select the next eligible story
+    Next(NextArgs),
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]
@@ -142,6 +144,19 @@ pub struct ChoreCommitArgs {
     /// Attribution developer/agent ID override
     #[arg(long = "author-id")]
     pub author_id: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct NextArgs {
+    /// Select from this sprint's story assignments whether or not it is active;
+    /// without it, candidates come from every sprint with `status: active`
+    #[arg(long = "sprint")]
+    pub sprint: Option<u32>,
+
+    /// Only consider stories owned by this identity; "me" resolves to the current
+    /// identity (config identity, or their teams) via the resolve_author chain
+    #[arg(short = 'o', long = "owner")]
+    pub owner: Option<String>,
 }
 
 /// Arguments for `qdev chore close` and `qdev chore abort`, which differ only in the outcome

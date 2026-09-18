@@ -11,6 +11,7 @@ pub mod id;
 pub mod init;
 pub mod interactivity;
 pub mod lease;
+pub mod next;
 pub mod query;
 pub mod schema;
 pub mod scratch;
@@ -53,6 +54,11 @@ pub use lease::{
     auto_release_lease, claim_story, create_lease_override_decision, discover_git_branch,
     discover_git_common_dir, find_active_lease, find_workspace_leases, generate_session_token,
     get_lease, list_leases, parse_iso8601_to_timestamp, release_story, ReleasePayload, StoryLease,
+};
+
+pub use next::{
+    select_next, NextBlocker, NextOptions, NextOwnerFilter, NextReason, NextSelection,
+    NextStoryRecord,
 };
 
 pub use store::{

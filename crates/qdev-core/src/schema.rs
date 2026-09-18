@@ -144,8 +144,8 @@ impl fmt::Display for EntityKind {
 ///
 /// Every `--json` payload with a live command has a schema here — the invariant is that a
 /// shipped payload is either schematized or recorded in `deferred-work.md`, never neither.
-/// `context`, `next`, and `gate_run`-as-a-payload have no live command yet and are deferred
-/// (Epic 2/3 scope); they are intentionally absent here.
+/// `context` and `gate_run`-as-a-payload have no live command yet and are deferred
+/// (Epic 3 scope); they are intentionally absent here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PayloadKind {
@@ -160,6 +160,7 @@ pub enum PayloadKind {
     Claim,
     Release,
     Chore,
+    Next,
 }
 
 impl PayloadKind {
@@ -177,6 +178,7 @@ impl PayloadKind {
             PayloadKind::Claim => include_str!("../schemas/payload-claim.json"),
             PayloadKind::Release => include_str!("../schemas/payload-release.json"),
             PayloadKind::Chore => include_str!("../schemas/payload-chore.json"),
+            PayloadKind::Next => include_str!("../schemas/payload-next.json"),
         }
     }
 
@@ -205,11 +207,12 @@ impl PayloadKind {
             PayloadKind::Claim => "claim",
             PayloadKind::Release => "release",
             PayloadKind::Chore => "chore",
+            PayloadKind::Next => "next",
         }
     }
 
     /// Returns an array of all currently-supported payload kinds.
-    pub const fn all() -> &'static [PayloadKind; 11] {
+    pub const fn all() -> &'static [PayloadKind; 12] {
         &[
             PayloadKind::Story,
             PayloadKind::Error,
@@ -222,6 +225,7 @@ impl PayloadKind {
             PayloadKind::Claim,
             PayloadKind::Release,
             PayloadKind::Chore,
+            PayloadKind::Next,
         ]
     }
 
@@ -235,7 +239,7 @@ impl PayloadKind {
     }
 
     /// Resolves a payload name loosely (case-insensitive, hyphens/underscores). Names deferred to
-    /// a future story (`context`, `next`, `gate_run`) are reported as unknown, same as any other
+    /// a future story (`context`, `gate_run`) are reported as unknown, same as any other
     /// unrecognized name, until their command ships.
     pub fn from_str_loose(s: &str) -> Result<PayloadKind, QdevError> {
         let normalized = s.trim().to_lowercase().replace('-', "_");
@@ -251,6 +255,7 @@ impl PayloadKind {
             "claim" | "claims" => Ok(PayloadKind::Claim),
             "release" | "releases" => Ok(PayloadKind::Release),
             "chore" | "chores" => Ok(PayloadKind::Chore),
+            "next" => Ok(PayloadKind::Next),
             _ => Err(QdevError::usage_error(format!(
                 "Unknown payload name '{}'. Valid payload names: {}",
                 s,

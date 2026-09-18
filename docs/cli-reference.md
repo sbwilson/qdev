@@ -315,7 +315,7 @@ Next
   Run: /qdev-develop E12S4   (or: qdev context E12S4 --phase develop)
 ```
 
-`qdev next --json` returns the same selection for orchestrators. Ordering: stories in active sprints → not blocked → not leased → owner matches current user or team → epic phase → story seq. Ties are broken by ID, so the result is deterministic.
+`qdev next --json` returns the same selection for orchestrators. Ordering: stories in active sprints → not blocked → not leased (a story this worktree holds stays eligible — finish what you started) → owner matches current user or team → epic phase (epics without a declared `phase` rank last) → story seq. Ties are broken by ID, so the result is deterministic. `--sprint N` selects over that sprint's assignments whether or not it is active (an unknown id is a usage error); `--owner` restricts candidates to that owner. When nothing is eligible the command exits 0 with `next: null` and the nearest blockers.
 
 ---
 

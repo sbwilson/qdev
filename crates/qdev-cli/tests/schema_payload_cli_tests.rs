@@ -228,7 +228,9 @@ fn test_schema_payload_unknown_name_json_mode() {
 
 #[test]
 fn test_schema_payload_deferred_names_are_usage_errors() {
-    for name in ["context", "next", "gate_run"] {
+    // `next` landed with its command (Story 2.11); only `context` and `gate_run`
+    // remain deferred to Epic 3.
+    for name in ["context", "gate_run"] {
         let assert = Command::cargo_bin("qdev")
             .unwrap()
             .args(["schema", "payload", name])
@@ -723,6 +725,70 @@ fn test_round_trip_chore_payload_against_actual_output() {
     assert_eq!(instance["chore_id"], "chore-widen-the-pool");
     assert_eq!(instance["committed"], true);
     validate_against_schema(&schema, &instance);
+}
+
+/// `qdev next --json` must validate against the `next` payload schema — both the
+/// selected branch and the `next: null` branch (Story 2.11).
+#[test]
+fn test_round_trip_next_payload_against_next_output() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    write_file(
+        root,
+        "docs/specs/epics/E12.md",
+        "---\nid: E12\ntitle: \"Bridge Layer\"\nstatus: active\nversion: 1\ncreated_by:\n  type: human\n  id: simon\nupdated_by:\n  type: human\n  id: simon\n---\n\n# E12\n",
+    );
+    write_file(
+        root,
+        "docs/specs/stories/E12S4.md",
+        "---\nid: E12S4\ntitle: \"CoreResponse Buffer Layout\"\nstatus: ready\nversion: 2\nowners: [\"simon\"]\nepic_id: E12\nappetite: small\ncreated_by:\n  type: human\n  id: simon\nupdated_by:\n  type: human\n  id: simon\n---\n\n## Acceptance Criteria\n- Buffers round-trip.\n",
+    );
+    write_file(
+        root,
+        "docs/state/sprints/sprint-5.md",
+        "---\nid: sprint-5\ntitle: Sprint 5\nstatus: active\nversion: 1\nrelease: 0.1.0\nstarted_at: 2026-09-10\nassignments:\n  - story: E12S4\n    assigned_at: 2026-09-10\ncreated_by:\n  type: human\n  id: simon\nupdated_by:\n  type: human\n  id: simon\n---\n\n# Sprint 5\n",
+    );
+    Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["sync", "--rebuild"])
+        .assert()
+        .success();
+
+    let schema_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "next", "--json"])
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains("Next Selection Payload Schema"));
+    let schema: Value = serde_json::from_slice(&schema_assert.get_output().stdout).unwrap();
+
+    // Selected branch.
+    let next_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["next", "--json"])
+        .assert()
+        .success()
+        .code(0);
+    let instance: Value = serde_json::from_slice(&next_assert.get_output().stdout).unwrap();
+    assert_eq!(instance["next"]["id"], "E12S4");
+    validate_against_schema(&schema, &instance);
+
+    // `next: null` branch — an owner nobody has filters the only candidate out.
+    let null_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["next", "--owner", "ghost-owner", "--json"])
+        .assert()
+        .success()
+        .code(0);
+    let null_instance: Value = serde_json::from_slice(&null_assert.get_output().stdout).unwrap();
+    assert!(null_instance["next"].is_null());
+    validate_against_schema(&schema, &null_instance);
 }
 
 /// Every payload kind the binary advertises must have a schema that compiles. This is the

@@ -1,0 +1,158 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Next Selection Payload Schema",
+  "description": "Output shape of `qdev next [--sprint N] [--owner me] --json`: the deterministically selected next story (or null when nothing is eligible), a reason block explaining every filter applied, and the nearest blockers. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "type": "object",
+  "required": ["schema_version", "next", "reason", "blockers"],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "next": {
+      "description": "The selected story record, or null when nothing is eligible.",
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/definitions/record" }
+      ]
+    },
+    "reason": {
+      "$ref": "#/definitions/reason"
+    },
+    "blockers": {
+      "type": "array",
+      "description": "Nearest reasons explaining the absence of a selection or every filtered candidate. Sorted by story_id, kind, detail; a workspace-wide entry (e.g. 'no active sprints') carries no story_id.",
+      "items": {
+        "$ref": "#/definitions/blocker"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "record": {
+      "type": "object",
+      "required": ["id", "kind", "status", "blocked", "owners", "seq", "sprint", "sprint_status", "version"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "const": "story"
+        },
+        "epic_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "ready", "in-progress"]
+        },
+        "blocked": {
+          "const": false,
+          "description": "Always false: a blocked candidate is skipped, never selected."
+        },
+        "owners": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "appetite": {
+          "type": "string"
+        },
+        "safety_class": {
+          "type": "string"
+        },
+        "target_modules": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "seq": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Story sequence number within the epic; null when the cache row carries none."
+        },
+        "sprint": {
+          "type": "integer",
+          "description": "The sprint whose assignment made this story a candidate."
+        },
+        "sprint_status": {
+          "type": "string",
+          "description": "That sprint's status — 'active', or the explicit non-active status under --sprint."
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lease": {
+          "$ref": "#/definitions/lease",
+          "description": "Present only when this worktree holds the lease — 'finish what you started'."
+        }
+      },
+      "additionalProperties": false
+    },
+    "lease": {
+      "type": "object",
+      "required": ["story_id", "holder", "author_type", "worktree_path", "branch", "started_at", "session_token"],
+      "properties": {
+        "story_id": { "type": "string", "minLength": 1 },
+        "holder": { "type": "string", "minLength": 1 },
+        "author_type": { "type": "string", "minLength": 1 },
+        "worktree_path": { "type": "string", "minLength": 1 },
+        "branch": { "type": "string", "minLength": 1 },
+        "started_at": { "type": "string", "minLength": 1 },
+        "session_token": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "reason": {
+      "type": "object",
+      "required": ["code", "summary", "notes"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": ["selected", "no_active_sprints", "no_candidates", "all_filtered"]
+        },
+        "summary": {
+          "type": "string",
+          "description": "One human-readable sentence; in the null case it names the nearest reason."
+        },
+        "notes": {
+          "type": "array",
+          "description": "One line per filter applied, for full explanation in text and JSON output.",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "blocker": {
+      "type": "object",
+      "required": ["kind", "detail"],
+      "properties": {
+        "story_id": {
+          "type": "string",
+          "description": "Absent for workspace-wide entries like 'no active sprints'; present per story."
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["blocked", "leased", "stale", "status", "owner", "missing", "no_active_sprints", "no_candidates"]
+        },
+        "detail": { "type": "string" },
+        "blocking_ids": {
+          "type": "array",
+          "description": "Unmet dependency ids, for 'blocked' entries.",
+          "items": { "type": "string" }
+        },
+        "holder": {
+          "type": "string",
+          "description": "The lease holder, for 'leased' entries."
+        },
+        "worktree_path": {
+          "type": "string",
+          "description": "The worktree holding the lease, for 'leased' entries."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
