@@ -13,6 +13,7 @@
 [core]
 project_name = "qdev"
 document_output_language = "English"
+communication_language = "English"
 output_folder = "{project-root}/docs/bmad"
 
 [modules.bmm]
