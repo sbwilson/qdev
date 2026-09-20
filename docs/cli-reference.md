@@ -47,7 +47,7 @@ Universal reference resolution: any command that takes an ID accepts any entity 
 | `qdev validate [--changed] [--fix-ids] [--yes]` | Dangling relations, cycles, ID collisions, schema, orphan DW, missing rationale |
 | `qdev sync [--rebuild]` | Force hydration or rebuild the cache |
 | `qdev schema <entity-kind>` | Print JSON Schema for an entity's frontmatter shape (`story`, `epic`, `dw`, ...) |
-| `qdev schema payload <name>` | Print JSON Schema for a command's output payload (`story`, `error`, `validate`, `fix_ids`, `list`, `sync`, `doctor`; `context`/`next`/`gate_run` land with their commands) |
+| `qdev schema payload <name>` | Print JSON Schema for a command's output payload (`story`, `error`, `validate`, `fix_ids`, `list`, `sync`, `doctor`, `next`, `pulse`; `context`/`gate_run` land with their commands) |
 | `qdev config show` | Effective merged configuration |
 | `qdev next [--sprint N] [--owner me]` | Deterministically select the next unblocked story |
 | `qdev context <id> --phase P [--budget N] [--stats]` | Token-budgeted projection for an agent phase |
@@ -296,9 +296,43 @@ Per **AD-12**, with `--non-interactive`, `QDEV_NONINTERACTIVE=1`, or a non-TTY s
 
 ## 5. The Default Command ("What To Do Next")
 
+Running `qdev` with no arguments (or `qdev status`, kept as an alias) prints the
+workspace pulse — working-tree state, integration sync, cache health, this-worktree
+lease, per-sprint story counts, deferred-work debt, gate evidence, and the next
+recommended action — in one screen, built entirely from reads (the cache, local git
+refs, and lease files): nothing in the pulse writes a row, file, lease, or decision.
+
+**The pulse never syncs, never sweeps, and never repairs.** Unlike every other
+command, the default command and its `status` alias do not run the boot-time
+`ensure_cache` — that either rebuilds the cache or runs a sweep, and a sweep stamps
+`sync_meta.last_synced_at`, which is a cache mutation. So an unsynced workspace is
+*reported* as stale cache, not fixed:
+
+- **No cache at all** (fresh workspace, deleted `cache.sqlite`, or no `.qdev/cache`
+  directory): the pulse runs with no store. `environment.cache` reports
+  `"schema_status": "mismatch"` with `entity_count`, `finding_count`, and
+  `synced_ms_ago` all `null`, `sprints` is an empty array, `gates` and `next` are
+  `null`, and **nothing is created** — no cache file, and no cache directory where
+  none existed. Text shows `Cache … degraded (cache schema mismatch — run
+  \`qdev sync --rebuild\`; ? entities, ? findings)` and a `Next` section that says
+  `Nothing to recommend — there is no readable cache to select from (run
+  \`qdev sync\`)`. Exit 0.
+- **A cache whose stamp this binary cannot read** — stale `PRAGMA user_version`, a
+  missing table, an extra/legacy table, or an unparseable stamp — is reported the same
+  way, and the cache is left byte-for-byte as it was. Run `qdev sync` (or
+  `qdev sync --rebuild`) yourself to rebuild it; any other command still gets the boot
+  rebuild.
+- **A cache stamped *newer* than this binary supports is the one refusal**: the same
+  `schema_version_mismatch` error every other command gives, exit 5, naming
+  `qdev sync --rebuild` as the recovery. Nothing is read, so nothing can be rebuilt
+  over a cache from a newer version.
+
+With a readable cache, everything works as before: cache health, sprint blocks, the
+workspace-wide deferred-work line, and `next` from `select_next`.
+
 ```
 $ qdev
-qdev 1.0 — Development Engine & Gatekeeper
+qdev 0.1.0 — Development Engine & Gatekeeper
 Environment
   Working tree   clean (feature/E12S4-buffer @ 8f1b2c4)
   Integration    develop is up to date with origin/develop
@@ -308,14 +342,49 @@ Environment
 Sprint 5 — The Rust Core Port  [release 0.1.0]
   Stories        42 done / 12 in progress / 3 blocked / 108 backlog
   Deferred work  8 open (0 unacceptable)
-  Gates          14/14 passing, ratchets at baseline
+  Gates          14/14 passing
 
 Next
   E12S4 "CoreResponse Buffer Layout" is ready and unblocked.
   Run: /qdev-develop E12S4   (or: qdev context E12S4 --phase develop)
 ```
 
-`qdev next --json` returns the same selection for orchestrators. Ordering: stories in active sprints → not blocked → not leased (a story this worktree holds stays eligible — finish what you started) → owner matches current user or team → epic phase (epics without a declared `phase` rank last) → story seq. Ties are broken by ID, so the result is deterministic. `--sprint N` selects over that sprint's assignments whether or not it is active (an unknown id is a usage error); `--owner` restricts candidates to that owner. When nothing is eligible the command exits 0 with `next: null` and the nearest blockers.
+The header's first line shows the binary's **real** `CARGO_PKG_VERSION` — not the
+fixed `1.0` an earlier draft of this page showed — and the `Gates` line renders
+**only while `gate_runs` evidence exists** — `N/M passing`, counted from the most
+recent run per gate. That count is workspace-wide, so it renders **once**: in the
+first active sprint block (with several active sprints the later blocks show only
+Stories and Deferred work), or just after `No active sprints — nothing to report`
+when no sprint is active — never repeated per block, and never dropped while
+evidence exists. With no gate-run rows the line is omitted in text and
+`gates: null` in `--json`; there is no "ratchets at baseline" clause — ratchets
+land with Epic 3.
+
+Run outside an initialized workspace (no `qdev.toml`), the pulse still exits 0 with
+the one-line hint `not a qdev workspace — run \`qdev init\` first`; `--json` emits
+a payload with `"workspace": false` and `environment`, `sprints`, `gates`, and
+`next` all `null`, and no cache file is created — the store is never opened.
+
+Inside a workspace with **no active sprints**, the Sprints section reports
+"No active sprints — nothing to report" (empty array in JSON) and the Next section
+renders `next: null` with reason `no_active_sprints`; exit stays 0. Within each
+active sprint block the four story counts (`done`, `in-progress`, `blocked`,
+`backlog`) are fixed and mutually exclusive — every assigned story lands in exactly
+one — and the `Deferred work` line is **workspace-wide**, not sprint-scoped: `N
+open (M unacceptable)` counts every `status: open` deferred-work record in the
+workspace and how many of those carry `safety_risk: unacceptable`, rendered
+identically in each active sprint block. Per-sprint detail stays `qdev dw list`.
+
+The story buckets are computed from live rows only (a stale retained row is counted
+in nothing): `done` first; then `in-progress` iff status `in-progress` and not
+computed-blocked; then `blocked` iff not done and computed-blocked by the same
+`depends_on` live-`done` semantics as `qdev next`; everything else assigned is
+`backlog`. All git probes are local and bounded (`status --porcelain`,
+`rev-parse`, `rev-list` over local refs) — a non-git directory degrades the
+Working-tree and Integration lines to unavailable markers, and a failed probe
+never fails the command.
+
+`qdev next --json` returns the same selection for orchestrators. Ordering: stories in active sprints → not blocked → not leased (a story this worktree holds stays eligible — finish what you started) → owner matches current user or team → epic phase (epics without a declared `phase` rank last) → story seq. Ties are broken by ID, so the result is deterministic. `--sprint N` selects over that sprint's assignments whether or not it is active (an unknown id is a usage error); `--owner` restricts candidates to that owner. When nothing is eligible the command exits 0 with `next: null` and the nearest blockers. The pulse's Next section embeds that same selection verbatim — the text shows the reason summary and, for a selection, the `Run:` line (`draft→specify`, `ready`/`in-progress→develop`); `--json` emits it under `next`, identical to `qdev next --json` for the same state.
 
 ---
 

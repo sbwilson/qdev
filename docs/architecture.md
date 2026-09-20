@@ -390,13 +390,17 @@ the cache file. If a second version dimension is ever needed it belongs in `sync
 ordinary row, not in a pragma.
 
 **An older cache is migrated by whichever command reaches it first, asking nobody.** Every
-command's boot does it (`ensure_cache` → `reset_and_rebuild`), and so does `qdev init` — by
-calling that same `reset_and_rebuild`, under the same advisory write lock, rather than by
-reimplementing the drop/create/stamp sequence. The two paths cannot leave different caches behind
-because there is only one path. They also classify the file identically: `init`'s detection is
-`inspect_cache_schema`, boot's own inspector, so a cache stamped current but missing a table is
-rebuilt by `init` too instead of being reported as an initialized workspace and left for the next
-command to repair. Nothing confirms it, because the cache is a rebuildable index
+command's boot does it (`ensure_cache` → `reset_and_rebuild`) — except the default command
+and its `status` alias, which deliberately skip the boot `ensure_cache` so the pulse can
+*report* an unsynced workspace instead of repairing it (Story 2.12) — and so does
+`qdev init`, which calls that same `reset_and_rebuild`, under the same advisory write
+lock, rather than by reimplementing the drop/create/stamp sequence. The two paths cannot
+leave different caches behind because there is only one path. They also classify the file
+identically: `init`'s detection is `inspect_cache_schema`, boot's own inspector — the same
+check the pulse uses to decide whether to open the cache at all — so a cache stamped
+current but missing a table is rebuilt by `init` too instead of being reported as an
+initialized workspace and left for the next command to repair. Nothing confirms it,
+because the cache is a rebuildable index
 (AD-3/FR-101) and no data lives only there — and because a refusal only one command honours is
 worse than no refusal: `qdev init` used to require `--yes` while `qdev list` performed the same
 rebuild silently at boot. `init`'s `--yes` remains accepted and inert, so scripts passing it

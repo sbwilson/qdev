@@ -206,9 +206,10 @@ fn test_update_relations_replaces_and_removes_edges_in_the_final_graph() {
     assert!(content.contains("E1S3"));
     assert!(!content.contains("E1S1"));
 
-    // A new process hydrates exactly the replacement map into cache rows.
-    let mut status = Command::cargo_bin("qdev").unwrap();
-    status.current_dir(root).args(["status"]).assert().success();
+    // A new process hydrates exactly the replacement map into cache rows — driven by
+    // `doctor`, since the pulse (`status`) never runs the boot sweep.
+    let mut boot = Command::cargo_bin("qdev").unwrap();
+    boot.current_dir(root).args(["doctor"]).assert().success();
     let connection = rusqlite::Connection::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
     let rows: Vec<(String, String)> = {
         let mut statement = connection

@@ -513,11 +513,12 @@ fn test_get_story_with_stale_row_surfaces_stale_true() {
     write_reference_fixture(root, "done");
 
     // Trigger an initial hydration so the cache actually has a row for E12S4 before the raw
-    // SQL UPDATE below (otherwise it would be a silent no-op on a nonexistent row).
+    // SQL UPDATE below (otherwise it would be a silent no-op on a nonexistent row). Driven
+    // by `doctor`: the pulse never runs the boot sweep.
     let mut hydrate_cmd = Command::cargo_bin("qdev").unwrap();
     hydrate_cmd
         .current_dir(root)
-        .args(["status", "--json"])
+        .args(["doctor", "--json"])
         .assert()
         .success();
 

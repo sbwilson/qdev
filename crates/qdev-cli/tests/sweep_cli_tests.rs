@@ -1,6 +1,8 @@
 //! E2E contract for the incremental hydration sweep (spec-1-7): a normal `qdev` command boots
 //! the sweep, so hand edits / additions / removals reach the cache, findings are recorded, and a
-//! contended write lock fails boot with exit 5.
+//! contended write lock fails boot with exit 5. The default command and its `status` alias are
+//! deliberately not such a command any more (Story 2.12: the pulse never sweeps), so every pin
+//! here drives `qdev doctor`, which still gets the boot `ensure_cache`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -62,10 +64,13 @@ fn cache_db(root: &Path) -> PathBuf {
     root.join(".qdev/cache/cache.sqlite")
 }
 
-fn run_status(root: &Path) -> assert_cmd::assert::Assert {
+/// Runs the command that proves the boot sweep: `qdev doctor`. (`qdev status` used to
+/// do this, but the pulse must stay read-only — it reports the cache, it does not
+/// rebuild or sweep it.)
+fn run_boot(root: &Path) -> assert_cmd::assert::Assert {
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     cmd.current_dir(root)
-        .args(["status"])
+        .args(["doctor"])
         .assert()
         .success()
         .code(0)
@@ -112,8 +117,8 @@ fn seeded_workspace(root: &Path) {
     init_workspace(root);
     write_story(root, "E1S1", "Story E1S1");
     write_story(root, "E1S2", "Story E1S2");
-    // First status boot sweeps the new files into the cache.
-    run_status(root);
+    // First `doctor` boot sweeps the new files into the cache.
+    run_boot(root);
     assert!(entity_exists(root, "E1S1"));
     assert!(entity_exists(root, "E1S2"));
 }
@@ -134,7 +139,7 @@ fn test_sweep_picks_up_hand_edits_additions_and_removals() {
     fs::remove_file(story_path(root, "E1S2")).unwrap();
 
     // A normal command boots the sweep and syncs the cache.
-    run_status(root);
+    run_boot(root);
 
     assert_eq!(
         entity_title(root, "E1S1"),
@@ -164,7 +169,7 @@ fn test_sweep_records_findings_without_failing() {
     .unwrap();
 
     // The command must still succeed (findings are non-fatal).
-    run_status(root);
+    run_boot(root);
 
     assert_eq!(
         findings_for(root, "docs/specs/stories/E1S1.md"),
@@ -205,7 +210,7 @@ fn test_lock_contention_fails_boot_with_exit_5() {
     let output = Command::cargo_bin("qdev")
         .unwrap()
         .current_dir(root)
-        .args(["status"])
+        .args(["doctor"])
         .output()
         .unwrap();
 

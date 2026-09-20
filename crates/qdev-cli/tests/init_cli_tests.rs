@@ -979,9 +979,10 @@ fn test_relocating_the_cache_after_init_is_repaired_by_re_running_init() {
     )
     .unwrap();
 
-    // A plain command creates the relocated cache and does not touch `.gitignore`.
+    // A plain command that still gets the boot `ensure_cache` creates the relocated
+    // cache and does not touch `.gitignore`.
     let mut cmd = Command::cargo_bin("qdev").unwrap();
-    cmd.current_dir(root).args(["status"]).assert().success();
+    cmd.current_dir(root).args(["doctor"]).assert().success();
     assert!(root.join("local/cache/cache.sqlite").is_file());
     let ignore = fs::read_to_string(root.join(".gitignore")).unwrap();
     assert!(
@@ -1089,9 +1090,10 @@ updated_by:
     )
     .unwrap();
 
-    // Any command's boot hydrates it.
+    // Any command whose boot hydrates it — `doctor`, since the pulse never sweeps or
+    // rebuilds.
     let mut cmd = Command::cargo_bin("qdev").unwrap();
-    cmd.current_dir(root).args(["status"]).assert().success();
+    cmd.current_dir(root).args(["doctor"]).assert().success();
 
     let cache_path = root.join(".qdev/cache/cache.sqlite");
     let row_counts = |path: &std::path::Path| -> (u32, u32, u32) {
@@ -1145,9 +1147,11 @@ updated_by:
     );
 
     // And the other path: another command's boot, on the same fixture, same outcome.
+    // `doctor` still gets the boot `ensure_cache` that rebuilds the stamped-old cache;
+    // the pulse deliberately does not.
     stamp_older(&cache_path);
     let mut cmd = Command::cargo_bin("qdev").unwrap();
-    cmd.current_dir(root).args(["status"]).assert().success();
+    cmd.current_dir(root).args(["doctor"]).assert().success();
     assert_eq!(stamped_version(&cache_path), CACHE_SCHEMA_VERSION);
     assert_eq!(row_counts(&cache_path), (1, 1, 1));
 }

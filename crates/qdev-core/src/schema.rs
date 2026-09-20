@@ -161,6 +161,7 @@ pub enum PayloadKind {
     Release,
     Chore,
     Next,
+    Pulse,
 }
 
 impl PayloadKind {
@@ -179,6 +180,7 @@ impl PayloadKind {
             PayloadKind::Release => include_str!("../schemas/payload-release.json"),
             PayloadKind::Chore => include_str!("../schemas/payload-chore.json"),
             PayloadKind::Next => include_str!("../schemas/payload-next.json"),
+            PayloadKind::Pulse => include_str!("../schemas/payload-pulse.json"),
         }
     }
 
@@ -208,11 +210,12 @@ impl PayloadKind {
             PayloadKind::Release => "release",
             PayloadKind::Chore => "chore",
             PayloadKind::Next => "next",
+            PayloadKind::Pulse => "pulse",
         }
     }
 
     /// Returns an array of all currently-supported payload kinds.
-    pub const fn all() -> &'static [PayloadKind; 12] {
+    pub const fn all() -> &'static [PayloadKind; 13] {
         &[
             PayloadKind::Story,
             PayloadKind::Error,
@@ -226,6 +229,7 @@ impl PayloadKind {
             PayloadKind::Release,
             PayloadKind::Chore,
             PayloadKind::Next,
+            PayloadKind::Pulse,
         ]
     }
 
@@ -256,6 +260,7 @@ impl PayloadKind {
             "release" | "releases" => Ok(PayloadKind::Release),
             "chore" | "chores" => Ok(PayloadKind::Chore),
             "next" => Ok(PayloadKind::Next),
+            "pulse" => Ok(PayloadKind::Pulse),
             _ => Err(QdevError::usage_error(format!(
                 "Unknown payload name '{}'. Valid payload names: {}",
                 s,

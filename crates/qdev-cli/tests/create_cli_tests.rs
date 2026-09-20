@@ -894,12 +894,13 @@ fn test_create_story_honours_configured_cache_dir() {
     .unwrap();
     init_workspace(root);
 
-    // Boot once so the configured cache exists, the way any real workspace reaches this state.
+    // Boot once so the configured cache exists, the way any real workspace reaches this
+    // state — via `doctor`, because the pulse never creates or repairs the cache.
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     cmd.current_dir(root)
         .env_remove("QDEV_AUTHOR_TYPE")
         .env_remove("QDEV_AUTHOR_ID")
-        .args(["status"])
+        .args(["doctor"])
         .assert()
         .success();
 

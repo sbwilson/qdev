@@ -165,10 +165,12 @@ fn test_list_ac_literal_command_all_five_filters_and_text_table() {
 
     let mut assign_cmd = Command::cargo_bin("qdev").unwrap();
     // No `sprint assign` CLI command exists yet (later story), so assign directly via the
-    // cache after the first boot sweep has hydrated the fixture stories.
+    // cache after the first boot sweep has hydrated the fixture stories. `doctor` does that
+    // boot: `status` is the pulse, which deliberately never sweeps and never creates the
+    // cache this INSERT needs.
     assign_cmd
         .current_dir(root)
-        .args(["status", "--json"])
+        .args(["doctor", "--json"])
         .assert()
         .success();
     let db_path = root.join(".qdev/cache/cache.sqlite");
@@ -510,11 +512,12 @@ fn test_list_stale_row_surfaces_stale_true() {
     setup_list_fixture(root);
 
     // Trigger an initial hydration so the cache actually has rows before the raw SQL UPDATE
-    // below (otherwise it would be a silent no-op on a nonexistent row).
+    // below (otherwise it would be a silent no-op on a nonexistent row). `doctor` still gets
+    // the boot `ensure_cache`; `status` no longer does, by design.
     let mut hydrate_cmd = Command::cargo_bin("qdev").unwrap();
     hydrate_cmd
         .current_dir(root)
-        .args(["status", "--json"])
+        .args(["doctor", "--json"])
         .assert()
         .success();
 

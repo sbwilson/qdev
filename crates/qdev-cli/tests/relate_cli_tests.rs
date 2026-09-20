@@ -160,8 +160,9 @@ fn test_relate_happy_path_patches_frontmatter_and_updates_cache() {
     assert!(content.contains("version: 2\n"));
 
     // A second CLI invocation boots via ensure_cache and re-syncs the relations table.
+    // `doctor` is that invocation: the pulse (`status`) no longer runs the boot sweep.
     let mut cmd2 = Command::cargo_bin("qdev").unwrap();
-    cmd2.current_dir(root).args(["status"]).assert().success();
+    cmd2.current_dir(root).args(["doctor"]).assert().success();
     assert_eq!(relation_row_count(root, "E1S2", "depends_on", "E1S1"), 1);
 }
 
@@ -626,8 +627,10 @@ updated_by:
     };
     fs::write(&adr_path, adr("")).unwrap();
 
+    // `doctor` boots the sweep, so the ADR lands in the cache before the next command
+    // reads it (`status` would only report the cache).
     let mut cmd = Command::cargo_bin("qdev").unwrap();
-    cmd.current_dir(root).args(["status"]).assert().success();
+    cmd.current_dir(root).args(["doctor"]).assert().success();
 
     // Now make it invalid under the story schema only. `appetite` is an enum there and a
     // free-form extra field under the ADR schema, so the two schemas disagree about this file.

@@ -791,6 +791,83 @@ fn test_round_trip_next_payload_against_next_output() {
     validate_against_schema(&schema, &null_instance);
 }
 
+/// `qdev --json` must validate against the `pulse` payload schema — both the
+/// workspace branch (Story 2.12) and the outside-workspace all-null branch.
+#[test]
+fn test_round_trip_pulse_payload_against_default_command_output() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    write_file(
+        root,
+        "docs/specs/epics/E12.md",
+        "---\nid: E12\ntitle: \"Bridge Layer\"\nstatus: active\nversion: 1\ncreated_by:\n  type: human\n  id: simon\nupdated_by:\n  type: human\n  id: simon\n---\n\n# E12\n",
+    );
+    write_file(
+        root,
+        "docs/specs/stories/E12S4.md",
+        "---\nid: E12S4\ntitle: \"CoreResponse Buffer Layout\"\nstatus: ready\nversion: 2\nowners: [\"simon\"]\nepic_id: E12\nappetite: small\ncreated_by:\n  type: human\n  id: simon\nupdated_by:\n  type: human\n  id: simon\n---\n\n## Acceptance Criteria\n- Buffers round-trip.\n",
+    );
+    write_file(
+        root,
+        "docs/state/sprints/sprint-5.md",
+        "---\nid: sprint-5\ntitle: Sprint 5\nstatus: active\nversion: 1\nrelease: 0.1.0\nstarted_at: 2026-09-10\nassignments:\n  - story: E12S4\n    assigned_at: 2026-09-10\ncreated_by:\n  type: human\n  id: simon\nupdated_by:\n  type: human\n  id: simon\n---\n\n# Sprint 5\n",
+    );
+    Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["sync", "--rebuild"])
+        .assert()
+        .success();
+
+    let schema_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "pulse", "--json"])
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains("Pulse Payload Schema"));
+    let schema: Value = serde_json::from_slice(&schema_assert.get_output().stdout).unwrap();
+
+    // Workspace branch: the default command's envelope validates, with the
+    // sprint block and the embedded selection present.
+    let pulse_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["--json"])
+        .assert()
+        .success()
+        .code(0);
+    let instance: Value = serde_json::from_slice(&pulse_assert.get_output().stdout).unwrap();
+    assert_eq!(instance["schema_version"], "1");
+    assert_eq!(instance["workspace"], true);
+    assert_eq!(instance["sprints"][0]["id"], 5);
+    assert_eq!(instance["next"]["next"]["id"], "E12S4");
+    assert!(
+        instance["gates"].is_null(),
+        "no gate evidence → gates: null"
+    );
+    validate_against_schema(&schema, &instance);
+
+    // Outside-workspace branch: `workspace: false` with every other field null.
+    let empty = TempDir::new().unwrap();
+    let null_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(empty.path())
+        .args(["--json"])
+        .assert()
+        .success()
+        .code(0);
+    let null_instance: Value = serde_json::from_slice(&null_assert.get_output().stdout).unwrap();
+    assert_eq!(null_instance["workspace"], false);
+    assert!(null_instance["environment"].is_null());
+    assert!(null_instance["sprints"].is_null());
+    assert!(null_instance["gates"].is_null());
+    assert!(null_instance["next"].is_null());
+    validate_against_schema(&schema, &null_instance);
+}
+
 /// Every payload kind the binary advertises must have a schema that compiles. This is the
 /// invariant that keeps a newly shipped `--json` payload from being neither schematized nor
 /// recorded as deferred.

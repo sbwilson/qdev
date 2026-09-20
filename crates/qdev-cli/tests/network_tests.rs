@@ -47,7 +47,9 @@ fn test_offline_execution_with_blackhole_proxies() {
     assert_eq!(val["schema_version"], "1");
     assert_eq!(val["version"], "0.1.0");
 
-    // 3. Status JSON in non-interactive mode
+    // 3. Status JSON in non-interactive mode — Story 2.12 replaced the
+    //    `PulseStatus` stub with the real pulse: outside a workspace that is
+    //    `workspace: false` with every other field null, produced with zero network.
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     let assert = cmd
         .env("HTTP_PROXY", proxy_url)
@@ -66,7 +68,12 @@ fn test_offline_execution_with_blackhole_proxies() {
     let stdout_str = std::str::from_utf8(&output.stdout).unwrap();
     let val: Value = serde_json::from_str(stdout_str).expect("Valid JSON on stdout");
     assert_eq!(val["schema_version"], "1");
-    assert_eq!(val["interactivity"], "non_interactive");
+    assert_eq!(val["workspace"], false);
+    assert!(val["environment"].is_null());
+    assert!(val["sprints"].is_null());
+    assert!(val["gates"].is_null());
+    assert!(val["next"].is_null());
+    assert!(val.get("interactivity").is_none());
 
     // 4. Unknown subcommand in JSON mode
     let mut cmd = Command::cargo_bin("qdev").unwrap();

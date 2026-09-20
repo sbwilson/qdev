@@ -12,6 +12,7 @@ pub mod init;
 pub mod interactivity;
 pub mod lease;
 pub mod next;
+pub mod pulse;
 pub mod query;
 pub mod schema;
 pub mod scratch;
@@ -59,6 +60,11 @@ pub use lease::{
 pub use next::{
     select_next, NextBlocker, NextOptions, NextOwnerFilter, NextReason, NextSelection,
     NextStoryRecord,
+};
+
+pub use pulse::{
+    build_pulse, CacheHealth, DeferredWorkCounts, EnvironmentPulse, GateSummary, IntegrationStatus,
+    LeaseInfo, PulseOptions, PulsePayload, SprintPulse, StoryCounters, WorkingTreeStatus,
 };
 
 pub use store::{
@@ -147,22 +153,3 @@ pub use write::{
     FrontmatterPatchOptions, RelationChangeOptions, RelationChangeResult, RelationRowChange,
     StoryCreateOptions, StoryCreateResult,
 };
-
-use serde::{Deserialize, Serialize};
-
-/// Basic pulse status returned by core routine for default command.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PulseStatus {
-    pub name: String,
-    pub version: String,
-    pub interactivity: Interactivity,
-}
-
-/// Core routine returning the current status given the resolved interactivity mode.
-pub fn get_pulse_status(interactivity: Interactivity) -> PulseStatus {
-    PulseStatus {
-        name: "qdev".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        interactivity,
-    }
-}

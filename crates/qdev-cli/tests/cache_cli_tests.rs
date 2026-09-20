@@ -82,10 +82,12 @@ fn test_cli_boot_with_empty_cache() {
     assert!(!cache_db_path.exists());
     assert!(root.join(".qdev/cache").is_dir());
 
-    // 3. Run read-only command (qdev status)
+    // 3. Run a command that still gets the boot `ensure_cache`. `qdev status` deliberately
+    //    no longer does: the pulse reports an unsynced workspace instead of repairing it, so
+    //    it cannot be the command that proves the cache gets recreated on boot.
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     cmd.current_dir(root)
-        .args(["status"])
+        .args(["doctor"])
         .assert()
         .success()
         .code(0);
@@ -221,10 +223,11 @@ updated_at: 2026-09-07T00:00:00Z
             .unwrap();
     }
 
-    // 4. Run CLI command (qdev status)
+    // 4. Run a command that still gets the boot `ensure_cache` (the pulse does not, by
+    //    design — it reports a mismatched cache instead of recreating it)
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     cmd.current_dir(root)
-        .args(["status"])
+        .args(["doctor"])
         .assert()
         .success()
         .code(0);
@@ -383,11 +386,12 @@ updated_by:
         fs::remove_file(&cache_db_path).unwrap();
     }
 
-    // Run `qdev status` to build initial cache from files
-    let mut cmd_status = Command::cargo_bin("qdev").unwrap();
-    cmd_status
+    // Run `qdev doctor` to build the initial cache from files (`qdev status` no longer
+    // rebuilds — see the contract in spec-2-12's `Never` list)
+    let mut cmd_build = Command::cargo_bin("qdev").unwrap();
+    cmd_build
         .current_dir(root)
-        .args(["status"])
+        .args(["doctor"])
         .assert()
         .success()
         .code(0);
@@ -430,11 +434,12 @@ updated_by:
     fs::remove_dir_all(&cache_dir).unwrap();
     assert!(!cache_dir.exists());
 
-    // 5. Re-run `qdev status` to trigger cache rebuild
-    let mut cmd_status2 = Command::cargo_bin("qdev").unwrap();
-    cmd_status2
+    // 5. Re-run `qdev doctor` to trigger cache rebuild — the same command, so the two
+    //    dumps are produced by the same code path
+    let mut cmd_rebuild = Command::cargo_bin("qdev").unwrap();
+    cmd_rebuild
         .current_dir(root)
-        .args(["status"])
+        .args(["doctor"])
         .assert()
         .success()
         .code(0);
