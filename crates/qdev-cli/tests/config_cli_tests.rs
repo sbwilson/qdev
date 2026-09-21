@@ -108,6 +108,16 @@ command = "echo local"
     let modules = val["config"]["modules"].as_array().unwrap();
     assert_eq!(modules.len(), 2);
     assert_eq!(val["sources"]["modules"], "qdev.toml");
+
+    // QDEV_MODULE_PATHS exposed
+    assert_eq!(
+        val["QDEV_MODULE_PATHS"]["proj-mod1"],
+        serde_json::json!(["crates/p1/**"])
+    );
+    assert_eq!(
+        val["qdev_module_paths"]["proj-mod2"],
+        serde_json::json!(["crates/p2/**"])
+    );
 }
 
 #[test]

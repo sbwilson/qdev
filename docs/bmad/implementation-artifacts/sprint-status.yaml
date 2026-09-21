@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-20-2026 10:19
+last_updated: 09-21-2026 22:18
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -75,7 +75,7 @@ development_status:
   2-10-chores-with-path-allowlists: review
   2-11-qdev-next: review
   2-12-root-pulse: review
-  2-13-module-registry: backlog
+  2-13-module-registry: review
   epic-2-retrospective: optional
 
   epic-3: backlog

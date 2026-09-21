@@ -170,8 +170,9 @@ impl DoctorSection for CacheDoctorSection {
 /// for this workspace, plus a per-code breakdown.
 ///
 /// This exists because the `cache` section structurally cannot answer the question `doctor` is
-/// asked. Five checks (`duplicate_planning_id`, `orphan_deferred_work`,
-/// `dw_missing_rationale`, `target_module_not_registered`, `entity_file_off_convention`) are
+/// asked. Seven checks (`duplicate_planning_id`, `orphan_deferred_work`,
+/// `dw_missing_rationale`, `target_module_not_registered`, `module_glob_unmatched`,
+/// `entity_file_off_convention`, `duplicate_active_sprint_assignment`) are
 /// computed fresh and never written
 /// to the `findings` table, so a table read reports half the evidence — and reports `0` on a
 /// workspace with real defects. Running `run_validation` keeps one definition of "what is wrong

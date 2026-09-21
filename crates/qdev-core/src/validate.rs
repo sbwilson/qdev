@@ -341,7 +341,7 @@ pub fn find_unregistered_target_modules(
     store: &dyn Store,
     config: &Config,
 ) -> Result<Vec<FindingRecord>, QdevError> {
-    let registered: HashSet<&str> = config.modules.iter().map(|m| m.id.as_str()).collect();
+    let registry = crate::modules::ModuleRegistry::from_config(config);
     let found_at = current_iso8601();
     let mut findings = Vec::new();
 
@@ -362,22 +362,58 @@ pub fn find_unregistered_target_modules(
             .as_deref()
             .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
             .unwrap_or_default();
-        for module in modules {
-            if registered.contains(module.as_str()) {
-                continue;
+        if let Err(unregistered) = registry.validate_target_modules(&modules) {
+            for module in unregistered {
+                findings.push(FindingRecord {
+                    path: story.source_path.clone(),
+                    code: "target_module_not_registered".to_string(),
+                    severity: ERROR_SEVERITY.to_string(),
+                    message: Some(format!(
+                        "Story '{}' targets module '{}', which is not registered in config.modules",
+                        story.id, module
+                    )),
+                    found_at: found_at.clone(),
+                });
             }
-            findings.push(FindingRecord {
-                path: story.source_path.clone(),
-                code: "target_module_not_registered".to_string(),
-                severity: ERROR_SEVERITY.to_string(),
-                message: Some(format!(
-                    "Story '{}' targets module '{}', which is not registered in config.modules",
-                    story.id, module
-                )),
-                found_at: found_at.clone(),
-            });
         }
     }
+    Ok(findings)
+}
+
+/// `module_glob_unmatched`: a declared module's glob matches zero files in the workspace.
+/// One finding per unmatched (module, glob) pair with severity `warning`.
+pub fn find_unmatched_module_globs(
+    workspace_root: &Path,
+    config: &Config,
+) -> Result<Vec<FindingRecord>, QdevError> {
+    let found_at = current_iso8601();
+    let mut findings = Vec::new();
+
+    for module in &config.modules {
+        for pattern in &module.paths {
+            let mut candidate_files = Vec::new();
+            collect_workspace_files_matching(
+                workspace_root,
+                workspace_root,
+                std::slice::from_ref(pattern),
+                &mut candidate_files,
+            );
+            let has_match = candidate_files.iter().any(|f| glob_match(pattern, f));
+            if !has_match {
+                findings.push(FindingRecord {
+                    path: "qdev.toml".to_string(),
+                    code: "module_glob_unmatched".to_string(),
+                    severity: WARNING_SEVERITY.to_string(),
+                    message: Some(format!(
+                        "Module '{}' path glob '{}' matches zero files in the workspace",
+                        module.id, pattern
+                    )),
+                    found_at: found_at.clone(),
+                });
+            }
+        }
+    }
+
     Ok(findings)
 }
 
@@ -718,6 +754,7 @@ pub fn run_validation(
     findings.extend(find_orphan_deferred_work(store)?);
     findings.extend(find_dw_missing_rationale(store)?);
     findings.extend(find_unregistered_target_modules(store, config)?);
+    findings.extend(find_unmatched_module_globs(workspace_root, config)?);
     findings.extend(find_off_convention_entity_files(store, &config.storage)?);
     findings.extend(find_duplicate_active_sprint_assignments(store)?);
     Ok(findings)

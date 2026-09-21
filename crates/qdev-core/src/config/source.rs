@@ -49,15 +49,28 @@ impl<T> AnnotatedValue<T> {
 }
 
 /// Effective configuration alongside per-key source file annotations.
+#[allow(non_snake_case)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnnotatedConfig {
     pub config: Config,
     pub sources: BTreeMap<String, ConfigSource>,
+    #[serde(rename = "QDEV_MODULE_PATHS", default)]
+    pub QDEV_MODULE_PATHS: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub qdev_module_paths: BTreeMap<String, Vec<String>>,
 }
 
 impl AnnotatedConfig {
     pub fn new(config: Config, sources: BTreeMap<String, ConfigSource>) -> Self {
-        Self { config, sources }
+        let qdev_module_paths =
+            crate::modules::ModuleRegistry::from_config(&config).to_module_paths_map();
+        let qdev_module_paths_upper = qdev_module_paths.clone();
+        Self {
+            config,
+            sources,
+            QDEV_MODULE_PATHS: qdev_module_paths_upper,
+            qdev_module_paths,
+        }
     }
 
     pub fn get_source(&self, key: &str) -> Option<ConfigSource> {

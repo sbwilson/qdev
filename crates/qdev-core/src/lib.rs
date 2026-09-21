@@ -11,6 +11,7 @@ pub mod id;
 pub mod init;
 pub mod interactivity;
 pub mod lease;
+pub mod modules;
 pub mod next;
 pub mod pulse;
 pub mod query;
@@ -56,6 +57,8 @@ pub use lease::{
     discover_git_common_dir, find_active_lease, find_workspace_leases, generate_session_token,
     get_lease, list_leases, parse_iso8601_to_timestamp, release_story, ReleasePayload, StoryLease,
 };
+
+pub use modules::ModuleRegistry;
 
 pub use next::{
     select_next, NextBlocker, NextOptions, NextOwnerFilter, NextReason, NextSelection,
@@ -136,10 +139,10 @@ pub use transition::{
 pub use validate::{
     collect_workspace_files_matching, filter_by_changed, find_duplicate_active_sprint_assignments,
     find_duplicate_planning_ids, find_dw_missing_rationale, find_off_convention_entity_files,
-    find_orphan_deferred_work, find_unregistered_target_modules, git_changed_files, glob_match,
-    has_error_finding, ids_in_use, ids_in_use_from_scan, module_path_patterns, next_available_id,
-    rewrite_citations, rewrite_frontmatter_id, run_validation, scan_duplicate_planning_ids,
-    sort_findings, DuplicateIdScan,
+    find_orphan_deferred_work, find_unmatched_module_globs, find_unregistered_target_modules,
+    git_changed_files, glob_match, has_error_finding, ids_in_use, ids_in_use_from_scan,
+    module_path_patterns, next_available_id, rewrite_citations, rewrite_frontmatter_id,
+    run_validation, scan_duplicate_planning_ids, sort_findings, DuplicateIdScan,
 };
 pub use write::{
     acquire_write_lock, apply_constraint_add, apply_constraint_remove, apply_entity_update,

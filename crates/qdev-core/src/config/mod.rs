@@ -340,6 +340,8 @@ fn validate_modules_section(val: &toml::Value, filename: &str) -> Result<(), Qde
     };
 
     let allowed = &["id", "paths", "layer", "may_depend_on"];
+    let mut seen_ids = std::collections::HashSet::new();
+
     for item in arr {
         let table = match item.as_table() {
             Some(t) => t,
@@ -358,7 +360,28 @@ fn validate_modules_section(val: &toml::Value, filename: &str) -> Result<(), Qde
         check_unknown_keys(table, allowed, "modules", filename)?;
 
         if let Some(v) = table.get("id") {
-            if !v.is_str() {
+            if let Some(s) = v.as_str() {
+                if s.trim().is_empty() || s != s.trim() {
+                    return Err(QdevError::usage_error(format!(
+                        "Schema violation in {}: key 'id' in [[modules]] must be a non-empty string without leading or trailing whitespace",
+                        filename
+                    ))
+                    .with_details(serde_json::json!({
+                        "file": filename,
+                        "key": "modules.id",
+                    })));
+                }
+                if !seen_ids.insert(s.to_string()) {
+                    return Err(QdevError::usage_error(format!(
+                        "Schema violation in {}: duplicate module id '{}' in [[modules]]",
+                        filename, s
+                    ))
+                    .with_details(serde_json::json!({
+                        "file": filename,
+                        "key": "modules.id",
+                    })));
+                }
+            } else {
                 return Err(type_mismatch_error("id", "modules", "string", filename));
             }
         } else {
@@ -374,6 +397,31 @@ fn validate_modules_section(val: &toml::Value, filename: &str) -> Result<(), Qde
 
         if let Some(v) = table.get("paths") {
             validate_string_array(v, "paths", "modules", filename)?;
+            let paths_arr = v.as_array().unwrap();
+            if paths_arr.is_empty() {
+                return Err(QdevError::usage_error(format!(
+                    "Schema violation in {}: key 'paths' in [[modules]] must contain at least one glob",
+                    filename
+                ))
+                .with_details(serde_json::json!({
+                    "file": filename,
+                    "key": "modules.paths",
+                })));
+            }
+            for item in paths_arr {
+                if let Some(p) = item.as_str() {
+                    if p.trim().is_empty() {
+                        return Err(QdevError::usage_error(format!(
+                            "Schema violation in {}: key 'paths' in [[modules]] cannot contain empty glob strings",
+                            filename
+                        ))
+                        .with_details(serde_json::json!({
+                            "file": filename,
+                            "key": "modules.paths",
+                        })));
+                    }
+                }
+            }
         } else {
             return Err(QdevError::usage_error(format!(
                 "Schema violation in {}: missing required key 'paths' in [[modules]]",

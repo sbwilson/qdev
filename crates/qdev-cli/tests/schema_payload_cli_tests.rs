@@ -32,6 +32,8 @@ fn setup_workspace(root: &Path) {
         "\n[[modules]]\nid = \"bridge\"\npaths = [\"crates/bridge/**\"]\n\n[[modules]]\nid = \"foundation\"\npaths = [\"crates/foundation/**\"]\n",
     );
     fs::write(toml_path, toml).unwrap();
+    write_file(root, "crates/bridge/lib.rs", "// bridge");
+    write_file(root, "crates/foundation/lib.rs", "// foundation");
 }
 
 fn write_file(root: &Path, rel_path: &str, content: &str) {
