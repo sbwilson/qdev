@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Gate Run Payload Schema",
+  "description": "Output shape of `qdev gate run <id> --json`. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "gate",
+    "status",
+    "exit_code",
+    "duration_ms",
+    "summary",
+    "skipped_locally"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "gate": {
+      "type": "string",
+      "minLength": 1
+    },
+    "story": {
+      "type": ["string", "null"]
+    },
+    "commit": {
+      "type": ["string", "null"]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pass", "fail", "infra", "skip"]
+    },
+    "exit_code": {
+      "type": "integer"
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "summary": {
+      "type": "string"
+    },
+    "skipped_locally": {
+      "type": "boolean"
+    },
+    "stdout": {
+      "type": ["string", "null"]
+    },
+    "stderr": {
+      "type": ["string", "null"]
+    },
+    "agent_instruction": {
+      "type": ["string", "null"]
+    }
+  }
+}

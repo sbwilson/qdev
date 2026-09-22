@@ -799,6 +799,7 @@ version = "0.1.0"
 dependencies = [
  "fs2",
  "jsonschema",
+ "libc",
  "proptest",
  "rand",
  "regex",
@@ -809,6 +810,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "toml",
+ "windows-sys",
 ]
 
 [[package]]

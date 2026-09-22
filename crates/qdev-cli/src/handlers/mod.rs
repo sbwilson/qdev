@@ -3,6 +3,7 @@ pub mod claim;
 pub mod constraint;
 pub mod decision;
 pub mod dw;
+pub mod gate;
 pub mod next;
 pub mod pulse;
 pub mod scratch;

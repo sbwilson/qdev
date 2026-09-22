@@ -17,11 +17,17 @@ pub mod pulse;
 pub mod query;
 pub mod schema;
 pub mod scratch;
+pub mod gate;
 pub mod sprint;
 pub mod store;
 pub mod transition;
 pub mod validate;
 pub mod write;
+
+pub use gate::{
+    execute_gate, format_duration, GateRunOptions, GateRunOutcome, GateRunPayload, GateStatus,
+    HeadTailBuffer,
+};
 
 pub use chore::{
     abort_chore, chore_dir, close_chore, commit_chore, derive_chore_id, find_open_chore,

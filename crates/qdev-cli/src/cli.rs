@@ -83,6 +83,30 @@ pub enum Commands {
     Chore(ChoreArgs),
     /// Deterministically select the next eligible story
     Next(NextArgs),
+    /// Run verification gates
+    Gate(GateArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct GateArgs {
+    #[command(subcommand)]
+    pub command: GateCommands,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum GateCommands {
+    /// Execute a verification gate
+    Run(GateRunArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct GateRunArgs {
+    /// ID of the gate to execute
+    pub id: String,
+
+    /// Story ID to associate with the gate run
+    #[arg(long)]
+    pub story: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]

@@ -230,9 +230,9 @@ fn test_schema_payload_unknown_name_json_mode() {
 
 #[test]
 fn test_schema_payload_deferred_names_are_usage_errors() {
-    // `next` landed with its command (Story 2.11); only `context` and `gate_run`
-    // remain deferred to Epic 3.
-    for name in ["context", "gate_run"] {
+    // `next` landed with Story 2.11, `gate_run` with Story 3.1; only `context`
+    // remains deferred.
+    for name in ["context"] {
         let assert = Command::cargo_bin("qdev")
             .unwrap()
             .args(["schema", "payload", name])
@@ -244,6 +244,27 @@ fn test_schema_payload_deferred_names_are_usage_errors() {
         assert!(stderr.contains("error"));
         assert!(stderr.contains("validate"));
     }
+}
+
+#[test]
+fn test_schema_payload_gate_run_success() {
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "gate_run"])
+        .assert()
+        .success();
+    let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
+    assert!(stdout.contains("Gate Run Payload Schema"));
+    assert!(stdout.contains("skipped_locally"));
+
+    let json_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "gate_run", "--json"])
+        .assert()
+        .success();
+    let val: Value = serde_json::from_slice(&json_assert.get_output().stdout).unwrap();
+    assert_eq!(val["schema_version"], "1");
+    assert_eq!(val["title"], "Gate Run Payload Schema");
 }
 
 #[test]

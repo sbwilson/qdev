@@ -162,6 +162,7 @@ pub enum PayloadKind {
     Chore,
     Next,
     Pulse,
+    GateRun,
 }
 
 impl PayloadKind {
@@ -181,6 +182,7 @@ impl PayloadKind {
             PayloadKind::Chore => include_str!("../schemas/payload-chore.json"),
             PayloadKind::Next => include_str!("../schemas/payload-next.json"),
             PayloadKind::Pulse => include_str!("../schemas/payload-pulse.json"),
+            PayloadKind::GateRun => include_str!("../schemas/payload-gate-run.json"),
         }
     }
 
@@ -211,11 +213,12 @@ impl PayloadKind {
             PayloadKind::Chore => "chore",
             PayloadKind::Next => "next",
             PayloadKind::Pulse => "pulse",
+            PayloadKind::GateRun => "gate_run",
         }
     }
 
     /// Returns an array of all currently-supported payload kinds.
-    pub const fn all() -> &'static [PayloadKind; 13] {
+    pub const fn all() -> &'static [PayloadKind; 14] {
         &[
             PayloadKind::Story,
             PayloadKind::Error,
@@ -230,6 +233,7 @@ impl PayloadKind {
             PayloadKind::Chore,
             PayloadKind::Next,
             PayloadKind::Pulse,
+            PayloadKind::GateRun,
         ]
     }
 
@@ -243,7 +247,7 @@ impl PayloadKind {
     }
 
     /// Resolves a payload name loosely (case-insensitive, hyphens/underscores). Names deferred to
-    /// a future story (`context`, `gate_run`) are reported as unknown, same as any other
+    /// a future story (`context`) are reported as unknown, same as any other
     /// unrecognized name, until their command ships.
     pub fn from_str_loose(s: &str) -> Result<PayloadKind, QdevError> {
         let normalized = s.trim().to_lowercase().replace('-', "_");
@@ -261,6 +265,7 @@ impl PayloadKind {
             "chore" | "chores" => Ok(PayloadKind::Chore),
             "next" => Ok(PayloadKind::Next),
             "pulse" => Ok(PayloadKind::Pulse),
+            "gate_run" | "gaterun" | "gate" => Ok(PayloadKind::GateRun),
             _ => Err(QdevError::usage_error(format!(
                 "Unknown payload name '{}'. Valid payload names: {}",
                 s,

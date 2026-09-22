@@ -404,6 +404,9 @@ fn run(raw_args: &[String]) -> ExitCode {
         Some(Commands::Next(ref next_args)) => {
             handlers::next::handle_next(next_args, &annotated_config, &cli, &output, &current_dir)
         }
+        Some(Commands::Gate(ref gate_args)) => {
+            handlers::gate::handle_gate(gate_args, &annotated_config, &cli, &output, &root)
+        }
         Some(Commands::Init(_)) => unreachable!(),
         Some(Commands::Schema(_)) => unreachable!(),
     }
@@ -495,7 +498,8 @@ fn requires_workspace(command: Option<&Commands>) -> bool {
         | Some(Commands::Dw(_))
         | Some(Commands::Sprint(_))
         | Some(Commands::Chore(_))
-        | Some(Commands::Next(_)) => true,
+        | Some(Commands::Next(_))
+        | Some(Commands::Gate(_)) => true,
     }
 }
 
