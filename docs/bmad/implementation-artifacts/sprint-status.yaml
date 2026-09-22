@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-22-2026 17:29
+last_updated: 09-22-2026 21:30
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -80,7 +80,7 @@ development_status:
 
   epic-3: in-progress
   3-1-gate-runner-subprocess-environment-timeouts: review
-  3-2-gate-result-contract-failure-taxonomy: backlog
+  3-2-gate-result-contract-failure-taxonomy: review
   3-3-gate-dependencies-all: backlog
   3-4-ratchets-baselines: backlog
   3-5-evidence-bundles: backlog

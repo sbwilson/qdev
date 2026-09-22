@@ -1,0 +1,9 @@
+Test Suite 'All tests' started at 2026-09-22 10:00:00.000
+Test Suite 'AppTests.xctest' started at 2026-09-22 10:00:00.001
+Test Suite 'MyTests' started at 2026-09-22 10:00:00.002
+Test Case '-[MyTests testExample]' started.
+/Users/developer/project/Tests/AppTests/MyTests.swift:42: error: -[MyTests testExample] : XCTAssertEqual failed: ("EffectsUnavailable") is not equal to ("EventNotUnderstood")
+Test Case '-[MyTests testExample]' failed (0.012 seconds).
+Test Suite 'MyTests' failed at 2026-09-22 10:00:00.015.
+	 Executed 18 tests, with 1 failure (0 unexpected) in 1.234 (1.234) seconds
+** TEST FAILED **

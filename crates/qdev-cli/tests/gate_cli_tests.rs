@@ -433,3 +433,407 @@ skip = true
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn test_cli_gate_run_unknown_output_adapter_and_exit_2() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    append_to_qdev_toml(
+        temp.path(),
+        r#"
+[[gates]]
+id = "bad-adapter-gate"
+command = "echo hello"
+output_adapter = "unsupported_adapter"
+timeout_ms = 1000
+"#,
+    );
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "bad-adapter-gate"])
+        .assert()
+        .failure()
+        .code(2);
+
+    let stderr = std::str::from_utf8(&assert.get_output().stderr).unwrap();
+    assert!(stderr.contains("Unknown output adapter 'unsupported_adapter'"));
+}
+
+#[test]
+fn test_cli_gate_run_cargo_adapter_failure_receipt_and_json() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    let script_path = temp.path().join("cargo_fail.sh");
+    let fixture = include_str!("../../qdev-core/tests/fixtures/cargo_test_failure.txt");
+    fs::write(
+        &script_path,
+        format!("#!/bin/sh\ncat << 'EOF'\n{}\nEOF\nexit 101\n", fixture),
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    append_to_qdev_toml(
+        temp.path(),
+        &format!(
+            r#"
+[[gates]]
+id = "cargo-gate"
+command = "{}"
+output_adapter = "cargo"
+timeout_ms = 5000
+"#,
+            script_path.to_string_lossy()
+        ),
+    );
+
+    // 1. Text receipt mode
+    let assert_text = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "cargo-gate"])
+        .assert()
+        .failure()
+        .code(1);
+
+    let stdout = std::str::from_utf8(&assert_text.get_output().stdout).unwrap();
+    assert!(stdout.contains("[FAIL] cargo-gate (exit 101) | crates/bridge/tests/c_abi_round_trip.rs:142 | assertion failed: left == right"));
+
+    // 2. JSON payload mode
+    let assert_json = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "cargo-gate", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+
+    let payload: Value = serde_json::from_slice(&assert_json.get_output().stdout).unwrap();
+    assert_eq!(payload["gate"], "cargo-gate");
+    assert_eq!(payload["status"], "fail");
+    assert_eq!(payload["exit_code"], 101);
+    assert_eq!(payload["summary"], "1 of 18 tests failed");
+    assert_eq!(payload["agent_instruction"], "fix_cited_failures");
+    let failures = payload["failures"].as_array().expect("failures must be array");
+    assert_eq!(failures.len(), 1);
+    assert_eq!(
+        failures[0]["location"],
+        "crates/bridge/tests/c_abi_round_trip.rs:142"
+    );
+
+    let schema_str = qdev_core::PayloadKind::GateRun.schema_str();
+    let schema_json: Value = serde_json::from_str(schema_str).unwrap();
+    let validator = jsonschema::validator_for(&schema_json).unwrap();
+    assert!(
+        validator.is_valid(&payload),
+        "Payload must validate against payload-gate-run schema: {:?}",
+        validator
+            .iter_errors(&payload)
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_cli_gate_run_xcodebuild_adapter_failure_receipt_and_json() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    let script_path = temp.path().join("xcode_fail.sh");
+    let raw_fixture = include_str!("../../qdev-core/tests/fixtures/xcodebuild_test_failure.txt");
+    let fixture = raw_fixture.replace("/Users/developer/project", &temp.path().to_string_lossy());
+    fs::write(
+        &script_path,
+        format!("#!/bin/sh\ncat << 'EOF'\n{}\nEOF\nexit 1\n", fixture),
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    append_to_qdev_toml(
+        temp.path(),
+        &format!(
+            r#"
+[[gates]]
+id = "xcode-gate"
+command = "{}"
+output_adapter = "xcodebuild"
+timeout_ms = 5000
+"#,
+            script_path.to_string_lossy()
+        ),
+    );
+
+    // 1. Text receipt mode
+    let assert_text = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "xcode-gate"])
+        .assert()
+        .failure()
+        .code(1);
+
+    let stdout = std::str::from_utf8(&assert_text.get_output().stdout).unwrap();
+    assert!(stdout.contains("[FAIL] xcode-gate (exit 1) | Tests/AppTests/MyTests.swift:42 | XCTAssertEqual failed: (\"EffectsUnavailable\") is not equal to (\"EventNotUnderstood\")"));
+
+    // 2. JSON payload mode
+    let assert_json = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "xcode-gate", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+
+    let payload: Value = serde_json::from_slice(&assert_json.get_output().stdout).unwrap();
+    assert_eq!(payload["gate"], "xcode-gate");
+    assert_eq!(payload["status"], "fail");
+    assert_eq!(payload["exit_code"], 1);
+    assert_eq!(payload["summary"], "1 of 18 tests failed");
+    assert_eq!(payload["agent_instruction"], "fix_cited_failures");
+    let failures = payload["failures"].as_array().expect("failures must be array");
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0]["location"], "Tests/AppTests/MyTests.swift:42");
+
+    let schema_str = qdev_core::PayloadKind::GateRun.schema_str();
+    let schema_json: Value = serde_json::from_str(schema_str).unwrap();
+    let validator = jsonschema::validator_for(&schema_json).unwrap();
+    assert!(
+        validator.is_valid(&payload),
+        "Payload must validate against payload-gate-run schema: {:?}",
+        validator
+            .iter_errors(&payload)
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_cli_gate_run_json_mode_with_metric_and_constraints() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    let script_path = temp.path().join("metric_gate.sh");
+    fs::write(
+        &script_path,
+        r#"#!/bin/sh
+cat << 'EOF' > "$QDEV_RESULT_FILE"
+{
+  "status": "pass",
+  "summary": "all benchmarks passed",
+  "failures": [],
+  "metric": 99.5,
+  "constraint_ids": ["FR-102", "NFR-402"]
+}
+EOF
+exit 0
+"#,
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    append_to_qdev_toml(
+        temp.path(),
+        &format!(
+            r#"
+[[gates]]
+id = "benchmark-gate"
+command = "{}"
+timeout_ms = 5000
+"#,
+            script_path.to_string_lossy()
+        ),
+    );
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "benchmark-gate", "--json"])
+        .assert()
+        .success()
+        .code(0);
+
+    let payload: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(payload["gate"], "benchmark-gate");
+    assert_eq!(payload["status"], "pass");
+    assert_eq!(payload["metric"], 99.5);
+    let constraints = payload["constraint_ids"]
+        .as_array()
+        .expect("constraint_ids array");
+    assert_eq!(constraints.len(), 2);
+    assert_eq!(constraints[0], "FR-102");
+    assert_eq!(constraints[1], "NFR-402");
+
+    let schema_str = qdev_core::PayloadKind::GateRun.schema_str();
+    let schema_json: Value = serde_json::from_str(schema_str).unwrap();
+    let validator = jsonschema::validator_for(&schema_json).unwrap();
+    assert!(
+        validator.is_valid(&payload),
+        "Payload must validate against payload-gate-run schema: {:?}",
+        validator
+            .iter_errors(&payload)
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_cli_gate_run_cargo_adapter_success() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    let script_path = temp.path().join("cargo_pass.sh");
+    fs::write(
+        &script_path,
+        r#"#!/bin/sh
+cat << 'EOF'
+running 18 tests
+test test_a ... ok
+test test_b ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+EOF
+exit 0
+"#,
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    append_to_qdev_toml(
+        temp.path(),
+        &format!(
+            r#"
+[[gates]]
+id = "cargo-gate"
+command = "{}"
+output_adapter = "cargo"
+timeout_ms = 5000
+"#,
+            script_path.to_string_lossy()
+        ),
+    );
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "cargo-gate", "--json"])
+        .assert()
+        .success()
+        .code(0);
+
+    let payload: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(payload["gate"], "cargo-gate");
+    assert_eq!(payload["status"], "pass");
+    assert_eq!(payload["summary"], "18 tests passed");
+    assert_eq!(payload["agent_instruction"], "continue");
+
+    let schema_str = qdev_core::PayloadKind::GateRun.schema_str();
+    let schema_json: Value = serde_json::from_str(schema_str).unwrap();
+    let validator = jsonschema::validator_for(&schema_json).unwrap();
+    assert!(
+        validator.is_valid(&payload),
+        "Payload must validate against payload-gate-run schema: {:?}",
+        validator
+            .iter_errors(&payload)
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_cli_gate_run_xcodebuild_adapter_success() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    let script_path = temp.path().join("xcodebuild_pass.sh");
+    fs::write(
+        &script_path,
+        r#"#!/bin/sh
+cat << 'EOF'
+Test Suite 'All tests' started at 2026-09-23 10:00:00.000
+Test Suite 'All tests' passed at 2026-09-23 10:00:01.000.
+	 Executed 18 tests, with 0 failures (0 unexpected) in 0.123 (0.125) seconds
+EOF
+exit 0
+"#,
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    append_to_qdev_toml(
+        temp.path(),
+        &format!(
+            r#"
+[[gates]]
+id = "xcodebuild-gate"
+command = "{}"
+output_adapter = "xcodebuild"
+timeout_ms = 5000
+"#,
+            script_path.to_string_lossy()
+        ),
+    );
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "xcodebuild-gate", "--json"])
+        .assert()
+        .success()
+        .code(0);
+
+    let payload: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(payload["gate"], "xcodebuild-gate");
+    assert_eq!(payload["status"], "pass");
+    assert_eq!(payload["summary"], "18 tests passed");
+    assert_eq!(payload["agent_instruction"], "continue");
+
+    let schema_str = qdev_core::PayloadKind::GateRun.schema_str();
+    let schema_json: Value = serde_json::from_str(schema_str).unwrap();
+    let validator = jsonschema::validator_for(&schema_json).unwrap();
+    assert!(
+        validator.is_valid(&payload),
+        "Payload must validate against payload-gate-run schema: {:?}",
+        validator
+            .iter_errors(&payload)
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+    );
+}

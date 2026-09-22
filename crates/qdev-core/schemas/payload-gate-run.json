@@ -51,6 +51,34 @@
     },
     "agent_instruction": {
       "type": ["string", "null"]
+    },
+    "failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "location",
+          "message"
+        ],
+        "properties": {
+          "location": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "metric": {
+      "type": ["number", "null"]
+    },
+    "constraint_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     }
   }
 }

@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Gate Result Document Schema",
+  "description": "Contract for gate result documents written to $QDEV_RESULT_FILE or captured on stdout.",
+  "type": "object",
+  "required": [
+    "status",
+    "summary"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["pass", "fail", "infra", "skip"]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "location",
+          "message"
+        ],
+        "properties": {
+          "location": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "metric": {
+      "type": ["number", "null"]
+    },
+    "constraint_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}

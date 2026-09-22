@@ -476,3 +476,50 @@ pub fn validate_frontmatter(kind: EntityKind, content: &str) -> Result<(), Vec<S
     validate_frontmatter_detailed(kind, content)
         .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect())
 }
+
+/// Returns the raw JSON Schema for Gate Result documents embedded at compile-time.
+pub fn gate_result_schema_str() -> &'static str {
+    include_str!("../schemas/gate-result.json")
+}
+
+/// Returns the parsed JSON Schema for Gate Result documents.
+pub fn gate_result_schema_json() -> serde_json::Value {
+    serde_json::from_str(gate_result_schema_str())
+        .expect("embedded gate-result schema must be valid JSON")
+}
+
+/// Validates a parsed JSON gate result value against the gate-result schema,
+/// returning structured `ValidationError` items.
+pub fn validate_gate_result_detailed(
+    value: &serde_json::Value,
+) -> Result<(), Vec<ValidationError>> {
+    let schema_json = gate_result_schema_json();
+    let validator = jsonschema::validator_for(&schema_json).map_err(|e| {
+        vec![ValidationError {
+            path: String::new(),
+            message: format!("JSON schema compilation error: {}", e),
+        }]
+    })?;
+
+    let mut errors = Vec::new();
+    for error in validator.iter_errors(value) {
+        let path = error.instance_path().to_string();
+        errors.push(ValidationError {
+            path,
+            message: error.to_string(),
+        });
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// Validates a parsed JSON gate result value against the gate-result schema,
+/// returning string error messages.
+pub fn validate_gate_result(value: &serde_json::Value) -> Result<(), Vec<String>> {
+    validate_gate_result_detailed(value)
+        .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect())
+}

@@ -1,0 +1,19 @@
+running 18 tests
+test tests::test_one ... ok
+test tests::test_two ... ok
+test tests::test_c_abi ... FAILED
+test tests::test_four ... ok
+
+failures:
+
+---- tests::test_c_abi stdout ----
+thread 'tests::test_c_abi' panicked at crates/bridge/tests/c_abi_round_trip.rs:142:9:
+assertion failed: left == right
+  left: EffectsUnavailable
+ right: EventNotUnderstood
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+failures:
+    tests::test_c_abi
+
+test result: FAILED. 17 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s

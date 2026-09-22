@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::errors::QdevError;
+use crate::gate::adapter::{parse_with_adapter, validate_adapter_name};
 use crate::gate::process::ProcessGroupIsolation;
+use crate::gate::result::GateResultDocument;
 use crate::gate::ring_buffer::HeadTailBuffer;
 use crate::gate::{GateRunOutcome, GateStatus};
 use crate::lease::find_active_lease_with_storage;
@@ -25,6 +27,21 @@ impl Drop for TempFileGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+/// Extracts up to `max_lines` trailing non-empty lines from `text`.
+pub fn extract_last_lines(text: &str, max_lines: usize) -> Option<String> {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(|l| l.trim_end())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let take_count = lines.len().min(max_lines);
+    let start_idx = lines.len() - take_count;
+    Some(lines[start_idx..].join("\n"))
 }
 
 /// Parses a command line string into separate arguments, respecting single/double quotes and escapes.
@@ -155,7 +172,7 @@ fn resolve_story_id(
         .map(|l| l.story_id)
 }
 
-/// Executes a verification gate external subprocess according to Story 3.1 specification.
+/// Executes a verification gate external subprocess according to Story 3.2 specification.
 pub fn execute_gate(
     workspace_root: &Path,
     config: &Config,
@@ -169,6 +186,11 @@ pub fn execute_gate(
         .ok_or_else(|| {
             QdevError::usage_error(format!("gate '{}' not found in configuration", gate_id))
         })?;
+
+    // Validate declared output adapter upfront
+    if let Some(ref adapter) = gate_config.output_adapter {
+        validate_adapter_name(adapter)?;
+    }
 
     let commit_sha = resolve_commit_sha(workspace_root);
     let story_id = resolve_story_id(workspace_root, config, options);
@@ -187,6 +209,9 @@ pub fn execute_gate(
             stdout: None,
             stderr: None,
             agent_instruction: None,
+            failures: Vec::new(),
+            metric: None,
+            constraint_ids: Vec::new(),
         });
     }
 
@@ -206,6 +231,9 @@ pub fn execute_gate(
                 stdout: None,
                 stderr: None,
                 agent_instruction: Some("halt_and_alert".to_string()),
+                failures: Vec::new(),
+                metric: None,
+                constraint_ids: Vec::new(),
             });
         }
     };
@@ -224,6 +252,9 @@ pub fn execute_gate(
             stdout: None,
             stderr: None,
             agent_instruction: Some("halt_and_alert".to_string()),
+            failures: Vec::new(),
+            metric: None,
+            constraint_ids: Vec::new(),
         });
     }
 
@@ -245,6 +276,9 @@ pub fn execute_gate(
             stdout: None,
             stderr: None,
             agent_instruction: Some("halt_and_alert".to_string()),
+            failures: Vec::new(),
+            metric: None,
+            constraint_ids: Vec::new(),
         });
     }
 
@@ -303,6 +337,9 @@ pub fn execute_gate(
                 stdout: None,
                 stderr: None,
                 agent_instruction: Some("halt_and_alert".to_string()),
+                failures: Vec::new(),
+                metric: None,
+                constraint_ids: Vec::new(),
             });
         }
         Err(e) => {
@@ -318,6 +355,9 @@ pub fn execute_gate(
                 stdout: None,
                 stderr: None,
                 agent_instruction: Some("halt_and_alert".to_string()),
+                failures: Vec::new(),
+                metric: None,
+                constraint_ids: Vec::new(),
             });
         }
     };
@@ -405,6 +445,9 @@ pub fn execute_gate(
             stdout: Some(stdout_buf.to_string_lossy()),
             stderr: Some(stderr_buf.to_string_lossy()),
             agent_instruction: Some("halt_and_alert".to_string()),
+            failures: Vec::new(),
+            metric: None,
+            constraint_ids: Vec::new(),
         });
     }
 
@@ -418,64 +461,273 @@ pub fn execute_gate(
         })?,
     };
 
-    // Terminate any remaining descendant processes in the tree (e.g. background grandchildren)
-    // before joining reader threads, so inherited pipe descriptors are closed.
+    // Terminate any remaining descendant processes in the tree
     isolation.kill_tree(&mut child);
 
     let stdout_buf = stdout_handle.join().unwrap_or_default();
     let stderr_buf = stderr_handle.join().unwrap_or_default();
     let duration_ms = start_time.elapsed().as_millis() as u64;
 
-    let raw_exit_code = status.code().unwrap_or(-1);
     let stdout_str = stdout_buf.to_string_lossy();
     let stderr_str = stderr_buf.to_string_lossy();
 
-    // 8. Parse result JSON if present in result file or stdout
-    let result_json: Option<serde_json::Value> = if result_file_path.exists() {
-        std::fs::read_to_string(&result_file_path)
-            .ok()
-            .and_then(|c| serde_json::from_str(&c).ok())
-    } else {
-        serde_json::from_str(stdout_str.trim()).ok()
+    // Check if process was killed by a signal
+    #[cfg(unix)]
+    let killed_by_signal = {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal()
     };
+    #[cfg(not(unix))]
+    let killed_by_signal: Option<i32> = None;
 
-    let summary_from_json = result_json
-        .as_ref()
-        .and_then(|v| v.get("summary"))
-        .and_then(|s| s.as_str())
-        .map(String::from);
+    if let Some(sig) = killed_by_signal {
+        return Ok(GateRunOutcome {
+            gate_id: gate_id.to_string(),
+            status: GateStatus::Infra,
+            exit_code: 4,
+            duration_ms,
+            summary: format!("process terminated by signal {}", sig),
+            skipped_locally: false,
+            commit_sha,
+            story_id,
+            stdout: Some(stdout_str),
+            stderr: Some(stderr_str),
+            agent_instruction: Some("halt_and_alert".to_string()),
+            failures: Vec::new(),
+            metric: None,
+            constraint_ids: Vec::new(),
+        });
+    }
 
-    let (status, summary, agent_instruction) = if raw_exit_code == 0 {
-        let summary = summary_from_json.unwrap_or_else(|| {
-            if let Some(last_line) = stdout_str.lines().rev().find(|l| !l.trim().is_empty()) {
-                last_line.trim().to_string()
-            } else {
-                "gate passed".to_string()
+    let raw_exit_code = status.code().unwrap_or(-1);
+
+    // 8. Output classification based on output_adapter configuration
+    let (status, exit_code, summary, agent_instruction, failures, metric, constraint_ids) =
+        match gate_config.output_adapter.as_deref() {
+            Some("json") => {
+                // If output_adapter = "json" is declared, require a valid result document.
+                let mut parsed_doc = None;
+                let mut schema_err = None;
+
+                if result_file_path.exists() {
+                    let content = std::fs::read_to_string(&result_file_path).unwrap_or_default();
+                    if !content.trim().is_empty() {
+                        match GateResultDocument::from_json_str(&content) {
+                            Ok(doc) => parsed_doc = Some(doc),
+                            Err(errs) => schema_err = Some(errs),
+                        }
+                    }
+                }
+
+                if parsed_doc.is_none() && !stdout_str.trim().is_empty() {
+                    match GateResultDocument::from_json_str(stdout_str.trim()) {
+                        Ok(doc) => {
+                            parsed_doc = Some(doc);
+                            schema_err = None;
+                        }
+                        Err(errs) => {
+                            if schema_err.is_none() {
+                                schema_err = Some(errs);
+                            }
+                        }
+                    }
+                }
+
+                if let Some(doc) = parsed_doc {
+                    let (ec, instr) = match doc.status {
+                        GateStatus::Pass => (0, Some("continue".to_string())),
+                        GateStatus::Fail => {
+                            let code = if raw_exit_code != 0 {
+                                raw_exit_code
+                            } else {
+                                1
+                            };
+                            (code, Some("fix_cited_failures".to_string()))
+                        }
+                        GateStatus::Infra => (4, Some("halt_and_alert".to_string())),
+                        GateStatus::Skip => (0, None),
+                    };
+                    (
+                        doc.status,
+                        ec,
+                        doc.summary,
+                        instr,
+                        doc.failures,
+                        doc.metric,
+                        doc.constraint_ids,
+                    )
+                } else if let Some(errs) = schema_err {
+                    (
+                        GateStatus::Infra,
+                        4,
+                        format!(
+                            "declared json adapter schema validation failed: {}",
+                            errs.join("; ")
+                        ),
+                        Some("halt_and_alert".to_string()),
+                        Vec::new(),
+                        None,
+                        Vec::new(),
+                    )
+                } else {
+                    (
+                        GateStatus::Infra,
+                        4,
+                        "declared json adapter produced no result document on $QDEV_RESULT_FILE or stdout"
+                            .to_string(),
+                        Some("halt_and_alert".to_string()),
+                        Vec::new(),
+                        None,
+                        Vec::new(),
+                    )
+                }
             }
-        });
-        (GateStatus::Pass, summary, Some("continue".to_string()))
-    } else {
-        let summary = summary_from_json.unwrap_or_else(|| {
-            if let Some(last_line) = stderr_str.lines().rev().find(|l| !l.trim().is_empty()) {
-                last_line.trim().to_string()
-            } else if let Some(last_line) = stdout_str.lines().rev().find(|l| !l.trim().is_empty())
-            {
-                last_line.trim().to_string()
-            } else {
-                format!("gate exited with code {}", raw_exit_code)
+            Some("cargo") => {
+                let parsed = parse_with_adapter(
+                    "cargo",
+                    &stdout_str,
+                    &stderr_str,
+                    raw_exit_code,
+                    Some(workspace_root),
+                )?;
+                let ec = match parsed.status {
+                    GateStatus::Pass => 0,
+                    GateStatus::Fail => {
+                        if raw_exit_code != 0 {
+                            raw_exit_code
+                        } else {
+                            1
+                        }
+                    }
+                    GateStatus::Infra => 4,
+                    GateStatus::Skip => 0,
+                };
+                let instr = match parsed.status {
+                    GateStatus::Pass => Some("continue".to_string()),
+                    GateStatus::Fail => Some("fix_cited_failures".to_string()),
+                    GateStatus::Infra => Some("halt_and_alert".to_string()),
+                    GateStatus::Skip => None,
+                };
+                (
+                    parsed.status,
+                    ec,
+                    parsed.summary,
+                    instr,
+                    parsed.failures,
+                    None,
+                    Vec::new(),
+                )
             }
-        });
-        (
-            GateStatus::Fail,
-            summary,
-            Some("fix_cited_failures".to_string()),
-        )
-    };
+            Some("xcodebuild") => {
+                let parsed = parse_with_adapter(
+                    "xcodebuild",
+                    &stdout_str,
+                    &stderr_str,
+                    raw_exit_code,
+                    Some(workspace_root),
+                )?;
+                let ec = match parsed.status {
+                    GateStatus::Pass => 0,
+                    GateStatus::Fail => {
+                        if raw_exit_code != 0 {
+                            raw_exit_code
+                        } else {
+                            1
+                        }
+                    }
+                    GateStatus::Infra => 4,
+                    GateStatus::Skip => 0,
+                };
+                let instr = match parsed.status {
+                    GateStatus::Pass => Some("continue".to_string()),
+                    GateStatus::Fail => Some("fix_cited_failures".to_string()),
+                    GateStatus::Infra => Some("halt_and_alert".to_string()),
+                    GateStatus::Skip => None,
+                };
+                (
+                    parsed.status,
+                    ec,
+                    parsed.summary,
+                    instr,
+                    parsed.failures,
+                    None,
+                    Vec::new(),
+                )
+            }
+            _ => {
+                // No adapter declared: check if valid result document exists on $QDEV_RESULT_FILE or stdout
+                let mut maybe_doc = None;
+                if result_file_path.exists() {
+                    let content = std::fs::read_to_string(&result_file_path).unwrap_or_default();
+                    if !content.trim().is_empty() {
+                        maybe_doc = GateResultDocument::from_json_str(&content).ok();
+                    }
+                }
+                if maybe_doc.is_none() && !stdout_str.trim().is_empty() {
+                    maybe_doc = GateResultDocument::from_json_str(stdout_str.trim()).ok();
+                }
+
+                if let Some(doc) = maybe_doc {
+                    let (ec, instr) = match doc.status {
+                        GateStatus::Pass => (0, Some("continue".to_string())),
+                        GateStatus::Fail => {
+                            let code = if raw_exit_code != 0 {
+                                raw_exit_code
+                            } else {
+                                1
+                            };
+                            (code, Some("fix_cited_failures".to_string()))
+                        }
+                        GateStatus::Infra => (4, Some("halt_and_alert".to_string())),
+                        GateStatus::Skip => (0, None),
+                    };
+                    (
+                        doc.status,
+                        ec,
+                        doc.summary,
+                        instr,
+                        doc.failures,
+                        doc.metric,
+                        doc.constraint_ids,
+                    )
+                } else if raw_exit_code == 0 {
+                    let summary = if let Some(last_line) =
+                        stdout_str.lines().rev().find(|l| !l.trim().is_empty())
+                    {
+                        last_line.trim().to_string()
+                    } else {
+                        "gate passed".to_string()
+                    };
+                    (
+                        GateStatus::Pass,
+                        0,
+                        summary,
+                        Some("continue".to_string()),
+                        Vec::new(),
+                        None,
+                        Vec::new(),
+                    )
+                } else {
+                    let summary = extract_last_lines(&stderr_str, 40)
+                        .or_else(|| extract_last_lines(&stdout_str, 40))
+                        .unwrap_or_else(|| format!("gate exited with code {}", raw_exit_code));
+                    (
+                        GateStatus::Fail,
+                        raw_exit_code,
+                        summary,
+                        Some("fix_cited_failures".to_string()),
+                        Vec::new(),
+                        None,
+                        Vec::new(),
+                    )
+                }
+            }
+        };
 
     Ok(GateRunOutcome {
         gate_id: gate_id.to_string(),
         status,
-        exit_code: raw_exit_code,
+        exit_code,
         duration_ms,
         summary,
         skipped_locally: false,
@@ -484,5 +736,8 @@ pub fn execute_gate(
         stdout: Some(stdout_str),
         stderr: Some(stderr_str),
         agent_instruction,
+        failures,
+        metric,
+        constraint_ids,
     })
 }

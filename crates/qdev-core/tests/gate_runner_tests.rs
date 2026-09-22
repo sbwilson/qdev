@@ -424,3 +424,583 @@ fn test_active_story_resolved_from_lease() {
     let stdout = outcome.stdout.expect("stdout should be captured");
     assert!(stdout.contains("QDEV_STORY=E12S10"));
 }
+
+#[test]
+fn test_result_document_file_precedence_and_fields() {
+    let temp = setup_test_workspace();
+
+    let script_path = temp.path().join("write_result.sh");
+    fs::write(
+        &script_path,
+        r#"#!/bin/sh
+cat << 'EOF' > "$QDEV_RESULT_FILE"
+{
+  "status": "fail",
+  "summary": "1 of 18 tests failed",
+  "failures": [
+    {
+      "location": "crates/bridge/tests/c_abi_round_trip.rs:142",
+      "message": "assertion failed: left == right\n  left: EffectsUnavailable\n right: EventNotUnderstood"
+    }
+  ],
+  "metric": 42.5,
+  "constraint_ids": ["E12S4/NG-2"]
+}
+EOF
+exit 101
+"#,
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let mut config = Config::default();
+    config.gates = vec![GateConfig {
+        id: "result-doc-gate".to_string(),
+        command: Some(script_path.to_string_lossy().to_string()),
+        timeout_ms: Some(5000),
+        depends_on: vec![],
+        output_adapter: None,
+        on_transition: vec![],
+        verifies: vec![],
+        kind: None,
+        metric: None,
+        direction: None,
+        skip: None,
+    }];
+
+    let options = GateRunOptions::default();
+    let outcome = execute_gate(temp.path(), &config, "result-doc-gate", &options).unwrap();
+
+    assert_eq!(outcome.status, GateStatus::Fail);
+    assert_eq!(outcome.exit_code, 101);
+    assert_eq!(outcome.summary, "1 of 18 tests failed");
+    assert_eq!(outcome.agent_instruction.as_deref(), Some("fix_cited_failures"));
+    assert_eq!(outcome.metric, Some(42.5));
+    assert_eq!(outcome.constraint_ids, vec!["E12S4/NG-2"]);
+    assert_eq!(outcome.failures.len(), 1);
+    assert_eq!(
+        outcome.failures[0].location,
+        "crates/bridge/tests/c_abi_round_trip.rs:142"
+    );
+    assert_eq!(
+        outcome.receipt(),
+        "[FAIL] result-doc-gate (exit 101) | crates/bridge/tests/c_abi_round_trip.rs:142 | assertion failed: left == right"
+    );
+}
+
+#[test]
+fn test_result_document_stdout_parsing() {
+    let temp = setup_test_workspace();
+
+    let script_path = temp.path().join("stdout_result.sh");
+    fs::write(
+        &script_path,
+        r#"#!/bin/sh
+cat << 'EOF'
+{
+  "status": "pass",
+  "summary": "all 18 tests passed",
+  "failures": [],
+  "metric": null,
+  "constraint_ids": []
+}
+EOF
+exit 0
+"#,
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let mut config = Config::default();
+    config.gates = vec![GateConfig {
+        id: "stdout-gate".to_string(),
+        command: Some(script_path.to_string_lossy().to_string()),
+        timeout_ms: Some(5000),
+        depends_on: vec![],
+        output_adapter: None,
+        on_transition: vec![],
+        verifies: vec![],
+        kind: None,
+        metric: None,
+        direction: None,
+        skip: None,
+    }];
+
+    let options = GateRunOptions::default();
+    let outcome = execute_gate(temp.path(), &config, "stdout-gate", &options).unwrap();
+
+    assert_eq!(outcome.status, GateStatus::Pass);
+    assert_eq!(outcome.exit_code, 0);
+    assert_eq!(outcome.summary, "all 18 tests passed");
+    assert_eq!(outcome.agent_instruction.as_deref(), Some("continue"));
+    assert_eq!(outcome.failures.len(), 0);
+}
+
+#[test]
+fn test_output_adapter_json_missing_fails_infra_exit_4() {
+    let temp = setup_test_workspace();
+
+    let script_path = temp.path().join("empty_json.sh");
+    fs::write(&script_path, "#!/bin/sh\nexit 0\n").unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let mut config = Config::default();
+    config.gates = vec![GateConfig {
+        id: "empty-json-gate".to_string(),
+        command: Some(script_path.to_string_lossy().to_string()),
+        timeout_ms: Some(5000),
+        depends_on: vec![],
+        output_adapter: Some("json".to_string()),
+        on_transition: vec![],
+        verifies: vec![],
+        kind: None,
+        metric: None,
+        direction: None,
+        skip: None,
+    }];
+
+    let options = GateRunOptions::default();
+    let outcome = execute_gate(temp.path(), &config, "empty-json-gate", &options).unwrap();
+
+    assert_eq!(outcome.status, GateStatus::Infra);
+    assert_eq!(outcome.exit_code, 4);
+    assert_eq!(outcome.agent_instruction.as_deref(), Some("halt_and_alert"));
+    assert!(outcome.summary.contains("produced no result document"));
+}
+
+#[test]
+fn test_output_adapter_json_invalid_schema_fails_infra_exit_4() {
+    let temp = setup_test_workspace();
+
+    let script_path = temp.path().join("invalid_json.sh");
+    fs::write(
+        &script_path,
+        r#"#!/bin/sh
+cat << 'EOF' > "$QDEV_RESULT_FILE"
+{
+  "status": "invalid_status",
+  "summary": "something"
+}
+EOF
+exit 0
+"#,
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let mut config = Config::default();
+    config.gates = vec![GateConfig {
+        id: "invalid-json-gate".to_string(),
+        command: Some(script_path.to_string_lossy().to_string()),
+        timeout_ms: Some(5000),
+        depends_on: vec![],
+        output_adapter: Some("json".to_string()),
+        on_transition: vec![],
+        verifies: vec![],
+        kind: None,
+        metric: None,
+        direction: None,
+        skip: None,
+    }];
+
+    let options = GateRunOptions::default();
+    let outcome = execute_gate(temp.path(), &config, "invalid-json-gate", &options).unwrap();
+
+    assert_eq!(outcome.status, GateStatus::Infra);
+    assert_eq!(outcome.exit_code, 4);
+    assert_eq!(outcome.agent_instruction.as_deref(), Some("halt_and_alert"));
+    assert!(outcome.summary.contains("schema validation failed"));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_process_killed_by_signal_classified_infra_exit_4() {
+    let temp = setup_test_workspace();
+
+    let script_path = temp.path().join("self_kill.sh");
+    fs::write(&script_path, "#!/bin/sh\nkill -9 $$\n").unwrap();
+
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let mut config = Config::default();
+    config.gates = vec![GateConfig {
+        id: "sigkill-gate".to_string(),
+        command: Some(script_path.to_string_lossy().to_string()),
+        timeout_ms: Some(5000),
+        depends_on: vec![],
+        output_adapter: None,
+        on_transition: vec![],
+        verifies: vec![],
+        kind: None,
+        metric: None,
+        direction: None,
+        skip: None,
+    }];
+
+    let options = GateRunOptions::default();
+    let outcome = execute_gate(temp.path(), &config, "sigkill-gate", &options).unwrap();
+
+    assert_eq!(outcome.status, GateStatus::Infra);
+    assert_eq!(outcome.exit_code, 4);
+    assert_eq!(outcome.agent_instruction.as_deref(), Some("halt_and_alert"));
+    assert!(outcome.summary.contains("terminated by signal 9"));
+}
+
+#[test]
+fn test_fallback_40_lines_stderr_summary() {
+    let temp = setup_test_workspace();
+
+    let script_path = temp.path().join("many_stderr.sh");
+    // Emit 50 lines to stderr; the summary should capture the last 40 lines
+    let mut script = String::from("#!/bin/sh\n");
+    for i in 1..=50 {
+        script.push_str(&format!("echo 'stderr error line {}' >&2\n", i));
+    }
+    script.push_str("exit 101\n");
+    fs::write(&script_path, &script).unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let mut config = Config::default();
+    config.gates = vec![GateConfig {
+        id: "many-stderr-gate".to_string(),
+        command: Some(script_path.to_string_lossy().to_string()),
+        timeout_ms: Some(5000),
+        depends_on: vec![],
+        output_adapter: None,
+        on_transition: vec![],
+        verifies: vec![],
+        kind: None,
+        metric: None,
+        direction: None,
+        skip: None,
+    }];
+
+    let options = GateRunOptions::default();
+    let outcome = execute_gate(temp.path(), &config, "many-stderr-gate", &options).unwrap();
+
+    assert_eq!(outcome.status, GateStatus::Fail);
+    assert_eq!(outcome.exit_code, 101);
+    assert_eq!(outcome.agent_instruction.as_deref(), Some("fix_cited_failures"));
+    let summary_lines: Vec<&str> = outcome.summary.lines().collect();
+    assert_eq!(summary_lines.len(), 40);
+    assert_eq!(summary_lines[0], "stderr error line 11");
+    assert_eq!(summary_lines[39], "stderr error line 50");
+}
+
+#[test]
+fn test_receipt_formatting_multiple_failures() {
+    let outcome = qdev_core::GateRunOutcome {
+        gate_id: "test-gate".to_string(),
+        status: GateStatus::Fail,
+        exit_code: 1,
+        duration_ms: 50,
+        summary: "2 of 2 tests failed".to_string(),
+        skipped_locally: false,
+        commit_sha: None,
+        story_id: None,
+        stdout: None,
+        stderr: None,
+        agent_instruction: Some("fix_cited_failures".to_string()),
+        failures: vec![
+            qdev_core::GateFailure {
+                location: "src/foo.rs:10".to_string(),
+                message: "assertion failed: a == b\n extra details".to_string(),
+            },
+            qdev_core::GateFailure {
+                location: "src/bar.rs:25".to_string(),
+                message: "assertion failed: x == y".to_string(),
+            },
+        ],
+        metric: None,
+        constraint_ids: Vec::new(),
+    };
+
+    let receipt = outcome.receipt();
+    let lines: Vec<&str> = receipt.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], "[FAIL] test-gate (exit 1) | src/foo.rs:10 | assertion failed: a == b");
+    assert_eq!(lines[1], "[FAIL] test-gate (exit 1) | src/bar.rs:25 | assertion failed: x == y");
+}
+
+#[test]
+fn test_receipt_formatting_empty_message_omits_trailing_separator() {
+    let outcome = qdev_core::GateRunOutcome {
+        gate_id: "empty-msg-gate".to_string(),
+        status: GateStatus::Fail,
+        exit_code: 1,
+        duration_ms: 10,
+        summary: "1 test failed".to_string(),
+        skipped_locally: false,
+        commit_sha: None,
+        story_id: None,
+        stdout: None,
+        stderr: None,
+        agent_instruction: Some("fix_cited_failures".to_string()),
+        failures: vec![qdev_core::GateFailure {
+            location: "src/empty.rs:5".to_string(),
+            message: "".to_string(),
+        }],
+        metric: None,
+        constraint_ids: Vec::new(),
+    };
+
+    assert_eq!(outcome.receipt(), "[FAIL] empty-msg-gate (exit 1) | src/empty.rs:5");
+}
+
+#[test]
+fn test_output_adapter_json_valid_document_success() {
+    let temp = setup_test_workspace();
+
+    let script_path = temp.path().join("json_success.sh");
+    fs::write(
+        &script_path,
+        r#"#!/bin/sh
+cat << 'EOF' > "$QDEV_RESULT_FILE"
+{
+  "status": "pass",
+  "summary": "18 tests passed",
+  "failures": [],
+  "metric": 100.0,
+  "constraint_ids": ["FR-101"]
+}
+EOF
+exit 0
+"#,
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let mut config = Config::default();
+    config.gates = vec![GateConfig {
+        id: "json-success-gate".to_string(),
+        command: Some(script_path.to_string_lossy().to_string()),
+        timeout_ms: Some(5000),
+        depends_on: vec![],
+        output_adapter: Some("json".to_string()),
+        on_transition: vec![],
+        verifies: vec![],
+        kind: None,
+        metric: None,
+        direction: None,
+        skip: None,
+    }];
+
+    let options = GateRunOptions::default();
+    let outcome = execute_gate(temp.path(), &config, "json-success-gate", &options).unwrap();
+
+    assert_eq!(outcome.status, GateStatus::Pass);
+    assert_eq!(outcome.exit_code, 0);
+    assert_eq!(outcome.summary, "18 tests passed");
+    assert_eq!(outcome.agent_instruction.as_deref(), Some("continue"));
+    assert_eq!(outcome.metric, Some(100.0));
+    assert_eq!(outcome.constraint_ids, vec!["FR-101"]);
+    assert!(outcome.failures.is_empty());
+}
+
+#[test]
+fn test_output_adapter_json_fallback_from_empty_result_file_to_stdout() {
+    let temp = setup_test_workspace();
+
+    let script_path = temp.path().join("json_stdout_fallback.sh");
+    fs::write(
+        &script_path,
+        r#"#!/bin/sh
+# Touch empty result file, write valid JSON to stdout
+touch "$QDEV_RESULT_FILE"
+cat << 'EOF'
+{
+  "status": "pass",
+  "summary": "stdout result passed",
+  "failures": [],
+  "metric": null,
+  "constraint_ids": []
+}
+EOF
+exit 0
+"#,
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let mut config = Config::default();
+    config.gates = vec![GateConfig {
+        id: "json-stdout-gate".to_string(),
+        command: Some(script_path.to_string_lossy().to_string()),
+        timeout_ms: Some(5000),
+        depends_on: vec![],
+        output_adapter: Some("json".to_string()),
+        on_transition: vec![],
+        verifies: vec![],
+        kind: None,
+        metric: None,
+        direction: None,
+        skip: None,
+    }];
+
+    let options = GateRunOptions::default();
+    let outcome = execute_gate(temp.path(), &config, "json-stdout-gate", &options).unwrap();
+
+    assert_eq!(outcome.status, GateStatus::Pass);
+    assert_eq!(outcome.exit_code, 0);
+    assert_eq!(outcome.summary, "stdout result passed");
+    assert_eq!(outcome.agent_instruction.as_deref(), Some("continue"));
+}
+
+#[test]
+fn test_output_adapter_cargo_success() {
+    let temp = setup_test_workspace();
+
+    let script_path = temp.path().join("cargo_pass.sh");
+    fs::write(
+        &script_path,
+        r#"#!/bin/sh
+cat << 'EOF'
+running 18 tests
+test test_one ... ok
+test test_eighteen ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+EOF
+exit 0
+"#,
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let mut config = Config::default();
+    config.gates = vec![GateConfig {
+        id: "cargo-success-gate".to_string(),
+        command: Some(script_path.to_string_lossy().to_string()),
+        timeout_ms: Some(5000),
+        depends_on: vec![],
+        output_adapter: Some("cargo".to_string()),
+        on_transition: vec![],
+        verifies: vec![],
+        kind: None,
+        metric: None,
+        direction: None,
+        skip: None,
+    }];
+
+    let options = GateRunOptions::default();
+    let outcome = execute_gate(temp.path(), &config, "cargo-success-gate", &options).unwrap();
+
+    assert_eq!(outcome.status, GateStatus::Pass);
+    assert_eq!(outcome.exit_code, 0);
+    assert_eq!(outcome.summary, "18 tests passed");
+    assert_eq!(outcome.agent_instruction.as_deref(), Some("continue"));
+    assert!(outcome.failures.is_empty());
+}
+
+#[test]
+fn test_output_adapter_xcodebuild_success() {
+    let temp = setup_test_workspace();
+
+    let script_path = temp.path().join("xcode_pass.sh");
+    fs::write(
+        &script_path,
+        r#"#!/bin/sh
+cat << 'EOF'
+Test Suite 'All tests' started at 2026-09-22 10:00:00.000
+	 Executed 18 tests, with 0 failures (0 unexpected) in 1.234 (1.234) seconds
+** TEST SUCCEEDED **
+EOF
+exit 0
+"#,
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let mut config = Config::default();
+    config.gates = vec![GateConfig {
+        id: "xcode-success-gate".to_string(),
+        command: Some(script_path.to_string_lossy().to_string()),
+        timeout_ms: Some(5000),
+        depends_on: vec![],
+        output_adapter: Some("xcodebuild".to_string()),
+        on_transition: vec![],
+        verifies: vec![],
+        kind: None,
+        metric: None,
+        direction: None,
+        skip: None,
+    }];
+
+    let options = GateRunOptions::default();
+    let outcome = execute_gate(temp.path(), &config, "xcode-success-gate", &options).unwrap();
+
+    assert_eq!(outcome.status, GateStatus::Pass);
+    assert_eq!(outcome.exit_code, 0);
+    assert_eq!(outcome.summary, "18 tests passed");
+    assert_eq!(outcome.agent_instruction.as_deref(), Some("continue"));
+    assert!(outcome.failures.is_empty());
+}
+
