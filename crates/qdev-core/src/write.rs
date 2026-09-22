@@ -8,7 +8,7 @@ use fs2::FileExt;
 use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 
-use crate::config::StorageConfig;
+use crate::config::{AnnotatedConfig, StorageConfig};
 use crate::errors::QdevError;
 use crate::id::{Identifier, IdentifierKind};
 use crate::schema::{validate_frontmatter, validate_frontmatter_detailed, EntityKind};
@@ -274,6 +274,49 @@ impl Author {
         }
         Ok(())
     }
+}
+
+/// Resolves active author attribution through flags, environment variables, config, and git email.
+pub fn resolve_author(
+    author_type: Option<&str>,
+    author_id: Option<&str>,
+    annotated_config: &AnnotatedConfig,
+    root: &Path,
+) -> Result<Author, QdevError> {
+    let validate = |value: String, source: &str| -> Result<String, QdevError> {
+        if value == "human" || value == "agent" {
+            Ok(value)
+        } else {
+            Err(QdevError::usage_error(format!(
+                "Invalid author type '{}' from {}, must be 'human' or 'agent'",
+                value, source
+            )))
+        }
+    };
+
+    let resolved_type = if let Some(at) = author_type {
+        validate(at.to_string(), "--author-type")?
+    } else if let Ok(env_at) = std::env::var("QDEV_AUTHOR_TYPE") {
+        validate(env_at, "QDEV_AUTHOR_TYPE")?
+    } else {
+        "human".to_string()
+    };
+
+    let flag_id = author_id.filter(|aid| !aid.trim().is_empty());
+    let env_id = std::env::var("QDEV_AUTHOR_ID")
+        .ok()
+        .filter(|aid| !aid.trim().is_empty());
+    let resolved_id = if let Some(aid) = flag_id {
+        aid.to_string()
+    } else if let Some(env_aid) = env_id {
+        env_aid
+    } else if !annotated_config.config.identity.developer_id.is_empty() {
+        annotated_config.config.identity.developer_id.clone()
+    } else {
+        crate::config::resolve_git_email(Some(root)).unwrap_or_else(|| "developer".to_string())
+    };
+
+    Ok(Author::new(resolved_type, resolved_id))
 }
 
 /// Options controlling frontmatter patching.

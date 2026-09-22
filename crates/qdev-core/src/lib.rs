@@ -53,9 +53,12 @@ pub use governance::{
 };
 
 pub use lease::{
-    auto_release_lease, claim_story, create_lease_override_decision, discover_git_branch,
-    discover_git_common_dir, find_active_lease, find_workspace_leases, generate_session_token,
-    get_lease, list_leases, parse_iso8601_to_timestamp, release_story, ReleasePayload, StoryLease,
+    auto_release_lease, auto_release_lease_with_storage, claim_story,
+    create_lease_override_decision, discover_git_branch, discover_git_common_dir,
+    find_active_lease, find_active_lease_with_storage, find_workspace_leases,
+    find_workspace_leases_with_storage, generate_session_token, get_lease, get_lease_with_storage,
+    lease_dir, list_leases, list_leases_with_storage, parse_iso8601_to_timestamp, release_story,
+    ReleasePayload, StoryLease,
 };
 
 pub use modules::ModuleRegistry;
@@ -149,7 +152,7 @@ pub use write::{
     apply_relation_change, canonical_file_name, create_story, current_iso8601, directory_for_kind,
     filename_carries_id, find_file_in_dir_for_id, id_carried_by_filename, iso8601_from_timestamp,
     kind_for_write, patch_frontmatter, purge_entity_row_for_moved_file, renamed_file_name,
-    replace_markdown_section, resolve_entity_file, sha256_digest, upsert_cache_and_mark_dirty,
+    replace_markdown_section, resolve_author, resolve_entity_file, sha256_digest, upsert_cache_and_mark_dirty,
     upsert_cache_with_constraint, upsert_cache_with_relation, write_file_atomic, AdvisoryLockGuard,
     Author, ConstraintAddOptions, ConstraintAddResult, ConstraintRemoveOptions,
     ConstraintRemoveResult, ConstraintRowChange, EntityUpdateOptions, EntityUpdateResult,

@@ -2344,3 +2344,100 @@ updated_by:
     assert_eq!(frontmatter["decision_type"], "story_superseded");
     assert_eq!(frontmatter["title"], "Story E12S5 superseded");
 }
+
+#[test]
+fn test_pre_transition_hook_abort_on_terminal_does_not_release_lease_or_close_dw() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    write_dw_file(
+        tmp.path(),
+        "DW-0001",
+        r#"---
+id: DW-0001
+title: "Open debt"
+status: open
+version: 1
+origin_story_id: E12S4
+target_module: bridge
+safety_risk: negligible
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Description
+Open debt.
+"#,
+    );
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: Story 4
+status: review
+version: 2
+appetite: small
+target_modules: ["bridge"]
+relations:
+  closes_dw:
+    - DW-0001
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    // Claim lease on E12S4
+    let author = Author::new("human", "simon");
+    let lease = qdev_core::lease::claim_story(tmp.path(), "E12S4", &author, None, None).unwrap();
+    assert_eq!(lease.story_id, "E12S4");
+
+    // Configure engine with an aborting pre-transition hook
+    let mut engine = TransitionEngine::new();
+    engine.add_pre_hook(|_ctx: &TransitionContext| {
+        Err(QdevError::logical_failure(
+            "gate_verification_failed",
+            "Gate review failed",
+        ))
+    });
+
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "done".to_string(),
+        justification: None,
+        author: author.clone(),
+        if_version: None,
+    };
+
+    let err = engine.transition(&opts).unwrap_err();
+    assert_eq!(err.code(), "gate_verification_failed");
+
+    // Verify lease is STILL active
+    let active_lease = qdev_core::lease::get_lease(tmp.path(), "E12S4");
+    assert!(active_lease.is_some(), "Active lease must NOT be auto-released when pre-hook aborts");
+    assert_eq!(active_lease.unwrap().holder, "simon");
+
+    // Verify DW is STILL open
+    let dw_content = fs::read_to_string(tmp.path().join("docs/state/dw/DW-0001.md")).unwrap();
+    assert!(dw_content.contains("status: open"), "DW must NOT be closed when pre-hook aborts");
+
+    // Verify story is STILL in review
+    let story_content = fs::read_to_string(tmp.path().join("docs/specs/stories/E12S4.md")).unwrap();
+    assert!(story_content.contains("status: review"), "Story must remain in review");
+}

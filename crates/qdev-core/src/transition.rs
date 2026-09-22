@@ -693,27 +693,7 @@ impl TransitionEngine {
             justification,
         )?;
 
-        // 4. Close `closes_dw` targets before committing the story: a DW that cannot be
-        //    written then fails while the story is still where it was, so the transition can
-        //    be re-driven instead of leaving a `done` story with open debt.
-        let closed_dw = if target_state == StoryState::Done {
-            close_deferred_work(
-                &options.workspace_root,
-                options.storage.as_ref(),
-                &id,
-                &decision.dw_ids,
-                &options.author,
-            )?
-        } else {
-            Vec::new()
-        };
-
-        // 5. Auto-release the story's lease on a terminal target (Story 2.3).
-        if target_state.is_terminal() {
-            let _ = crate::lease::auto_release_lease(&options.workspace_root, &id);
-        }
-
-        // 6. Execute pre_transition hooks synchronously in order; the first error aborts
+        // 4. Execute pre_transition hooks synchronously in order; the first error aborts
         //    before any mutation.
         let ctx = TransitionContext {
             workspace_root: options.workspace_root.clone(),
@@ -729,7 +709,22 @@ impl TransitionEngine {
             hook.run(&ctx)?;
         }
 
-        // 7. Commit through the write path that re-validates under the lock. The decision
+        // 5. Close `closes_dw` targets before committing the story: a DW that cannot be
+        //    written then fails while the story is still where it was, so the transition can
+        //    be re-driven instead of leaving a `done` story with open debt.
+        let closed_dw = if target_state == StoryState::Done {
+            close_deferred_work(
+                &options.workspace_root,
+                options.storage.as_ref(),
+                &id,
+                &decision.dw_ids,
+                &options.author,
+            )?
+        } else {
+            Vec::new()
+        };
+
+        // 6. Commit through the write path that re-validates under the lock. The decision
         //    above was taken from a read made before the lock, and the patch below carries a
         //    status computed from it, so the same judgement runs again against the content
         //    this write actually reads and patches.
@@ -757,6 +752,15 @@ impl TransitionEngine {
                 justification,
             )
         })?;
+
+        // 7. Auto-release the story's lease on a terminal target (Story 2.3) AFTER commit succeeds.
+        if target_state.is_terminal() {
+            let _ = crate::lease::auto_release_lease_with_storage(
+                &options.workspace_root,
+                &id,
+                options.storage.as_ref(),
+            );
+        }
 
         // 8. Record why an out-of-line move happened: a backward move or a jump to a terminal
         //    state stays on the decision ledger and in the story's scratchpad. Judged from the

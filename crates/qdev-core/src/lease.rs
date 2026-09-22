@@ -219,8 +219,25 @@ pub fn parse_iso8601_to_timestamp(s: &str) -> Option<i64> {
     Some(secs)
 }
 
+/// Returns the `<qdev>/leases` directory for a workspace, taking `StorageConfig` into account.
+pub fn lease_dir(workspace_root: &Path, storage: Option<&StorageConfig>) -> PathBuf {
+    let base = storage
+        .map(crate::init::qdev_dir)
+        .unwrap_or_else(|| ".qdev".to_string());
+    workspace_root.join(base).join("leases")
+}
+
 /// Resolves an active lease for a story if one exists in shared or local storage.
 pub fn get_lease(workspace_root: &Path, story_id: &str) -> Option<StoryLease> {
+    get_lease_with_storage(workspace_root, story_id, None)
+}
+
+/// Resolves an active lease for a story if one exists in shared or local storage, respecting StorageConfig.
+pub fn get_lease_with_storage(
+    workspace_root: &Path,
+    story_id: &str,
+    storage: Option<&StorageConfig>,
+) -> Option<StoryLease> {
     let trimmed_id = story_id.trim();
     if trimmed_id.is_empty()
         || trimmed_id.contains('/')
@@ -242,13 +259,24 @@ pub fn get_lease(workspace_root: &Path, story_id: &str) -> Option<StoryLease> {
         }
     }
 
-    let local_file = workspace_root
-        .join(".qdev/leases")
-        .join(format!("{}.json", story_id));
+    let local_file = lease_dir(workspace_root, storage).join(format!("{}.json", story_id));
     if local_file.is_file() {
         if let Ok(content) = fs::read_to_string(&local_file) {
             if let Ok(lease) = serde_json::from_str::<StoryLease>(&content) {
                 return Some(lease);
+            }
+        }
+    }
+
+    if storage.is_some() {
+        let default_file = workspace_root
+            .join(".qdev/leases")
+            .join(format!("{}.json", story_id));
+        if default_file.is_file() {
+            if let Ok(content) = fs::read_to_string(&default_file) {
+                if let Ok(lease) = serde_json::from_str::<StoryLease>(&content) {
+                    return Some(lease);
+                }
             }
         }
     }
@@ -258,6 +286,14 @@ pub fn get_lease(workspace_root: &Path, story_id: &str) -> Option<StoryLease> {
 
 /// Lists all active leases across the shared Git directory and local worktree.
 pub fn list_leases(workspace_root: &Path) -> Result<Vec<StoryLease>, QdevError> {
+    list_leases_with_storage(workspace_root, None)
+}
+
+/// Lists all active leases across the shared Git directory and local worktree, respecting StorageConfig.
+pub fn list_leases_with_storage(
+    workspace_root: &Path,
+    storage: Option<&StorageConfig>,
+) -> Result<Vec<StoryLease>, QdevError> {
     let mut map: BTreeMap<String, StoryLease> = BTreeMap::new();
 
     let git_common = discover_git_common_dir(workspace_root);
@@ -277,7 +313,7 @@ pub fn list_leases(workspace_root: &Path) -> Result<Vec<StoryLease>, QdevError> 
         }
     }
 
-    let local_dir = workspace_root.join(".qdev/leases");
+    let local_dir = lease_dir(workspace_root, storage);
     if local_dir.is_dir() {
         if let Ok(entries) = fs::read_dir(&local_dir) {
             for entry in entries.flatten() {
@@ -293,12 +329,38 @@ pub fn list_leases(workspace_root: &Path) -> Result<Vec<StoryLease>, QdevError> 
         }
     }
 
+    if storage.is_some() {
+        let default_dir = workspace_root.join(".qdev/leases");
+        if default_dir.is_dir() && default_dir != local_dir {
+            if let Ok(entries) = fs::read_dir(&default_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                        if let Ok(content) = fs::read_to_string(&path) {
+                            if let Ok(lease) = serde_json::from_str::<StoryLease>(&content) {
+                                map.entry(lease.story_id.clone()).or_insert(lease);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(map.into_values().collect())
 }
 
 /// Lists active leases present in the current workspace directory (`.qdev/leases`).
 pub fn find_workspace_leases(workspace_root: &Path) -> Result<Vec<StoryLease>, QdevError> {
-    let local_dir = workspace_root.join(".qdev/leases");
+    find_workspace_leases_with_storage(workspace_root, None)
+}
+
+/// Lists active leases present in the current workspace directory, respecting StorageConfig.
+pub fn find_workspace_leases_with_storage(
+    workspace_root: &Path,
+    storage: Option<&StorageConfig>,
+) -> Result<Vec<StoryLease>, QdevError> {
+    let local_dir = lease_dir(workspace_root, storage);
     let mut leases = Vec::new();
     if local_dir.is_dir() {
         let entries = fs::read_dir(&local_dir).map_err(|e| {
@@ -329,7 +391,15 @@ pub fn find_workspace_leases(workspace_root: &Path) -> Result<Vec<StoryLease>, Q
 /// Finds the single active lease held in the current workspace.
 /// Returns exit 1 `no_active_lease` if no lease is held, or exit 2 `usage_error` if multiple are held.
 pub fn find_active_lease(workspace_root: &Path) -> Result<StoryLease, QdevError> {
-    let leases = find_workspace_leases(workspace_root)?;
+    find_active_lease_with_storage(workspace_root, None)
+}
+
+/// Finds the single active lease held in the current workspace, respecting StorageConfig.
+pub fn find_active_lease_with_storage(
+    workspace_root: &Path,
+    storage: Option<&StorageConfig>,
+) -> Result<StoryLease, QdevError> {
+    let leases = find_workspace_leases_with_storage(workspace_root, storage)?;
     if leases.is_empty() {
         return Err(QdevError::logical_failure(
             "no_active_lease",
@@ -396,7 +466,7 @@ pub fn claim_story(
     }
 
     // 3. Refuse duplicate claims with exit code 5 (already_leased)
-    if let Some(existing) = get_lease(workspace_root, trimmed_id) {
+    if let Some(existing) = get_lease_with_storage(workspace_root, trimmed_id, storage) {
         return Err(QdevError::conflict(
             "already_leased",
             format!(
@@ -438,9 +508,7 @@ pub fn claim_story(
     })?;
 
     // 5. Write local lease
-    let local_file = workspace_root
-        .join(".qdev/leases")
-        .join(format!("{}.json", trimmed_id));
+    let local_file = lease_dir(workspace_root, storage).join(format!("{}.json", trimmed_id));
     write_file_atomic(&local_file, &lease_json)?;
 
     // 6. Mirror to shared Git directory
@@ -496,7 +564,7 @@ pub fn release_story(
         }
     }
 
-    let existing = match get_lease(workspace_root, trimmed_id) {
+    let existing = match get_lease_with_storage(workspace_root, trimmed_id, storage) {
         Some(l) => l,
         None => {
             return Err(QdevError::logical_failure(
@@ -537,9 +605,7 @@ pub fn release_story(
     }
 
     // Remove local and shared lease files
-    let local_file = workspace_root
-        .join(".qdev/leases")
-        .join(format!("{}.json", trimmed_id));
+    let local_file = lease_dir(workspace_root, storage).join(format!("{}.json", trimmed_id));
     if local_file.exists() {
         fs::remove_file(&local_file).map_err(|e| {
             QdevError::infrastructure_failure(
@@ -551,6 +617,15 @@ pub fn release_story(
                 ),
             )
         })?;
+    }
+
+    if storage.is_some() {
+        let default_local = workspace_root
+            .join(".qdev/leases")
+            .join(format!("{}.json", trimmed_id));
+        if default_local.exists() && default_local != local_file {
+            let _ = fs::remove_file(&default_local);
+        }
     }
 
     let git_common = discover_git_common_dir(workspace_root);
@@ -577,6 +652,15 @@ pub fn release_story(
 
 /// Automatically releases an active lease for a story if present (e.g. upon transition to terminal state).
 pub fn auto_release_lease(workspace_root: &Path, story_id: &str) -> Result<(), QdevError> {
+    auto_release_lease_with_storage(workspace_root, story_id, None)
+}
+
+/// Automatically releases an active lease for a story if present, respecting StorageConfig.
+pub fn auto_release_lease_with_storage(
+    workspace_root: &Path,
+    story_id: &str,
+    storage: Option<&StorageConfig>,
+) -> Result<(), QdevError> {
     let trimmed_id = story_id.trim();
     if trimmed_id.is_empty()
         || trimmed_id.contains('/')
@@ -586,10 +670,8 @@ pub fn auto_release_lease(workspace_root: &Path, story_id: &str) -> Result<(), Q
         return Ok(());
     }
 
-    if let Some(existing) = get_lease(workspace_root, trimmed_id) {
-        let local_file = workspace_root
-            .join(".qdev/leases")
-            .join(format!("{}.json", trimmed_id));
+    if let Some(existing) = get_lease_with_storage(workspace_root, trimmed_id, storage) {
+        let local_file = lease_dir(workspace_root, storage).join(format!("{}.json", trimmed_id));
         if local_file.exists() {
             let _ = fs::remove_file(&local_file);
         }
@@ -600,6 +682,15 @@ pub fn auto_release_lease(workspace_root: &Path, story_id: &str) -> Result<(), Q
             .join(format!("{}.json", trimmed_id));
         if shared_file.exists() {
             let _ = fs::remove_file(&shared_file);
+        }
+
+        if storage.is_some() {
+            let default_local = workspace_root
+                .join(".qdev/leases")
+                .join(format!("{}.json", trimmed_id));
+            if default_local.exists() && default_local != local_file {
+                let _ = fs::remove_file(&default_local);
+            }
         }
 
         let other_local = Path::new(&existing.worktree_path)

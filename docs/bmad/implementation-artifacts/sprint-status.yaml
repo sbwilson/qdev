@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-21-2026 22:18
+last_updated: 09-22-2026 12:51
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -62,21 +62,21 @@ development_status:
   1-29-one-gate-for-relation-writes: done               # P3-5
   1-30-derivation-sites-are-enumerable: done            # P3-11
 
-  epic-2: in-progress
+  epic-2: done
   2-1-state-machine-lifecycle-hooks: done
-  2-2-justified-backward-transitions: review
-  2-3-story-leases: review
-  2-4-scope-enforcement-cross-team-overrides: review
-  2-5-constraints-as-entities: review
-  2-6-scratchpads: review
-  2-7-decision-ledger: review
-  2-8-deferred-work: review
-  2-9-sprints-as-assignments: review
-  2-10-chores-with-path-allowlists: review
-  2-11-qdev-next: review
-  2-12-root-pulse: review
-  2-13-module-registry: review
-  epic-2-retrospective: optional
+  2-2-justified-backward-transitions: done
+  2-3-story-leases: done
+  2-4-scope-enforcement-cross-team-overrides: done
+  2-5-constraints-as-entities: done
+  2-6-scratchpads: done
+  2-7-decision-ledger: done
+  2-8-deferred-work: done
+  2-9-sprints-as-assignments: done
+  2-10-chores-with-path-allowlists: done
+  2-11-qdev-next: done
+  2-12-root-pulse: done
+  2-13-module-registry: done
+  epic-2-retrospective: done
 
   epic-3: backlog
   3-1-gate-runner-subprocess-environment-timeouts: backlog
