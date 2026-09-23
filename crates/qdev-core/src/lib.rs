@@ -25,11 +25,13 @@ pub mod validate;
 pub mod write;
 
 pub use gate::{
-    execute_gate, execute_gate_set, format_duration, get_gate_list, parse_with_adapter,
+    evaluate_ratchet, execute_gate, execute_gate_set, format_duration, format_metric_number,
+    get_gate_list, parse_with_adapter, read_baseline, resolve_baseline_path, resolve_commit_sha,
     resolve_gate_execution_order, validate_adapter_name, validate_gate_dependencies,
-    GateFailure, GateListItem, GateListPayload, GateResultDocument, GateRunOptions,
-    GateRunOutcome, GateRunPayload, GateRunSetOutcome, GateRunSetPayload, GateStatus,
-    HeadTailBuffer, VALID_ADAPTERS,
+    write_baseline, GateBaselinePayload, GateFailure, GateListItem, GateListPayload,
+    GateResultDocument, GateRunOptions, GateRunOutcome, GateRunPayload, GateRunSetOutcome,
+    GateRunSetPayload, GateStatus, HeadTailBuffer, RatchetBaseline, RatchetDirection,
+    RatchetEvaluation, VALID_ADAPTERS,
 };
 
 pub use chore::{
@@ -157,14 +159,15 @@ pub use validate::{
     run_validation, scan_duplicate_planning_ids, sort_findings, DuplicateIdScan,
 };
 pub use write::{
-    acquire_write_lock, apply_constraint_add, apply_constraint_remove, apply_entity_update,
-    apply_relation_change, canonical_file_name, create_story, current_iso8601, directory_for_kind,
-    filename_carries_id, find_file_in_dir_for_id, id_carried_by_filename, iso8601_from_timestamp,
-    kind_for_write, patch_frontmatter, purge_entity_row_for_moved_file, renamed_file_name,
-    replace_markdown_section, resolve_author, resolve_entity_file, sha256_digest, upsert_cache_and_mark_dirty,
-    upsert_cache_with_constraint, upsert_cache_with_relation, write_file_atomic, AdvisoryLockGuard,
-    Author, ConstraintAddOptions, ConstraintAddResult, ConstraintRemoveOptions,
-    ConstraintRemoveResult, ConstraintRowChange, EntityUpdateOptions, EntityUpdateResult,
-    FrontmatterPatchOptions, RelationChangeOptions, RelationChangeResult, RelationRowChange,
-    StoryCreateOptions, StoryCreateResult,
+    acquire_workspace_write_lock, acquire_write_lock, apply_constraint_add,
+    apply_constraint_remove, apply_entity_update, apply_relation_change, canonical_file_name,
+    create_story, current_iso8601, directory_for_kind, filename_carries_id,
+    find_file_in_dir_for_id, id_carried_by_filename, iso8601_from_timestamp, kind_for_write,
+    patch_frontmatter, purge_entity_row_for_moved_file, renamed_file_name,
+    replace_markdown_section, resolve_author, resolve_entity_file, sha256_digest,
+    upsert_cache_and_mark_dirty, upsert_cache_with_constraint, upsert_cache_with_relation,
+    write_file_atomic, AdvisoryLockGuard, Author, ConstraintAddOptions, ConstraintAddResult,
+    ConstraintRemoveOptions, ConstraintRemoveResult, ConstraintRowChange, EntityUpdateOptions,
+    EntityUpdateResult, FrontmatterPatchOptions, RelationChangeOptions, RelationChangeResult,
+    RelationRowChange, StoryCreateOptions, StoryCreateResult,
 };

@@ -294,6 +294,8 @@ pub fn handle_sprint_close(
         sprint: sprint_num,
         carry_over_target,
         author: &author,
+        gates: Some(&annotated_config.config.gates),
+        integration_branch: Some(&annotated_config.config.git.integration_branch),
     };
 
     let result = match qdev_core::close_sprint(&options) {

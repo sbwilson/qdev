@@ -165,6 +165,7 @@ pub enum PayloadKind {
     GateRun,
     GateList,
     GateSet,
+    GateBaseline,
 }
 
 impl PayloadKind {
@@ -187,6 +188,7 @@ impl PayloadKind {
             PayloadKind::GateRun => include_str!("../schemas/payload-gate-run.json"),
             PayloadKind::GateList => include_str!("../schemas/payload-gate-list.json"),
             PayloadKind::GateSet => include_str!("../schemas/payload-gate-set.json"),
+            PayloadKind::GateBaseline => include_str!("../schemas/payload-gate-baseline.json"),
         }
     }
 
@@ -220,11 +222,12 @@ impl PayloadKind {
             PayloadKind::GateRun => "gate_run",
             PayloadKind::GateList => "gate_list",
             PayloadKind::GateSet => "gate_set",
+            PayloadKind::GateBaseline => "gate_baseline",
         }
     }
 
     /// Returns an array of all currently-supported payload kinds.
-    pub const fn all() -> &'static [PayloadKind; 16] {
+    pub const fn all() -> &'static [PayloadKind; 17] {
         &[
             PayloadKind::Story,
             PayloadKind::Error,
@@ -242,6 +245,7 @@ impl PayloadKind {
             PayloadKind::GateRun,
             PayloadKind::GateList,
             PayloadKind::GateSet,
+            PayloadKind::GateBaseline,
         ]
     }
 
@@ -276,6 +280,9 @@ impl PayloadKind {
             "gate_run" | "gaterun" | "gate" => Ok(PayloadKind::GateRun),
             "gate_list" | "gatelist" | "gate_lists" => Ok(PayloadKind::GateList),
             "gate_set" | "gateset" | "gate_sets" | "gate_run_set" => Ok(PayloadKind::GateSet),
+            "gate_baseline" | "gatebaseline" | "baseline" | "baselines" => {
+                Ok(PayloadKind::GateBaseline)
+            }
             _ => Err(QdevError::usage_error(format!(
                 "Unknown payload name '{}'. Valid payload names: {}",
                 s,

@@ -9,7 +9,9 @@ use crate::gate::adapter::{parse_with_adapter, validate_adapter_name};
 use crate::gate::process::ProcessGroupIsolation;
 use crate::gate::result::GateResultDocument;
 use crate::gate::ring_buffer::HeadTailBuffer;
-use crate::gate::{GateListItem, GateRunOutcome, GateRunSetOutcome, GateStatus};
+use crate::gate::{
+    GateFailure, GateListItem, GateRunOutcome, GateRunSetOutcome, GateStatus,
+};
 use crate::lease::find_active_lease_with_storage;
 use crate::modules::ModuleRegistry;
 use crate::store::Store;
@@ -142,7 +144,7 @@ pub fn resolve_binary(workspace_root: &Path, binary_str: &str) -> (String, bool)
 }
 
 /// Resolves the current git commit SHA using `git rev-parse HEAD`.
-fn resolve_commit_sha(workspace_root: &Path) -> Option<String> {
+pub fn resolve_commit_sha(workspace_root: &Path) -> Option<String> {
     let output = Command::new("git")
         .current_dir(workspace_root)
         .args(["rev-parse", "HEAD"])
@@ -171,6 +173,46 @@ fn resolve_story_id(
     find_active_lease_with_storage(workspace_root, Some(&config.storage))
         .ok()
         .map(|l| l.story_id)
+}
+
+fn extract_metric_from_text(text: &str, metric_name: &str) -> Option<f64> {
+    let lower_metric = metric_name.to_lowercase();
+    let patterns = [
+        format!("{}:", lower_metric),
+        format!("{} =", lower_metric),
+        format!("{}=", lower_metric),
+    ];
+    for line in text.lines().rev() {
+        let trimmed = line.trim();
+        let lower_line = trimmed.to_lowercase();
+        for pat in &patterns {
+            if let Some(idx) = lower_line.find(pat) {
+                let remainder = trimmed[idx + pat.len()..].trim();
+                let token = remainder
+                    .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+                    .find(|s| !s.is_empty());
+                if let Some(t) = token {
+                    if let Ok(val) = t.parse::<f64>() {
+                        if val.is_finite() {
+                            return Some(val);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok(val) = text.trim().parse::<f64>() {
+        if val.is_finite() {
+            return Some(val);
+        }
+    }
+
+    text.lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .and_then(|l| l.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite())
 }
 
 /// Executes a verification gate external subprocess according to Story 3.2 specification.
@@ -503,8 +545,15 @@ pub fn execute_gate(
     let raw_exit_code = status.code().unwrap_or(-1);
 
     // 8. Output classification based on output_adapter configuration
-    let (status, exit_code, summary, agent_instruction, failures, metric, constraint_ids) =
-        match gate_config.output_adapter.as_deref() {
+    let (
+        mut status,
+        mut exit_code,
+        mut summary,
+        mut agent_instruction,
+        mut failures,
+        mut metric,
+        constraint_ids,
+    ) = match gate_config.output_adapter.as_deref() {
             Some("json") => {
                 // If output_adapter = "json" is declared, require a valid result document.
                 let mut parsed_doc = None;
@@ -724,6 +773,64 @@ pub fn execute_gate(
                 }
             }
         };
+
+    // If gate is a ratchet gate, evaluate against branch baseline
+    if gate_config.kind.as_deref() == Some("ratchet") {
+        let direction_str = gate_config.direction.as_deref().unwrap_or("");
+        if direction_str != "must_not_increase" && direction_str != "must_not_decrease" {
+            return Err(QdevError::usage_error(format!(
+                "ratchet gate '{}' requires direction 'must_not_increase' or 'must_not_decrease'",
+                gate_id
+            )));
+        }
+
+        if status != GateStatus::Infra {
+            let metric_name = gate_config.metric.as_deref().unwrap_or("metric");
+            if metric.is_none() {
+                metric = extract_metric_from_text(&stdout_str, metric_name)
+                    .or_else(|| extract_metric_from_text(&stderr_str, metric_name));
+            }
+
+            if let Some(current_metric) = metric {
+                let baseline = crate::gate::read_baseline(
+                    workspace_root,
+                    &config.storage.state_dir,
+                    &config.git.integration_branch,
+                    gate_id,
+                )?;
+
+                let evaluation = crate::gate::evaluate_ratchet(
+                    current_metric,
+                    baseline.as_ref(),
+                    direction_str,
+                    metric_name,
+                    &config.git.integration_branch,
+                )?;
+
+                if evaluation.is_regression {
+                    status = evaluation.status;
+                    exit_code = evaluation.exit_code;
+                    summary = evaluation.summary;
+                    agent_instruction = Some("fix_cited_failures".to_string());
+                    failures.push(GateFailure {
+                        location: gate_id.to_string(),
+                        message: summary.clone(),
+                    });
+                } else if status == GateStatus::Pass {
+                    summary = evaluation.summary;
+                }
+            } else {
+                status = GateStatus::Fail;
+                exit_code = 1;
+                summary = format!("ratchet gate '{}' did not produce a numeric metric", gate_id);
+                agent_instruction = Some("fix_cited_failures".to_string());
+                failures.push(GateFailure {
+                    location: gate_id.to_string(),
+                    message: summary.clone(),
+                });
+            }
+        }
+    }
 
     Ok(GateRunOutcome {
         gate_id: gate_id.to_string(),

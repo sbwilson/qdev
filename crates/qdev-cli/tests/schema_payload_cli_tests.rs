@@ -309,6 +309,27 @@ fn test_schema_payload_gate_set_success() {
 }
 
 #[test]
+fn test_schema_payload_gate_baseline_success() {
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "gate_baseline"])
+        .assert()
+        .success();
+    let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
+    assert!(stdout.contains("Gate Baseline Payload Schema"));
+    assert!(stdout.contains("exists"));
+
+    let json_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "gate_baseline", "--json"])
+        .assert()
+        .success();
+    let val: Value = serde_json::from_slice(&json_assert.get_output().stdout).unwrap();
+    assert_eq!(val["schema_version"], "1");
+    assert_eq!(val["title"], "Gate Baseline Payload Schema");
+}
+
+#[test]
 fn test_schema_payload_missing_name_is_usage_error() {
     let assert = Command::cargo_bin("qdev")
         .unwrap()

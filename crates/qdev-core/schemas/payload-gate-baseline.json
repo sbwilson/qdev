@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Gate Baseline Payload Schema",
+  "description": "Output shape of `qdev gate baseline <id> [--json]`. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "gate",
+    "branch",
+    "exists"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "gate": {
+      "type": "string",
+      "minLength": 1
+    },
+    "branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "exists": {
+      "type": "boolean"
+    },
+    "metric": {
+      "type": ["string", "null"]
+    },
+    "direction": {
+      "type": ["string", "null"],
+      "enum": ["must_not_increase", "must_not_decrease", null]
+    },
+    "value": {
+      "type": ["number", "null"]
+    },
+    "commit": {
+      "type": ["string", "null"]
+    },
+    "author": {
+      "type": ["object", "null"],
+      "required": ["type", "id"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["human", "agent"]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "timestamp": {
+      "type": ["string", "null"]
+    }
+  },
+  "additionalProperties": false
+}

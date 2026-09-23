@@ -525,6 +525,8 @@ pub struct SprintCloseOptions<'a> {
     pub sprint: i64,
     pub carry_over_target: Option<i64>,
     pub author: &'a Author,
+    pub gates: Option<&'a [crate::config::GateConfig]>,
+    pub integration_branch: Option<&'a str>,
 }
 
 /// Result of closing a sprint.
@@ -819,6 +821,123 @@ pub fn close_sprint(options: &SprintCloseOptions) -> Result<SprintCloseResult, Q
                         carried_from: Some(options.sprint),
                     })?;
             }
+        }
+    }
+
+    // If sprint is associated with a release, snapshot all ratchet baselines into release frontmatter
+    let linked_release = json_fm
+        .get("release")
+        .or_else(|| json_fm.get("release_version"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if let Some(release_name) = linked_release {
+        let (_, _, release_abs_path) = match resolve_entity_file(
+            options.workspace_root,
+            Some(EntityKind::Release),
+            release_name,
+            Some(options.storage),
+        ) {
+            Ok(r) => r,
+            Err(_) => {
+                return Err(QdevError::usage_error_with_code(
+                    "release_not_found",
+                    format!("Linked release '{}' not found", release_name),
+                ));
+            }
+        };
+
+        let release_content = fs::read_to_string(&release_abs_path).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "io_error",
+                format!(
+                    "Failed to read release file '{}': {}",
+                    release_abs_path.display(),
+                    e
+                ),
+            )
+        })?;
+
+        let (release_fm_str, _) = extract_frontmatter_str(&release_content).map_err(|e| {
+            QdevError::logical_failure(
+                "missing_frontmatter",
+                format!(
+                    "Failed to locate frontmatter in release '{}': {}",
+                    release_name, e
+                ),
+            )
+        })?;
+        let existing_release_fm: serde_yaml::Value = serde_yaml::from_str(release_fm_str)
+            .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+
+        let mut snapshot_map = serde_yaml::Mapping::new();
+        if let Some(existing_map) = existing_release_fm
+            .get("baseline_snapshot")
+            .and_then(|v| v.as_mapping())
+        {
+            snapshot_map = existing_map.clone();
+        }
+
+        let branch = options.integration_branch.unwrap_or("main");
+
+        if let Some(gates) = options.gates {
+            for gate in gates {
+                if gate.kind.as_deref() == Some("ratchet") {
+                    if let Ok(Some(baseline)) = crate::gate::read_baseline(
+                        options.workspace_root,
+                        &options.storage.state_dir,
+                        branch,
+                        &gate.id,
+                    ) {
+                        if let Ok(val) = serde_yaml::to_value(baseline.value) {
+                            snapshot_map.insert(
+                                serde_yaml::Value::String(gate.id.clone()),
+                                val,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let release_patch_opts = FrontmatterPatchOptions {
+            custom_fields: vec![(
+                "baseline_snapshot".to_string(),
+                serde_yaml::Value::Mapping(snapshot_map),
+            )],
+            author: Some(options.author.clone()),
+            ..Default::default()
+        };
+
+        let (patched_release, release_ver) =
+            patch_frontmatter(&release_content, &release_patch_opts)?;
+
+        let release_fm = extract_frontmatter(&patched_release)
+            .map_err(|e| QdevError::logical_failure("schema_error", e.to_string()))?;
+        validate_value_detailed(EntityKind::Release, &release_fm).map_err(|errs| {
+            QdevError::logical_failure(
+                "schema_violation",
+                format!(
+                    "Release schema validation failed after baseline snapshot: {:?}",
+                    errs
+                ),
+            )
+        })?;
+
+        write_file_atomic(&release_abs_path, &patched_release)?;
+
+        let release_hash = sha256_digest(patched_release.as_bytes());
+        let release_rel_path = workspace_rel_path(&release_abs_path, options.workspace_root);
+        if let Some(mut rel_entity) =
+            options.store.get_live_entity_for_derivation(release_name)?
+        {
+            rel_entity.version = release_ver;
+            rel_entity.content_hash = release_hash;
+            rel_entity.source_path = release_rel_path;
+            rel_entity.updated_by = Some(options.author.clone());
+            rel_entity.updated_at = current_iso8601();
+            options.store.upsert_entity(&rel_entity)?;
         }
     }
 

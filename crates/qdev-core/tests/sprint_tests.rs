@@ -404,6 +404,8 @@ fn test_close_sprint_carry_over() {
         sprint: 5,
         carry_over_target: Some(6),
         author: &author,
+        gates: None,
+        integration_branch: None,
     };
 
     let result = close_sprint(&close_opts).expect("close should succeed");
@@ -583,6 +585,8 @@ fn test_duplicate_active_sprint_validation() {
         sprint: 5,
         carry_over_target: None,
         author: &author,
+        gates: None,
+        integration_branch: None,
     })
     .unwrap();
 

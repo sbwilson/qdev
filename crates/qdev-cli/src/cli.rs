@@ -99,6 +99,8 @@ pub enum GateCommands {
     Run(GateRunArgs),
     /// List configured gates and their status
     List(GateListArgs),
+    /// Inspect or record gate baselines for ratchet verification
+    Baseline(GateBaselineArgs),
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
@@ -121,6 +123,30 @@ pub struct GateRunArgs {
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
 pub struct GateListArgs {}
+
+#[derive(Parser, Debug, Clone, PartialEq, Default)]
+pub struct GateBaselineArgs {
+    /// ID of the ratchet gate
+    pub id: String,
+
+    /// Update or record the baseline
+    #[arg(long)]
+    pub set: bool,
+
+    /// Explicit metric value to record (without re-running the gate)
+    #[arg(long)]
+    pub value: Option<f64>,
+
+    /// Attribution author type override ('human' or 'agent')
+    #[arg(long = "author-type")]
+    pub author_type: Option<String>,
+
+    /// Attribution developer/agent ID override
+    #[arg(long = "author-id")]
+    pub author_id: Option<String>,
+}
+
+impl Eq for GateBaselineArgs {}
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]
 pub struct ChoreArgs {

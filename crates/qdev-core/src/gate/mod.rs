@@ -6,16 +6,20 @@ pub mod result;
 pub mod ring_buffer;
 pub mod runner;
 
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 
-use crate::errors::ExitCode;
+use crate::config::StorageConfig;
+use crate::errors::{ExitCode, QdevError};
+use crate::write::{acquire_workspace_write_lock, write_file_atomic, Author};
 
 pub use adapter::{parse_with_adapter, validate_adapter_name, VALID_ADAPTERS};
 pub use result::GateResultDocument;
 pub use ring_buffer::HeadTailBuffer;
 pub use runner::{
-    execute_gate, execute_gate_set, get_gate_list, resolve_gate_execution_order,
-    validate_gate_dependencies, GateRunOptions,
+    execute_gate, execute_gate_set, get_gate_list, resolve_commit_sha,
+    resolve_gate_execution_order, validate_gate_dependencies, GateRunOptions,
 };
 
 /// Gate execution status taxonomy conforming to AD-5 and compliance & safety specification.
@@ -270,4 +274,307 @@ impl GateRunSetOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GateRunSetPayload {
     pub runs: Vec<GateRunPayload>,
+}
+
+/// Ratchet gate metric regression direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RatchetDirection {
+    MustNotIncrease,
+    MustNotDecrease,
+}
+
+impl RatchetDirection {
+    pub fn from_str_loose(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "must_not_increase" => Some(Self::MustNotIncrease),
+            "must_not_decrease" => Some(Self::MustNotDecrease),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MustNotIncrease => "must_not_increase",
+            Self::MustNotDecrease => "must_not_decrease",
+        }
+    }
+}
+
+impl std::fmt::Display for RatchetDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Committed baseline metadata stored in `docs/state/baselines/<branch>/<gate>.json`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RatchetBaseline {
+    pub gate: String,
+    pub metric: String,
+    pub direction: String,
+    pub value: f64,
+    pub commit: String,
+    pub author: Author,
+    pub timestamp: String,
+}
+
+/// Output payload of `qdev gate baseline <id> [--json]` matching payload-gate-baseline.json schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GateBaselinePayload {
+    pub gate: String,
+    pub branch: String,
+    pub exists: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<Author>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+}
+
+impl GateBaselinePayload {
+    pub fn from_baseline(branch: String, baseline: RatchetBaseline) -> Self {
+        Self {
+            gate: baseline.gate,
+            branch,
+            exists: true,
+            metric: Some(baseline.metric),
+            direction: Some(baseline.direction),
+            value: Some(baseline.value),
+            commit: Some(baseline.commit),
+            author: Some(baseline.author),
+            timestamp: Some(baseline.timestamp),
+        }
+    }
+
+    pub fn missing(gate: String, branch: String) -> Self {
+        Self {
+            gate,
+            branch,
+            exists: false,
+            metric: None,
+            direction: None,
+            value: None,
+            commit: None,
+            author: None,
+            timestamp: None,
+        }
+    }
+}
+
+/// Result of evaluating a numeric metric against a branch ratchet baseline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RatchetEvaluation {
+    pub status: GateStatus,
+    pub exit_code: i32,
+    pub summary: String,
+    pub delta: Option<f64>,
+    pub is_regression: bool,
+}
+
+/// Formats a numeric metric or delta concisely (integers without decimal point, floats as-is).
+pub fn format_metric_number(n: f64) -> String {
+    if n == 0.0 {
+        "0".to_string()
+    } else if n.fract() == 0.0 && !n.is_infinite() {
+        format!("{:.0}", n)
+    } else {
+        format!("{}", n)
+    }
+}
+
+/// Resolves the absolute path to a gate's baseline JSON file for a given integration branch.
+pub fn resolve_baseline_path(
+    workspace_root: &Path,
+    state_dir: &str,
+    integration_branch: &str,
+    gate_id: &str,
+) -> PathBuf {
+    workspace_root
+        .join(state_dir)
+        .join("baselines")
+        .join(integration_branch)
+        .join(format!("{}.json", gate_id))
+}
+
+/// Reads a committed baseline from disk if present.
+pub fn read_baseline(
+    workspace_root: &Path,
+    state_dir: &str,
+    integration_branch: &str,
+    gate_id: &str,
+) -> Result<Option<RatchetBaseline>, QdevError> {
+    let baseline_path = resolve_baseline_path(workspace_root, state_dir, integration_branch, gate_id);
+    if !baseline_path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&baseline_path).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "io_error",
+            format!(
+                "Failed to read baseline file '{}': {}",
+                baseline_path.display(),
+                e
+            ),
+        )
+    })?;
+    let baseline: RatchetBaseline = serde_json::from_str(&content).map_err(|e| {
+        QdevError::logical_failure(
+            "invalid_baseline",
+            format!(
+                "Failed to parse baseline file '{}': {}",
+                baseline_path.display(),
+                e
+            ),
+        )
+    })?;
+    Ok(Some(baseline))
+}
+
+/// Writes a committed baseline file atomically under the workspace write lock.
+pub fn write_baseline(
+    workspace_root: &Path,
+    storage: &StorageConfig,
+    integration_branch: &str,
+    baseline: &RatchetBaseline,
+) -> Result<PathBuf, QdevError> {
+    let _lock = acquire_workspace_write_lock(workspace_root, Some(storage))?;
+    let baseline_path = resolve_baseline_path(
+        workspace_root,
+        &storage.state_dir,
+        integration_branch,
+        &baseline.gate,
+    );
+    if let Some(parent) = baseline_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "io_error",
+                format!(
+                    "Failed to create baseline directory '{}': {}",
+                    parent.display(),
+                    e
+                ),
+            )
+        })?;
+    }
+    let mut content = serde_json::to_string_pretty(baseline).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "json_serialize_error",
+            format!("Failed to serialize baseline: {}", e),
+        )
+    })?;
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    write_file_atomic(&baseline_path, &content)?;
+    Ok(baseline_path)
+}
+
+/// Evaluates a numeric metric against an optional baseline following direction rules.
+pub fn evaluate_ratchet(
+    current_metric: f64,
+    baseline: Option<&RatchetBaseline>,
+    direction_str: &str,
+    metric_name: &str,
+    branch: &str,
+) -> Result<RatchetEvaluation, QdevError> {
+    if !current_metric.is_finite() {
+        return Err(QdevError::usage_error(format!(
+            "metric '{}' value must be a finite number, got {}",
+            metric_name, current_metric
+        )));
+    }
+    if let Some(b) = baseline {
+        if !b.value.is_finite() {
+            return Err(QdevError::usage_error(format!(
+                "baseline value for gate '{}' must be a finite number, got {}",
+                b.gate, b.value
+            )));
+        }
+    }
+
+    let dir = RatchetDirection::from_str_loose(direction_str).ok_or_else(|| {
+        QdevError::usage_error(format!(
+            "ratchet gate requires direction 'must_not_increase' or 'must_not_decrease', got '{}'",
+            direction_str
+        ))
+    })?;
+
+    match baseline {
+        None => {
+            let summary = format!(
+                "ratchet passed with no baseline ({}: {}, baseline: null) [warning: no baseline recorded for branch '{}']",
+                metric_name,
+                format_metric_number(current_metric),
+                branch
+            );
+            Ok(RatchetEvaluation {
+                status: GateStatus::Pass,
+                exit_code: 0,
+                summary,
+                delta: None,
+                is_regression: false,
+            })
+        }
+        Some(b) => {
+            let delta = current_metric - b.value;
+            let is_regression = match dir {
+                RatchetDirection::MustNotIncrease => current_metric > b.value,
+                RatchetDirection::MustNotDecrease => current_metric < b.value,
+            };
+
+            if is_regression {
+                let delta_str = match dir {
+                    RatchetDirection::MustNotIncrease => format!("+{}", format_metric_number(delta)),
+                    RatchetDirection::MustNotDecrease => format_metric_number(delta),
+                };
+                let action = match dir {
+                    RatchetDirection::MustNotIncrease => "increased from",
+                    RatchetDirection::MustNotDecrease => "decreased from",
+                };
+                let summary = format!(
+                    "ratchet regression: {} {} {} to {} (delta: {})",
+                    metric_name,
+                    action,
+                    format_metric_number(b.value),
+                    format_metric_number(current_metric),
+                    delta_str
+                );
+                Ok(RatchetEvaluation {
+                    status: GateStatus::Fail,
+                    exit_code: 1,
+                    summary,
+                    delta: Some(delta),
+                    is_regression: true,
+                })
+            } else {
+                let delta_str = if delta > 0.0 {
+                    format!("+{}", format_metric_number(delta))
+                } else {
+                    format_metric_number(delta)
+                };
+                let summary = format!(
+                    "ratchet passed: {} is {} (baseline: {}, delta: {})",
+                    metric_name,
+                    format_metric_number(current_metric),
+                    format_metric_number(b.value),
+                    delta_str
+                );
+                Ok(RatchetEvaluation {
+                    status: GateStatus::Pass,
+                    exit_code: 0,
+                    summary,
+                    delta: Some(delta),
+                    is_regression: false,
+                })
+            }
+        }
+    }
 }
