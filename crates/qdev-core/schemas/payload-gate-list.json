@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Gate List Payload Schema",
+  "description": "Output shape of `qdev gate list --json`. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "gates"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "gates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "transitions",
+          "dependencies",
+          "last_status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "transitions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "last_status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "pass",
+              "fail",
+              "infra",
+              "skip",
+              null
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

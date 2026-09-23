@@ -13,7 +13,10 @@ use crate::errors::ExitCode;
 pub use adapter::{parse_with_adapter, validate_adapter_name, VALID_ADAPTERS};
 pub use result::GateResultDocument;
 pub use ring_buffer::HeadTailBuffer;
-pub use runner::{execute_gate, GateRunOptions};
+pub use runner::{
+    execute_gate, execute_gate_set, get_gate_list, resolve_gate_execution_order,
+    validate_gate_dependencies, GateRunOptions,
+};
 
 /// Gate execution status taxonomy conforming to AD-5 and compliance & safety specification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,7 +193,11 @@ impl GateRunOutcome {
                 format!("[INFRA] {} | {} | halt and alert", self.gate_id, clean_summary)
             }
             GateStatus::Skip => {
-                format!("[SKIP] {} | skipped_locally", self.gate_id)
+                if clean_summary.is_empty() {
+                    format!("[SKIP] {} | skipped_locally", self.gate_id)
+                } else {
+                    format!("[SKIP] {} | {}", self.gate_id, clean_summary)
+                }
             }
         }
     }
@@ -203,4 +210,64 @@ pub fn format_duration(duration_ms: u64) -> String {
     } else {
         format!("{} ms", duration_ms)
     }
+}
+
+/// Single gate item representation for gate list output.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GateListItem {
+    pub id: String,
+    pub kind: String,
+    pub transitions: Vec<String>,
+    pub dependencies: Vec<String>,
+    pub last_status: Option<String>,
+}
+
+/// Output payload of `qdev gate list --json` matching payload-gate-list.json schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GateListPayload {
+    pub gates: Vec<GateListItem>,
+}
+
+/// Outcome of running a set of gates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GateRunSetOutcome {
+    pub outcomes: Vec<GateRunOutcome>,
+}
+
+impl GateRunSetOutcome {
+    pub fn new(outcomes: Vec<GateRunOutcome>) -> Self {
+        Self { outcomes }
+    }
+
+    /// Computes aggregate exit code: 1 if any gate had status fail; 4 if any gate had status infra and none failed; otherwise 0.
+    pub fn aggregate_exit_code(&self) -> ExitCode {
+        if self.outcomes.iter().any(|o| o.status == GateStatus::Fail) {
+            ExitCode::LogicalFailure
+        } else if self.outcomes.iter().any(|o| o.status == GateStatus::Infra) {
+            ExitCode::InfrastructureFailure
+        } else {
+            ExitCode::Success
+        }
+    }
+
+    pub fn to_payload(&self) -> GateRunSetPayload {
+        GateRunSetPayload {
+            runs: self.outcomes.iter().map(|o| o.to_payload()).collect(),
+        }
+    }
+
+    /// Renders receipts for all evaluated gates in execution order.
+    pub fn receipts(&self) -> String {
+        self.outcomes
+            .iter()
+            .map(|o| o.receipt())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// Output payload of a multi-gate run matching payload-gate-set.json schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GateRunSetPayload {
+    pub runs: Vec<GateRunPayload>,
 }

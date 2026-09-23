@@ -25,9 +25,11 @@ pub mod validate;
 pub mod write;
 
 pub use gate::{
-    execute_gate, format_duration, parse_with_adapter, validate_adapter_name, GateFailure,
-    GateResultDocument, GateRunOptions, GateRunOutcome, GateRunPayload, GateStatus, HeadTailBuffer,
-    VALID_ADAPTERS,
+    execute_gate, execute_gate_set, format_duration, get_gate_list, parse_with_adapter,
+    resolve_gate_execution_order, validate_adapter_name, validate_gate_dependencies,
+    GateFailure, GateListItem, GateListPayload, GateResultDocument, GateRunOptions,
+    GateRunOutcome, GateRunPayload, GateRunSetOutcome, GateRunSetPayload, GateStatus,
+    HeadTailBuffer, VALID_ADAPTERS,
 };
 
 pub use chore::{

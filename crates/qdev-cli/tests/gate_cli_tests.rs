@@ -55,7 +55,7 @@ fn setup_workspace(root: &Path) {
 fn append_to_qdev_toml(root: &Path, content: &str) {
     let toml_path = root.join("qdev.toml");
     let mut toml = fs::read_to_string(&toml_path).unwrap();
-    toml.push_str("\n");
+    toml.push('\n');
     toml.push_str(content);
     fs::write(toml_path, toml).unwrap();
 }
@@ -837,3 +837,594 @@ timeout_ms = 5000
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn test_cli_gate_run_all_topological_execution_and_receipts() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    let script_a = temp.path().join("a.sh");
+    fs::write(&script_a, "#!/bin/sh\necho 'a passed'\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_a).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_a, perms).unwrap();
+    }
+
+    let script_b = temp.path().join("b.sh");
+    fs::write(&script_b, "#!/bin/sh\necho 'b passed'\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_b).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_b, perms).unwrap();
+    }
+
+    // B declared before A in qdev.toml, but B depends on A
+    append_to_qdev_toml(
+        temp.path(),
+        &format!(
+            r#"
+[[gates]]
+id = "gate-b"
+command = "{}"
+depends_on = ["gate-a"]
+
+[[gates]]
+id = "gate-a"
+command = "{}"
+"#,
+            script_b.to_string_lossy(),
+            script_a.to_string_lossy()
+        ),
+    );
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "--all"])
+        .assert()
+        .success()
+        .code(0);
+
+    let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
+    let pos_a = stdout.find("[PASS] gate-a").expect("gate-a receipt missing");
+    let pos_b = stdout.find("[PASS] gate-b").expect("gate-b receipt missing");
+    assert!(pos_a < pos_b, "gate-a must execute and print before gate-b");
+}
+
+#[test]
+fn test_cli_gate_run_all_json_schema_validation() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    let script_a = temp.path().join("a.sh");
+    fs::write(&script_a, "#!/bin/sh\necho 'a passed'\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_a).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_a, perms).unwrap();
+    }
+
+    append_to_qdev_toml(
+        temp.path(),
+        &format!(
+            r#"
+[[gates]]
+id = "gate-a"
+command = "{}"
+"#,
+            script_a.to_string_lossy()
+        ),
+    );
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "--all", "--json"])
+        .assert()
+        .success()
+        .code(0);
+
+    let payload: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(payload["schema_version"], "1");
+    let runs = payload["runs"].as_array().expect("runs must be an array");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["gate"], "gate-a");
+    assert_eq!(runs[0]["status"], "pass");
+
+    let schema_str = qdev_core::PayloadKind::GateSet.schema_str();
+    let schema_json: Value = serde_json::from_str(schema_str).unwrap();
+    let validator = jsonschema::validator_for(&schema_json).unwrap();
+    assert!(
+        validator.is_valid(&payload),
+        "Payload must validate against payload-gate-set schema: {:?}",
+        validator
+            .iter_errors(&payload)
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_cli_gate_run_for_transition() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    let script = temp.path().join("check.sh");
+    fs::write(&script, "#!/bin/sh\necho 'ok'\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+    }
+
+    append_to_qdev_toml(
+        temp.path(),
+        &format!(
+            r#"
+[[gates]]
+id = "prereq-lint"
+command = "{}"
+
+[[gates]]
+id = "review-gate"
+command = "{}"
+depends_on = ["prereq-lint"]
+on_transition = ["review"]
+
+[[gates]]
+id = "release-gate"
+command = "{}"
+on_transition = ["release"]
+"#,
+            script.to_string_lossy(),
+            script.to_string_lossy(),
+            script.to_string_lossy()
+        ),
+    );
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "--for-transition", "review"])
+        .assert()
+        .success()
+        .code(0);
+
+    let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
+    assert!(stdout.contains("[PASS] prereq-lint"));
+    assert!(stdout.contains("[PASS] review-gate"));
+    assert!(!stdout.contains("release-gate"), "release-gate should not be executed");
+}
+
+#[test]
+fn test_cli_gate_run_cascade_skip_receipt_and_exit_1() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    let fail_script = temp.path().join("fail.sh");
+    fs::write(&fail_script, "#!/bin/sh\necho 'unit test failed'\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&fail_script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fail_script, perms).unwrap();
+    }
+
+    let pass_script = temp.path().join("pass.sh");
+    fs::write(&pass_script, "#!/bin/sh\necho 'integration passed'\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&pass_script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&pass_script, perms).unwrap();
+    }
+
+    append_to_qdev_toml(
+        temp.path(),
+        &format!(
+            r#"
+[[gates]]
+id = "unit"
+command = "{}"
+
+[[gates]]
+id = "integration"
+command = "{}"
+depends_on = ["unit"]
+"#,
+            fail_script.to_string_lossy(),
+            pass_script.to_string_lossy()
+        ),
+    );
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "--all"])
+        .assert()
+        .failure()
+        .code(1);
+
+    let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
+    assert!(stdout.contains("[FAIL] unit (exit 1)"));
+    assert!(stdout.contains("[SKIP] integration | dependency failed: unit"));
+}
+
+#[test]
+fn test_cli_gate_run_cascade_skip_infra_exit_4() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    append_to_qdev_toml(
+        temp.path(),
+        r#"
+[[gates]]
+id = "missing-gate"
+command = "nonexistent_executable_98765"
+
+[[gates]]
+id = "dependent-gate"
+command = "true"
+depends_on = ["missing-gate"]
+"#,
+    );
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "--all"])
+        .assert()
+        .failure()
+        .code(4);
+
+    let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
+    assert!(stdout.contains("[INFRA] missing-gate"));
+    assert!(stdout.contains("[SKIP] dependent-gate | dependency failed: missing-gate"));
+}
+
+#[test]
+fn test_cli_gate_run_conflicting_flags_exit_2() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    // my-gate --all
+    Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "my-gate", "--all"])
+        .assert()
+        .failure()
+        .code(2);
+
+    // --all --for-transition review
+    Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "--all", "--for-transition", "review"])
+        .assert()
+        .failure()
+        .code(2);
+
+    // gate run with no targets
+    Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn test_cli_gate_run_cycle_exit_2() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    append_to_qdev_toml(
+        temp.path(),
+        r#"
+[[gates]]
+id = "gate-x"
+command = "true"
+depends_on = ["gate-y"]
+
+[[gates]]
+id = "gate-y"
+command = "true"
+depends_on = ["gate-x"]
+"#,
+    );
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "--all"])
+        .assert()
+        .failure()
+        .code(2);
+
+    let output = assert.get_output();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("gate-x -> gate-y -> gate-x")
+            || combined.contains("gate-y -> gate-x -> gate-y")
+            || combined.contains("circular dependency detected in gates")
+    );
+}
+
+#[test]
+fn test_cli_gate_list_text_mode() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    append_to_qdev_toml(
+        temp.path(),
+        r#"
+[[gates]]
+id = "lint"
+command = "true"
+kind = "check"
+on_transition = ["review"]
+
+[[gates]]
+id = "integration"
+command = "true"
+depends_on = ["lint"]
+"#,
+    );
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "list"])
+        .assert()
+        .success()
+        .code(0);
+
+    let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
+    assert!(stdout.contains("lint"));
+    assert!(stdout.contains("check"));
+    assert!(stdout.contains("review"));
+    assert!(stdout.contains("integration"));
+    assert!(stdout.contains("command"));
+}
+
+#[test]
+fn test_cli_gate_list_json_schema_validation() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    append_to_qdev_toml(
+        temp.path(),
+        r#"
+[[gates]]
+id = "lint"
+command = "true"
+kind = "check"
+on_transition = ["review"]
+
+[[gates]]
+id = "test"
+command = "true"
+depends_on = ["lint"]
+"#,
+    );
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "list", "--json"])
+        .assert()
+        .success()
+        .code(0);
+
+    let payload: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(payload["schema_version"], "1");
+    let gates = payload["gates"].as_array().expect("gates must be an array");
+    assert_eq!(gates.len(), 2);
+
+    assert_eq!(gates[0]["id"], "lint");
+    assert_eq!(gates[0]["kind"], "check");
+    assert_eq!(gates[0]["transitions"], serde_json::json!(["review"]));
+    assert_eq!(gates[0]["dependencies"], serde_json::json!([]));
+    assert_eq!(gates[0]["last_status"], serde_json::Value::Null);
+
+    assert_eq!(gates[1]["id"], "test");
+    assert_eq!(gates[1]["kind"], "command");
+    assert_eq!(gates[1]["transitions"], serde_json::json!([]));
+    assert_eq!(gates[1]["dependencies"], serde_json::json!(["lint"]));
+    assert_eq!(gates[1]["last_status"], serde_json::Value::Null);
+
+    let schema_str = qdev_core::PayloadKind::GateList.schema_str();
+    let schema_json: Value = serde_json::from_str(schema_str).unwrap();
+    let validator = jsonschema::validator_for(&schema_json).unwrap();
+    assert!(
+        validator.is_valid(&payload),
+        "Payload must validate against payload-gate-list schema: {:?}",
+        validator
+            .iter_errors(&payload)
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_cli_gate_run_single_gate_with_dependencies() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    let script_a = temp.path().join("a.sh");
+    fs::write(&script_a, "#!/bin/sh\necho 'a passed'\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_a).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_a, perms).unwrap();
+    }
+
+    let script_b = temp.path().join("b.sh");
+    fs::write(&script_b, "#!/bin/sh\necho 'b passed'\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_b).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_b, perms).unwrap();
+    }
+
+    append_to_qdev_toml(
+        temp.path(),
+        &format!(
+            r#"
+[[gates]]
+id = "gate-b"
+command = "{}"
+depends_on = ["gate-a"]
+
+[[gates]]
+id = "gate-a"
+command = "{}"
+"#,
+            script_b.to_string_lossy(),
+            script_a.to_string_lossy()
+        ),
+    );
+
+    // 1. Text mode
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "gate-b"])
+        .assert()
+        .success()
+        .code(0);
+
+    let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
+    let pos_a = stdout.find("[PASS] gate-a").expect("gate-a receipt missing");
+    let pos_b = stdout.find("[PASS] gate-b").expect("gate-b receipt missing");
+    assert!(pos_a < pos_b, "prerequisite gate-a must run before gate-b");
+
+    // 2. JSON mode: must emit GateRunPayload for target gate-b
+    let assert_json = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "gate-b", "--json"])
+        .assert()
+        .success()
+        .code(0);
+
+    let payload: Value = serde_json::from_slice(&assert_json.get_output().stdout).unwrap();
+    assert_eq!(payload["gate"], "gate-b");
+    assert_eq!(payload["status"], "pass");
+
+    let schema_str = qdev_core::PayloadKind::GateRun.schema_str();
+    let schema_json: Value = serde_json::from_str(schema_str).unwrap();
+    let validator = jsonschema::validator_for(&schema_json).unwrap();
+    assert!(
+        validator.is_valid(&payload),
+        "Payload must validate against payload-gate-run schema: {:?}",
+        validator
+            .iter_errors(&payload)
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_cli_gate_run_for_transition_json_schema_validation() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    let script = temp.path().join("check.sh");
+    fs::write(&script, "#!/bin/sh\necho 'ok'\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+    }
+
+    append_to_qdev_toml(
+        temp.path(),
+        &format!(
+            r#"
+[[gates]]
+id = "lint"
+command = "{}"
+on_transition = ["review"]
+"#,
+            script.to_string_lossy()
+        ),
+    );
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "--for-transition", "review", "--json"])
+        .assert()
+        .success()
+        .code(0);
+
+    let payload: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(payload["schema_version"], "1");
+    let runs = payload["runs"].as_array().expect("runs must be array");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["gate"], "lint");
+
+    let schema_str = qdev_core::PayloadKind::GateSet.schema_str();
+    let schema_json: Value = serde_json::from_str(schema_str).unwrap();
+    let validator = jsonschema::validator_for(&schema_json).unwrap();
+    assert!(
+        validator.is_valid(&payload),
+        "Payload must validate against payload-gate-set schema: {:?}",
+        validator
+            .iter_errors(&payload)
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_cli_gate_run_for_transition_unmatched_exit_code_2() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    append_to_qdev_toml(
+        temp.path(),
+        r#"
+[[gates]]
+id = "lint"
+command = "true"
+on_transition = ["review"]
+"#,
+    );
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["gate", "run", "--for-transition", "nonexistent"])
+        .assert()
+        .failure()
+        .code(2);
+
+    let stderr = std::str::from_utf8(&assert.get_output().stderr).unwrap();
+    assert!(stderr.contains("no gates configured for transition 'nonexistent'"));
+}
+

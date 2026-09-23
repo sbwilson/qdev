@@ -230,20 +230,19 @@ fn test_schema_payload_unknown_name_json_mode() {
 
 #[test]
 fn test_schema_payload_deferred_names_are_usage_errors() {
-    // `next` landed with Story 2.11, `gate_run` with Story 3.1; only `context`
-    // remains deferred.
-    for name in ["context"] {
-        let assert = Command::cargo_bin("qdev")
-            .unwrap()
-            .args(["schema", "payload", name])
-            .assert()
-            .failure()
-            .code(2);
-        let stderr = std::str::from_utf8(&assert.get_output().stderr).unwrap();
-        assert!(stderr.contains("story"));
-        assert!(stderr.contains("error"));
-        assert!(stderr.contains("validate"));
-    }
+    // `next` landed with Story 2.11, `gate_run` with Story 3.1, `gate_list` and `gate_set`
+    // with Story 3.3; only `context` remains deferred.
+    let name = "context";
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", name])
+        .assert()
+        .failure()
+        .code(2);
+    let stderr = std::str::from_utf8(&assert.get_output().stderr).unwrap();
+    assert!(stderr.contains("story"));
+    assert!(stderr.contains("error"));
+    assert!(stderr.contains("validate"));
 }
 
 #[test]
@@ -265,6 +264,48 @@ fn test_schema_payload_gate_run_success() {
     let val: Value = serde_json::from_slice(&json_assert.get_output().stdout).unwrap();
     assert_eq!(val["schema_version"], "1");
     assert_eq!(val["title"], "Gate Run Payload Schema");
+}
+
+#[test]
+fn test_schema_payload_gate_list_success() {
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "gate_list"])
+        .assert()
+        .success();
+    let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
+    assert!(stdout.contains("Gate List Payload Schema"));
+    assert!(stdout.contains("gates"));
+
+    let json_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "gate_list", "--json"])
+        .assert()
+        .success();
+    let val: Value = serde_json::from_slice(&json_assert.get_output().stdout).unwrap();
+    assert_eq!(val["schema_version"], "1");
+    assert_eq!(val["title"], "Gate List Payload Schema");
+}
+
+#[test]
+fn test_schema_payload_gate_set_success() {
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "gate_set"])
+        .assert()
+        .success();
+    let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
+    assert!(stdout.contains("Gate Set Payload Schema"));
+    assert!(stdout.contains("runs"));
+
+    let json_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "gate_set", "--json"])
+        .assert()
+        .success();
+    let val: Value = serde_json::from_slice(&json_assert.get_output().stdout).unwrap();
+    assert_eq!(val["schema_version"], "1");
+    assert_eq!(val["title"], "Gate Set Payload Schema");
 }
 
 #[test]

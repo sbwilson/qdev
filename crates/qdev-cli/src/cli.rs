@@ -95,19 +95,32 @@ pub struct GateArgs {
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum GateCommands {
-    /// Execute a verification gate
+    /// Execute verification gates
     Run(GateRunArgs),
+    /// List configured gates and their status
+    List(GateListArgs),
 }
 
-#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
 pub struct GateRunArgs {
     /// ID of the gate to execute
-    pub id: String,
+    pub id: Option<String>,
 
     /// Story ID to associate with the gate run
     #[arg(long)]
     pub story: Option<String>,
+
+    /// Run all configured gates in topological order
+    #[arg(long)]
+    pub all: bool,
+
+    /// Run gates bound to this transition and their dependencies
+    #[arg(long = "for-transition")]
+    pub for_transition: Option<String>,
 }
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct GateListArgs {}
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]
 pub struct ChoreArgs {

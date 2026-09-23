@@ -1,7 +1,14 @@
+#![allow(clippy::field_reassign_with_default)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use qdev_core::config::{Config, EnvironmentConfig, GateConfig, ModuleConfig};
-use qdev_core::gate::{execute_gate, GateRunOptions, GateStatus, HeadTailBuffer};
+use qdev_core::errors::ExitCode;
+use qdev_core::gate::{
+    execute_gate, execute_gate_set, get_gate_list, resolve_gate_execution_order,
+    validate_gate_dependencies, GateRunOptions, GateRunOutcome, GateRunSetOutcome, GateStatus,
+    HeadTailBuffer,
+};
 use tempfile::TempDir;
 
 fn setup_test_workspace() -> TempDir {
@@ -1003,4 +1010,664 @@ exit 0
     assert_eq!(outcome.agent_instruction.as_deref(), Some("continue"));
     assert!(outcome.failures.is_empty());
 }
+
+#[test]
+fn test_topological_sort_kahn_declaration_order_tie_break() {
+    let config = Config {
+        gates: vec![
+            GateConfig {
+                id: "C".to_string(),
+                command: Some("true".to_string()),
+                timeout_ms: None,
+                depends_on: vec!["B".to_string()],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+            GateConfig {
+                id: "B".to_string(),
+                command: Some("true".to_string()),
+                timeout_ms: None,
+                depends_on: vec!["A".to_string()],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+            GateConfig {
+                id: "D".to_string(),
+                command: Some("true".to_string()),
+                timeout_ms: None,
+                depends_on: vec![],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+            GateConfig {
+                id: "A".to_string(),
+                command: Some("true".to_string()),
+                timeout_ms: None,
+                depends_on: vec![],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    let order = resolve_gate_execution_order(&config.gates, None).unwrap();
+    // D and A both have in_degree 0 initially.
+    // D is declared before A, so D runs first, then A.
+    // With A resolved, B has in_degree 0, so B runs.
+    // With B resolved, C runs.
+    assert_eq!(order, vec!["D", "A", "B", "C"]);
+
+    // Test targeting C and its transitive dependencies
+    let target_order = resolve_gate_execution_order(&config.gates, Some(&["C".to_string()])).unwrap();
+    assert_eq!(target_order, vec!["A", "B", "C"]);
+}
+
+#[test]
+fn test_circular_dependency_rejection_exit_code_2() {
+    let config = Config {
+        gates: vec![
+            GateConfig {
+                id: "A".to_string(),
+                command: Some("true".to_string()),
+                timeout_ms: None,
+                depends_on: vec!["B".to_string()],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+            GateConfig {
+                id: "B".to_string(),
+                command: Some("true".to_string()),
+                timeout_ms: None,
+                depends_on: vec!["A".to_string()],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    let err = validate_gate_dependencies(&config.gates).unwrap_err();
+    assert_eq!(err.exit_code, ExitCode::UsageError);
+    assert!(err.message.contains("A -> B -> A") || err.message.contains("B -> A -> B"));
+}
+
+#[test]
+fn test_unknown_dependency_rejection_exit_code_2() {
+    let config = Config {
+        gates: vec![GateConfig {
+            id: "A".to_string(),
+            command: Some("true".to_string()),
+            timeout_ms: None,
+            depends_on: vec!["nonexistent".to_string()],
+            output_adapter: None,
+            on_transition: vec![],
+            verifies: vec![],
+            kind: None,
+            metric: None,
+            direction: None,
+            skip: None,
+        }],
+        ..Default::default()
+    };
+
+    let err = validate_gate_dependencies(&config.gates).unwrap_err();
+    assert_eq!(err.exit_code, ExitCode::UsageError);
+    assert!(err.message.contains("gate 'A' depends on unknown gate 'nonexistent'"));
+}
+
+#[test]
+fn test_prerequisite_logical_failure_cascades_skip() {
+    let temp = setup_test_workspace();
+
+    let fail_script = temp.path().join("fail.sh");
+    fs::write(&fail_script, "#!/bin/sh\necho 'assertion failed'\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&fail_script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fail_script, perms).unwrap();
+    }
+
+    let pass_script = temp.path().join("pass.sh");
+    fs::write(&pass_script, "#!/bin/sh\necho 'passed'\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&pass_script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&pass_script, perms).unwrap();
+    }
+
+    let config = Config {
+        gates: vec![
+            GateConfig {
+                id: "A".to_string(),
+                command: Some(fail_script.to_string_lossy().to_string()),
+                timeout_ms: Some(5000),
+                depends_on: vec![],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+            GateConfig {
+                id: "B".to_string(),
+                command: Some(pass_script.to_string_lossy().to_string()),
+                timeout_ms: Some(5000),
+                depends_on: vec!["A".to_string()],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    let options = GateRunOptions::default();
+    let set_outcome =
+        execute_gate_set(temp.path(), &config, &["A".to_string(), "B".to_string()], &options).unwrap();
+
+    assert_eq!(set_outcome.outcomes.len(), 2);
+    assert_eq!(set_outcome.outcomes[0].gate_id, "A");
+    assert_eq!(set_outcome.outcomes[0].status, GateStatus::Fail);
+
+    assert_eq!(set_outcome.outcomes[1].gate_id, "B");
+    assert_eq!(set_outcome.outcomes[1].status, GateStatus::Skip);
+    assert_eq!(set_outcome.outcomes[1].summary, "dependency failed: A");
+    assert!(!set_outcome.outcomes[1].skipped_locally);
+    assert_eq!(set_outcome.outcomes[1].receipt(), "[SKIP] B | dependency failed: A");
+
+    assert_eq!(set_outcome.aggregate_exit_code(), ExitCode::LogicalFailure);
+}
+
+#[test]
+fn test_prerequisite_infra_failure_cascades_skip() {
+    let temp = setup_test_workspace();
+
+    let config = Config {
+        gates: vec![
+            GateConfig {
+                id: "A".to_string(),
+                command: Some("nonexistent_executable_12345".to_string()),
+                timeout_ms: Some(5000),
+                depends_on: vec![],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+            GateConfig {
+                id: "B".to_string(),
+                command: Some("true".to_string()),
+                timeout_ms: Some(5000),
+                depends_on: vec!["A".to_string()],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    let options = GateRunOptions::default();
+    let set_outcome =
+        execute_gate_set(temp.path(), &config, &["A".to_string(), "B".to_string()], &options).unwrap();
+
+    assert_eq!(set_outcome.outcomes.len(), 2);
+    assert_eq!(set_outcome.outcomes[0].status, GateStatus::Infra);
+    assert_eq!(set_outcome.outcomes[1].status, GateStatus::Skip);
+    assert_eq!(set_outcome.outcomes[1].summary, "dependency failed: A");
+    assert_eq!(set_outcome.aggregate_exit_code(), ExitCode::InfrastructureFailure);
+}
+
+#[test]
+fn test_multi_level_cascade_skip() {
+    let temp = setup_test_workspace();
+
+    let fail_script = temp.path().join("fail.sh");
+    fs::write(&fail_script, "#!/bin/sh\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&fail_script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fail_script, perms).unwrap();
+    }
+
+    let config = Config {
+        gates: vec![
+            GateConfig {
+                id: "A".to_string(),
+                command: Some(fail_script.to_string_lossy().to_string()),
+                timeout_ms: Some(5000),
+                depends_on: vec![],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+            GateConfig {
+                id: "B".to_string(),
+                command: Some("true".to_string()),
+                timeout_ms: Some(5000),
+                depends_on: vec!["A".to_string()],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+            GateConfig {
+                id: "C".to_string(),
+                command: Some("true".to_string()),
+                timeout_ms: Some(5000),
+                depends_on: vec!["B".to_string()],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    let options = GateRunOptions::default();
+    let set_outcome = execute_gate_set(
+        temp.path(),
+        &config,
+        &["A".to_string(), "B".to_string(), "C".to_string()],
+        &options,
+    )
+    .unwrap();
+
+    assert_eq!(set_outcome.outcomes.len(), 3);
+    assert_eq!(set_outcome.outcomes[0].status, GateStatus::Fail);
+    assert_eq!(set_outcome.outcomes[1].status, GateStatus::Skip);
+    assert_eq!(set_outcome.outcomes[1].summary, "dependency failed: A");
+    assert_eq!(set_outcome.outcomes[2].status, GateStatus::Skip);
+    assert_eq!(set_outcome.outcomes[2].summary, "dependency failed: B");
+    assert_eq!(set_outcome.outcomes[2].receipt(), "[SKIP] C | dependency failed: B");
+
+    assert_eq!(set_outcome.aggregate_exit_code(), ExitCode::LogicalFailure);
+}
+
+#[test]
+fn test_local_skip_does_not_cascade() {
+    let temp = setup_test_workspace();
+
+    let pass_script = temp.path().join("pass.sh");
+    fs::write(&pass_script, "#!/bin/sh\necho 'b passed'\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&pass_script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&pass_script, perms).unwrap();
+    }
+
+    let config = Config {
+        gates: vec![
+            GateConfig {
+                id: "A".to_string(),
+                command: Some("true".to_string()),
+                timeout_ms: Some(5000),
+                depends_on: vec![],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: Some(true),
+            },
+            GateConfig {
+                id: "B".to_string(),
+                command: Some(pass_script.to_string_lossy().to_string()),
+                timeout_ms: Some(5000),
+                depends_on: vec!["A".to_string()],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    let options = GateRunOptions::default();
+    let set_outcome =
+        execute_gate_set(temp.path(), &config, &["A".to_string(), "B".to_string()], &options).unwrap();
+
+    assert_eq!(set_outcome.outcomes.len(), 2);
+    assert_eq!(set_outcome.outcomes[0].status, GateStatus::Skip);
+    assert!(set_outcome.outcomes[0].skipped_locally);
+    assert_eq!(set_outcome.outcomes[0].receipt(), "[SKIP] A | skipped_locally");
+
+    assert_eq!(set_outcome.outcomes[1].status, GateStatus::Pass);
+    assert_eq!(set_outcome.aggregate_exit_code(), ExitCode::Success);
+}
+
+#[test]
+fn test_aggregate_exit_code_precedence() {
+    let outcome_fail = GateRunOutcome {
+        gate_id: "fail-gate".to_string(),
+        status: GateStatus::Fail,
+        exit_code: 1,
+        duration_ms: 10,
+        summary: "failed".to_string(),
+        skipped_locally: false,
+        commit_sha: None,
+        story_id: None,
+        stdout: None,
+        stderr: None,
+        agent_instruction: None,
+        failures: vec![],
+        metric: None,
+        constraint_ids: vec![],
+    };
+
+    let outcome_infra = GateRunOutcome {
+        gate_id: "infra-gate".to_string(),
+        status: GateStatus::Infra,
+        exit_code: 4,
+        duration_ms: 10,
+        summary: "timeout".to_string(),
+        skipped_locally: false,
+        commit_sha: None,
+        story_id: None,
+        stdout: None,
+        stderr: None,
+        agent_instruction: None,
+        failures: vec![],
+        metric: None,
+        constraint_ids: vec![],
+    };
+
+    let outcome_pass = GateRunOutcome {
+        gate_id: "pass-gate".to_string(),
+        status: GateStatus::Pass,
+        exit_code: 0,
+        duration_ms: 10,
+        summary: "passed".to_string(),
+        skipped_locally: false,
+        commit_sha: None,
+        story_id: None,
+        stdout: None,
+        stderr: None,
+        agent_instruction: None,
+        failures: vec![],
+        metric: None,
+        constraint_ids: vec![],
+    };
+
+    // Fail + Infra -> ExitCode::LogicalFailure (1)
+    let set1 = GateRunSetOutcome::new(vec![outcome_fail.clone(), outcome_infra.clone()]);
+    assert_eq!(set1.aggregate_exit_code(), ExitCode::LogicalFailure);
+
+    // Infra + Pass -> ExitCode::InfrastructureFailure (4)
+    let set2 = GateRunSetOutcome::new(vec![outcome_infra.clone(), outcome_pass.clone()]);
+    assert_eq!(set2.aggregate_exit_code(), ExitCode::InfrastructureFailure);
+
+    // Only Pass -> ExitCode::Success (0)
+    let set3 = GateRunSetOutcome::new(vec![outcome_pass.clone()]);
+    assert_eq!(set3.aggregate_exit_code(), ExitCode::Success);
+}
+
+#[test]
+fn test_get_gate_list_with_evidence() {
+    let temp = setup_test_workspace();
+
+    // Create an evidence file for "lint"
+    let ev_dir = temp.path().join("docs/state/evidence/E12S4");
+    fs::create_dir_all(&ev_dir).unwrap();
+    let ev_file = ev_dir.join("8f1b2c4-lint.json");
+    fs::write(
+        &ev_file,
+        r#"{
+  "schema_version": "1",
+  "gate": "lint",
+  "status": "pass",
+  "exit_code": 0,
+  "duration_ms": 120,
+  "summary": "all ok",
+  "skipped_locally": false,
+  "ran_at": "2026-09-23T08:00:00Z"
+}"#,
+    )
+    .unwrap();
+
+    let config = Config {
+        gates: vec![
+            GateConfig {
+                id: "lint".to_string(),
+                command: Some("true".to_string()),
+                timeout_ms: None,
+                depends_on: vec![],
+                output_adapter: None,
+                on_transition: vec!["review".to_string()],
+                verifies: vec![],
+                kind: Some("check".to_string()),
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+            GateConfig {
+                id: "integration".to_string(),
+                command: Some("true".to_string()),
+                timeout_ms: None,
+                depends_on: vec!["lint".to_string()],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    let items = get_gate_list(temp.path(), &config).unwrap();
+    assert_eq!(items.len(), 2);
+
+    assert_eq!(items[0].id, "lint");
+    assert_eq!(items[0].kind, "check");
+    assert_eq!(items[0].transitions, vec!["review"]);
+    assert_eq!(items[0].dependencies, Vec::<String>::new());
+    assert_eq!(items[0].last_status.as_deref(), Some("pass"));
+
+    assert_eq!(items[1].id, "integration");
+    assert_eq!(items[1].kind, "command"); // default kind
+    assert_eq!(items[1].transitions, Vec::<String>::new());
+    assert_eq!(items[1].dependencies, vec!["lint"]);
+    assert_eq!(items[1].last_status, None);
+}
+
+#[test]
+fn test_duplicate_gate_id_rejection_exit_code_2() {
+    let config = Config {
+        gates: vec![
+            GateConfig {
+                id: "dup".to_string(),
+                command: Some("true".to_string()),
+                timeout_ms: None,
+                depends_on: vec![],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+            GateConfig {
+                id: "dup".to_string(),
+                command: Some("true".to_string()),
+                timeout_ms: None,
+                depends_on: vec![],
+                output_adapter: None,
+                on_transition: vec![],
+                verifies: vec![],
+                kind: None,
+                metric: None,
+                direction: None,
+                skip: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    let err = validate_gate_dependencies(&config.gates).unwrap_err();
+    assert_eq!(err.exit_code, ExitCode::UsageError);
+    assert!(err.message.contains("duplicate gate id 'dup'"));
+}
+
+#[test]
+fn test_get_gate_list_with_sqlite_store() {
+    use qdev_core::store::Store;
+
+    let temp = setup_test_workspace();
+
+    let config = Config {
+        gates: vec![GateConfig {
+            id: "test-gate".to_string(),
+            command: Some("true".to_string()),
+            timeout_ms: None,
+            depends_on: vec![],
+            output_adapter: None,
+            on_transition: vec![],
+            verifies: vec![],
+            kind: None,
+            metric: None,
+            direction: None,
+            skip: None,
+        }],
+        ..Default::default()
+    };
+
+    let store = qdev_core::store::ensure_cache(temp.path(), &config.storage).unwrap();
+
+    let record = qdev_core::store::GateRunRecord {
+        id: "run-1".to_string(),
+        story_id: Some("E12S4".to_string()),
+        gate_id: "test-gate".to_string(),
+        commit_sha: "8f1b2c4".to_string(),
+        status: Some("pass".to_string()),
+        exit_code: Some(0),
+        duration_ms: Some(150),
+        metric_value: None,
+        summary: Some("all passed".to_string()),
+        evidence_path: "docs/state/evidence/E12S4/8f1b2c4-test-gate.json".to_string(),
+        output_hash: None,
+        run_by_type: None,
+        run_by_id: None,
+        ran_at: Some("2026-09-23T10:00:00Z".to_string()),
+    };
+    store.upsert_gate_run(&record).unwrap();
+
+    let items = get_gate_list(temp.path(), &config).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, "test-gate");
+    assert_eq!(items[0].last_status.as_deref(), Some("pass"));
+}
+
+#[test]
+fn test_get_gate_list_respects_custom_state_dir() {
+    let temp = setup_test_workspace();
+
+    let custom_evidence_dir = temp.path().join("custom_state/evidence/E1S1");
+    fs::create_dir_all(&custom_evidence_dir).unwrap();
+    let ev_file = custom_evidence_dir.join("run.json");
+    fs::write(
+        &ev_file,
+        r#"{
+  "gate": "custom-gate",
+  "status": "infra",
+  "ran_at": "2026-09-23T10:00:00Z"
+}"#,
+    )
+    .unwrap();
+
+    let mut config = Config {
+        gates: vec![GateConfig {
+            id: "custom-gate".to_string(),
+            command: Some("true".to_string()),
+            timeout_ms: None,
+            depends_on: vec![],
+            output_adapter: None,
+            on_transition: vec![],
+            verifies: vec![],
+            kind: None,
+            metric: None,
+            direction: None,
+            skip: None,
+        }],
+        ..Default::default()
+    };
+    config.storage.state_dir = "custom_state".to_string();
+
+    let items = get_gate_list(temp.path(), &config).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, "custom-gate");
+    assert_eq!(items[0].last_status.as_deref(), Some("infra"));
+}
+
 

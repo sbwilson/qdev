@@ -3,15 +3,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::config::Config;
+use crate::config::{Config, GateConfig};
 use crate::errors::QdevError;
 use crate::gate::adapter::{parse_with_adapter, validate_adapter_name};
 use crate::gate::process::ProcessGroupIsolation;
 use crate::gate::result::GateResultDocument;
 use crate::gate::ring_buffer::HeadTailBuffer;
-use crate::gate::{GateRunOutcome, GateStatus};
+use crate::gate::{GateListItem, GateRunOutcome, GateRunSetOutcome, GateStatus};
 use crate::lease::find_active_lease_with_storage;
 use crate::modules::ModuleRegistry;
+use crate::store::Store;
 
 /// Execution options for running a gate.
 #[derive(Debug, Clone, Default)]
@@ -740,4 +741,346 @@ pub fn execute_gate(
         metric,
         constraint_ids,
     })
+}
+
+/// Validates gate dependencies: checks for unknown gate dependencies and cycles.
+pub fn validate_gate_dependencies(gates: &[GateConfig]) -> Result<(), QdevError> {
+    let mut seen = std::collections::HashSet::new();
+    for gate in gates {
+        if !seen.insert(&gate.id) {
+            return Err(QdevError::usage_error(format!(
+                "duplicate gate id '{}'",
+                gate.id
+            )));
+        }
+    }
+
+    let known_ids: std::collections::HashSet<&str> = gates.iter().map(|g| g.id.as_str()).collect();
+
+    // Check for dangling or unknown dependencies
+    for gate in gates {
+        for dep in &gate.depends_on {
+            if !known_ids.contains(dep.as_str()) {
+                return Err(QdevError::usage_error(format!(
+                    "gate '{}' depends on unknown gate '{}'",
+                    gate.id, dep
+                )));
+            }
+        }
+    }
+
+    // Build (gate_id, dep_id) directed edges for cycle detection
+    let mut edges = Vec::new();
+    for gate in gates {
+        for dep in &gate.depends_on {
+            edges.push((gate.id.clone(), dep.clone()));
+        }
+    }
+
+    if let Some(cycle) = crate::dag::find_dependency_cycle(&edges) {
+        return Err(QdevError::usage_error(format!(
+            "circular dependency detected in gates: {}",
+            cycle.join(" -> ")
+        )));
+    }
+
+    Ok(())
+}
+
+/// Resolves topological execution order using Kahn's algorithm with ties broken by declaration order in `gates`.
+/// If `target_gate_ids` is provided, resolves execution order for those targets and their transitive dependencies.
+/// If `target_gate_ids` is None, resolves execution order for all gates.
+pub fn resolve_gate_execution_order(
+    gates: &[GateConfig],
+    target_gate_ids: Option<&[String]>,
+) -> Result<Vec<String>, QdevError> {
+    validate_gate_dependencies(gates)?;
+
+    let gate_map: std::collections::HashMap<&str, &GateConfig> =
+        gates.iter().map(|g| (g.id.as_str(), g)).collect();
+
+    // 1. Determine the subset of gates to execute
+    let selected_ids: std::collections::HashSet<String> = match target_gate_ids {
+        Some(targets) => {
+            let mut visited = std::collections::HashSet::new();
+            let mut queue = std::collections::VecDeque::new();
+            for target in targets {
+                if !gate_map.contains_key(target.as_str()) {
+                    return Err(QdevError::usage_error(format!(
+                        "gate '{}' not found in configuration",
+                        target
+                    )));
+                }
+                if visited.insert(target.clone()) {
+                    queue.push_back(target.clone());
+                }
+            }
+
+            while let Some(current) = queue.pop_front() {
+                if let Some(cfg) = gate_map.get(current.as_str()) {
+                    for dep in &cfg.depends_on {
+                        if visited.insert(dep.clone()) {
+                            queue.push_back(dep.clone());
+                        }
+                    }
+                }
+            }
+            visited
+        }
+        None => gates.iter().map(|g| g.id.clone()).collect(),
+    };
+
+    if selected_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 2. Compute in-degrees: count of unsatisfied prerequisites in selected_ids.
+    // If gate G depends on dep D, D must execute before G.
+    // So in-degree(G) = number of dep in G.depends_on where dep is in selected_ids.
+    let mut in_degree: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut dependents: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+
+    for id in &selected_ids {
+        let cfg = gate_map[id.as_str()];
+        let mut deg = 0;
+        for dep in &cfg.depends_on {
+            if selected_ids.contains(dep) {
+                deg += 1;
+                dependents.entry(dep.as_str()).or_default().push(id.as_str());
+            }
+        }
+        in_degree.insert(id.as_str(), deg);
+    }
+
+    // Declaration order index for tie breaking
+    let order_index: std::collections::HashMap<&str, usize> = gates
+        .iter()
+        .enumerate()
+        .map(|(idx, g)| (g.id.as_str(), idx))
+        .collect();
+
+    // 3. Kahn's algorithm
+    let mut remaining: std::collections::HashSet<&str> =
+        selected_ids.iter().map(|s| s.as_str()).collect();
+    let mut execution_order = Vec::new();
+
+    while !remaining.is_empty() {
+        let mut ready: Vec<&str> = remaining
+            .iter()
+            .copied()
+            .filter(|&id| in_degree.get(id).copied().unwrap_or(0) == 0)
+            .collect();
+
+        if ready.is_empty() {
+            return Err(QdevError::usage_error("cycle detected in gate dependencies"));
+        }
+
+        ready.sort_by_key(|id| order_index.get(id).copied().unwrap_or(usize::MAX));
+
+        let next = ready[0];
+        execution_order.push(next.to_string());
+        remaining.remove(next);
+
+        if let Some(deps) = dependents.get(next) {
+            for &dep_gate in deps {
+                if let Some(deg) = in_degree.get_mut(dep_gate) {
+                    if *deg > 0 {
+                        *deg -= 1;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(execution_order)
+}
+
+/// Executes a set of gates in the given execution order, propagating skip cascades for dependency failures.
+pub fn execute_gate_set(
+    workspace_root: &Path,
+    config: &Config,
+    gate_ids: &[String],
+    options: &GateRunOptions,
+) -> Result<GateRunSetOutcome, QdevError> {
+    let mut outcomes = Vec::new();
+    let mut gate_status_map: std::collections::HashMap<String, GateStatus> =
+        std::collections::HashMap::new();
+    let mut skipped_locally_map: std::collections::HashMap<String, bool> =
+        std::collections::HashMap::new();
+
+    let commit_sha = resolve_commit_sha(workspace_root);
+    let story_id = resolve_story_id(workspace_root, config, options);
+
+    let gate_configs: std::collections::HashMap<&str, &crate::config::GateConfig> = config
+        .gates
+        .iter()
+        .map(|g| (g.id.as_str(), g))
+        .collect();
+
+    for gate_id in gate_ids {
+        let gate_config = gate_configs.get(gate_id.as_str()).ok_or_else(|| {
+            QdevError::usage_error(format!("gate '{}' not found in configuration", gate_id))
+        })?;
+
+        // Check if any direct dependency failed (Fail, Infra, or non-local Skip)
+        let mut failed_dep = None;
+        for dep in &gate_config.depends_on {
+            if let Some(&status) = gate_status_map.get(dep) {
+                let is_local_skip = skipped_locally_map.get(dep).copied().unwrap_or(false);
+                let is_failed = status == GateStatus::Fail
+                    || status == GateStatus::Infra
+                    || (status == GateStatus::Skip && !is_local_skip);
+                if is_failed {
+                    failed_dep = Some(dep.clone());
+                    break;
+                }
+            } else {
+                // Prerequisite dependency was not evaluated prior to this gate
+                failed_dep = Some(dep.clone());
+                break;
+            }
+        }
+
+        if let Some(failed_dep_id) = failed_dep {
+            let outcome = GateRunOutcome {
+                gate_id: gate_id.clone(),
+                status: GateStatus::Skip,
+                exit_code: 0,
+                duration_ms: 0,
+                summary: format!("dependency failed: {}", failed_dep_id),
+                skipped_locally: false,
+                commit_sha: commit_sha.clone(),
+                story_id: story_id.clone(),
+                stdout: None,
+                stderr: None,
+                agent_instruction: None,
+                failures: Vec::new(),
+                metric: None,
+                constraint_ids: Vec::new(),
+            };
+            gate_status_map.insert(gate_id.clone(), GateStatus::Skip);
+            skipped_locally_map.insert(gate_id.clone(), false);
+            outcomes.push(outcome);
+        } else {
+            let outcome = execute_gate(workspace_root, config, gate_id, options)?;
+            gate_status_map.insert(gate_id.clone(), outcome.status);
+            skipped_locally_map.insert(gate_id.clone(), outcome.skipped_locally);
+            outcomes.push(outcome);
+        }
+    }
+
+    Ok(GateRunSetOutcome::new(outcomes))
+}
+
+fn scan_evidence_dir(
+    dir: &Path,
+    gate_latest: &mut std::collections::HashMap<String, (String, String)>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() && !path.is_symlink() {
+            scan_evidence_dir(&path, gate_latest);
+        } else if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                    let gate_id = v
+                        .get("gate_id")
+                        .or_else(|| v.get("gate"))
+                        .and_then(|g| g.as_str());
+                    let status = v.get("status").and_then(|s| s.as_str());
+                    if let (Some(gid), Some(st)) = (gate_id, status) {
+                        let timestamp = v
+                            .get("ran_at")
+                            .and_then(|t| t.as_str())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                entry
+                                    .metadata()
+                                    .ok()
+                                    .and_then(|m| m.modified().ok())
+                                    .map(|mtime| {
+                                        let secs = mtime
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_secs() as i64)
+                                            .unwrap_or(0);
+                                        crate::write::iso8601_from_timestamp(secs)
+                                    })
+                                    .unwrap_or_default()
+                            });
+                        let current = gate_latest
+                            .entry(gid.to_string())
+                            .or_insert_with(|| (String::new(), String::new()));
+                        if timestamp >= current.0 {
+                            *current = (timestamp, st.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Gathers gate list items with resolved `last_status` from SQLite store and `docs/state/evidence/`.
+pub fn get_gate_list(
+    workspace_root: &Path,
+    config: &Config,
+) -> Result<Vec<GateListItem>, QdevError> {
+    let mut gate_latest: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
+
+    let cache_db_path = workspace_root
+        .join(&config.storage.cache_dir)
+        .join("cache.sqlite");
+
+    if cache_db_path.is_file() {
+        if let Ok(crate::store::CacheSchemaStatus::Valid) =
+            crate::store::inspect_cache_schema(&cache_db_path)
+        {
+            if let Ok(store) = crate::store::SqliteStore::open(&cache_db_path) {
+                if let Ok(runs) = store.list_gate_runs() {
+                    for run in runs {
+                        if let Some(status) = run.status {
+                            let timestamp = run.ran_at.unwrap_or_default();
+                            let entry = gate_latest
+                                .entry(run.gate_id)
+                                .or_insert_with(|| (String::new(), String::new()));
+                            if timestamp >= entry.0 {
+                                *entry = (timestamp, status);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let evidence_dir = workspace_root
+        .join(&config.storage.state_dir)
+        .join("evidence");
+    if evidence_dir.is_dir() {
+        scan_evidence_dir(&evidence_dir, &mut gate_latest);
+    }
+
+    let mut items = Vec::new();
+    for gate_config in &config.gates {
+        let last_status = gate_latest
+            .get(&gate_config.id)
+            .map(|(_, status)| status.clone());
+
+        items.push(GateListItem {
+            id: gate_config.id.clone(),
+            kind: gate_config
+                .kind
+                .clone()
+                .unwrap_or_else(|| "command".to_string()),
+            transitions: gate_config.on_transition.clone(),
+            dependencies: gate_config.depends_on.clone(),
+            last_status,
+        });
+    }
+
+    Ok(items)
 }
