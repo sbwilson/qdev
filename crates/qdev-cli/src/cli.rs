@@ -85,6 +85,15 @@ pub enum Commands {
     Next(NextArgs),
     /// Run verification gates
     Gate(GateArgs),
+    /// Enforce working tree scope, branch freshness, and validation health
+    Preflight(PreflightArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct PreflightArgs {
+    /// Story ID to evaluate module scope against
+    #[arg(long)]
+    pub story: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]

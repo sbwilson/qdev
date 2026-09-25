@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-25-2026 19:26
+last_updated: 09-25-2026 19:37
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -85,7 +85,7 @@ development_status:
   3-4-ratchets-baselines: review
   3-5-evidence-bundles: review
   3-6-transition-bound-gates: review
-  3-7-git-preflight-guard: backlog
+  3-7-git-preflight-guard: review
   3-8-git-hook-shims-qdev-hook: backlog
   3-9-hygiene-linter-lint-and-report: backlog
   3-10-impact-analysis: backlog

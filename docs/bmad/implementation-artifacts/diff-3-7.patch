@@ -1,0 +1,2144 @@
+diff --git a/crates/qdev-cli/src/cli.rs b/crates/qdev-cli/src/cli.rs
+index 88efef3..b30f1d5 100644
+--- a/crates/qdev-cli/src/cli.rs
++++ b/crates/qdev-cli/src/cli.rs
+@@ -85,6 +85,15 @@ pub enum Commands {
+     Next(NextArgs),
+     /// Run verification gates
+     Gate(GateArgs),
++    /// Enforce working tree scope, branch freshness, and validation health
++    Preflight(PreflightArgs),
++}
++
++#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
++pub struct PreflightArgs {
++    /// Story ID to evaluate module scope against
++    #[arg(long)]
++    pub story: Option<String>,
+ }
+ 
+ #[derive(Parser, Debug, Clone, PartialEq, Eq)]
+diff --git a/crates/qdev-cli/src/handlers/mod.rs b/crates/qdev-cli/src/handlers/mod.rs
+index 7b423e5..c13dc94 100644
+--- a/crates/qdev-cli/src/handlers/mod.rs
++++ b/crates/qdev-cli/src/handlers/mod.rs
+@@ -5,6 +5,7 @@ pub mod decision;
+ pub mod dw;
+ pub mod gate;
+ pub mod next;
++pub mod preflight;
+ pub mod pulse;
+ pub mod scratch;
+ pub mod sprint;
+diff --git a/crates/qdev-cli/src/main.rs b/crates/qdev-cli/src/main.rs
+index d762a1e..c093e31 100644
+--- a/crates/qdev-cli/src/main.rs
++++ b/crates/qdev-cli/src/main.rs
+@@ -407,6 +407,9 @@ fn run(raw_args: &[String]) -> ExitCode {
+         Some(Commands::Gate(ref gate_args)) => {
+             handlers::gate::handle_gate(gate_args, &annotated_config, &cli, &output, &root)
+         }
++        Some(Commands::Preflight(ref preflight_args)) => {
++            handlers::preflight::handle_preflight(preflight_args, &annotated_config, &cli, &output, &root)
++        }
+         Some(Commands::Init(_)) => unreachable!(),
+         Some(Commands::Schema(_)) => unreachable!(),
+     }
+@@ -469,7 +472,11 @@ pub(crate) fn reject_empty_filter_values(flags: &[(&str, Option<&str>)]) -> Resu
+ /// with a raw `sqlite_error` after `get`/`list` were fixed.
+ fn requires_workspace(command: Option<&Commands>) -> bool {
+     match command {
+-        None | Some(Commands::Status) | Some(Commands::Init(_)) | Some(Commands::Schema(_)) => {
++        None
++        | Some(Commands::Status)
++        | Some(Commands::Init(_))
++        | Some(Commands::Schema(_))
++        | Some(Commands::Preflight(_)) => {
+             false
+         }
+         // Matched at subcommand granularity, not by whole variant: a future `create epic` or
+diff --git a/crates/qdev-core/src/lib.rs b/crates/qdev-core/src/lib.rs
+index 0101e2b..b565b20 100644
+--- a/crates/qdev-core/src/lib.rs
++++ b/crates/qdev-core/src/lib.rs
+@@ -13,6 +13,7 @@ pub mod interactivity;
+ pub mod lease;
+ pub mod modules;
+ pub mod next;
++pub mod preflight;
+ pub mod pulse;
+ pub mod query;
+ pub mod schema;
+@@ -24,6 +25,12 @@ pub mod transition;
+ pub mod validate;
+ pub mod write;
+ 
++pub use preflight::{
++    check_branch_freshness, check_validation_health, check_working_tree_scope,
++    format_preflight_text, is_metadata_exempt, resolve_story_target_modules, run_preflight,
++    PreflightDiagnostic, PreflightOptions, PreflightOutcome, PreflightPayload, PreflightStatus,
++};
++
+ pub use gate::{
+     evaluate_ratchet, execute_deps_gate, execute_gate, execute_gate_set, execute_scope_gate,
+     format_duration, format_metric_number, get_gate_list, parse_with_adapter, read_baseline,
+diff --git a/crates/qdev-core/src/schema.rs b/crates/qdev-core/src/schema.rs
+index bfdc797..e637c3b 100644
+--- a/crates/qdev-core/src/schema.rs
++++ b/crates/qdev-core/src/schema.rs
+@@ -166,6 +166,7 @@ pub enum PayloadKind {
+     GateList,
+     GateSet,
+     GateBaseline,
++    Preflight,
+ }
+ 
+ impl PayloadKind {
+@@ -189,6 +190,7 @@ impl PayloadKind {
+             PayloadKind::GateList => include_str!("../schemas/payload-gate-list.json"),
+             PayloadKind::GateSet => include_str!("../schemas/payload-gate-set.json"),
+             PayloadKind::GateBaseline => include_str!("../schemas/payload-gate-baseline.json"),
++            PayloadKind::Preflight => include_str!("../schemas/payload-preflight.json"),
+         }
+     }
+ 
+@@ -223,11 +225,12 @@ impl PayloadKind {
+             PayloadKind::GateList => "gate_list",
+             PayloadKind::GateSet => "gate_set",
+             PayloadKind::GateBaseline => "gate_baseline",
++            PayloadKind::Preflight => "preflight",
+         }
+     }
+ 
+     /// Returns an array of all currently-supported payload kinds.
+-    pub const fn all() -> &'static [PayloadKind; 17] {
++    pub const fn all() -> &'static [PayloadKind; 18] {
+         &[
+             PayloadKind::Story,
+             PayloadKind::Error,
+@@ -246,6 +249,7 @@ impl PayloadKind {
+             PayloadKind::GateList,
+             PayloadKind::GateSet,
+             PayloadKind::GateBaseline,
++            PayloadKind::Preflight,
+         ]
+     }
+ 
+@@ -283,6 +287,7 @@ impl PayloadKind {
+             "gate_baseline" | "gatebaseline" | "baseline" | "baselines" => {
+                 Ok(PayloadKind::GateBaseline)
+             }
++            "preflight" => Ok(PayloadKind::Preflight),
+             _ => Err(QdevError::usage_error(format!(
+                 "Unknown payload name '{}'. Valid payload names: {}",
+                 s,
+diff --git a/docs/bmad/implementation-artifacts/sprint-status.yaml b/docs/bmad/implementation-artifacts/sprint-status.yaml
+index 5407681..2eb4ae0 100644
+--- a/docs/bmad/implementation-artifacts/sprint-status.yaml
++++ b/docs/bmad/implementation-artifacts/sprint-status.yaml
+@@ -16,7 +16,7 @@
+ # story_location: "{project-root}/docs/bmad/implementation-artifacts"
+ 
+ generated: 09-06-2026 08:48
+-last_updated: 09-25-2026 19:26
++last_updated: 09-25-2026 19:37
+ project: qdev
+ project_key: NOKEY
+ tracking_system: file-system
+@@ -85,7 +85,7 @@ development_status:
+   3-4-ratchets-baselines: review
+   3-5-evidence-bundles: review
+   3-6-transition-bound-gates: review
+-  3-7-git-preflight-guard: backlog
++  3-7-git-preflight-guard: review
+   3-8-git-hook-shims-qdev-hook: backlog
+   3-9-hygiene-linter-lint-and-report: backlog
+   3-10-impact-analysis: backlog
+--- /dev/null	2026-09-25 21:08:49
++++ crates/qdev-cli/src/handlers/preflight.rs	2026-09-25 19:46:59
+@@ -0,0 +1,71 @@
++use std::io::{self, Write};
++use std::path::Path;
++
++use qdev_core::config::AnnotatedConfig;
++use qdev_core::{
++    format_preflight_text, run_preflight, ExitCode, JsonEnvelope, PreflightOptions,
++    PreflightPayload, PreflightStatus,
++};
++
++use crate::cli::{Cli, PreflightArgs};
++use crate::output::OutputEmitter;
++
++/// Handles `qdev preflight` command.
++pub fn handle_preflight(
++    args: &PreflightArgs,
++    annotated_config: &AnnotatedConfig,
++    cli: &Cli,
++    output: &OutputEmitter,
++    workspace_root: &Path,
++) -> ExitCode {
++    let opt_store = {
++        let cache_db_path = workspace_root
++            .join(&annotated_config.config.storage.cache_dir)
++            .join("cache.sqlite");
++        if cache_db_path.is_file() {
++            qdev_core::SqliteStore::open(&cache_db_path).ok()
++        } else {
++            None
++        }
++    };
++
++    let options = PreflightOptions {
++        story: args.story.clone(),
++    };
++
++    let outcome = match run_preflight(
++        workspace_root,
++        &annotated_config.config,
++        &options,
++        opt_store.as_ref().map(|s| s as &dyn qdev_core::Store),
++    ) {
++        Ok(o) => o,
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    };
++
++    if outcome.status == PreflightStatus::Pass {
++        if cli.json {
++            let payload = PreflightPayload::from(outcome);
++            let envelope = JsonEnvelope::new(payload);
++            let _ = output.emit_envelope(&envelope);
++        } else {
++            let text = format_preflight_text(&outcome);
++            let _ = output.emit_text(&text);
++        }
++        ExitCode::Success
++    } else {
++        if cli.json {
++            let payload = PreflightPayload::from(outcome);
++            let envelope = JsonEnvelope::new(payload);
++            let _ = output.emit_envelope(&envelope);
++        } else {
++            let text = format_preflight_text(&outcome);
++            eprintln!("{}", text);
++            let _ = io::stderr().flush();
++        }
++        ExitCode::PolicyRefusal
++    }
++}
+--- /dev/null	2026-09-25 21:08:49
++++ crates/qdev-cli/tests/preflight_cli_tests.rs	2026-09-25 21:06:20
+@@ -0,0 +1,395 @@
++use std::fs;
++use std::path::Path;
++use std::process::Command as StdCommand;
++
++use assert_cmd::Command;
++use serde_json::Value;
++use tempfile::TempDir;
++
++fn git(root: &Path, args: &[&str]) -> String {
++    let output = StdCommand::new("git")
++        .args(args)
++        .current_dir(root)
++        .output()
++        .unwrap_or_else(|e| panic!("failed to run `git {}`: {}", args.join(" "), e));
++    assert!(
++        output.status.success(),
++        "`git {}` failed: {}",
++        args.join(" "),
++        String::from_utf8_lossy(&output.stderr)
++    );
++    String::from_utf8_lossy(&output.stdout).trim().to_string()
++}
++
++fn setup_workspace(root: &Path) {
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "init",
++            "--non-interactive",
++            "--name",
++            "PreflightTest",
++            "--developer",
++            "simon",
++            "--team",
++            "core-platform",
++        ])
++        .assert()
++        .success();
++
++    git(root, &["init", "-b", "main"]);
++    git(root, &["config", "user.email", "simon@example.com"]);
++    git(root, &["config", "user.name", "Simon"]);
++    git(root, &["config", "commit.gpgsign", "false"]);
++
++    // Set up modules and git config in qdev.toml
++    let toml = r#"
++[project]
++name = "PreflightTest"
++
++[identity]
++developer_id = "simon"
++teams = ["core-platform"]
++
++[git]
++remote = "origin"
++integration_branch = "develop"
++branching_mode = "story-branch"
++require_clean_tree_in_scope = true
++max_integration_staleness_commits = 20
++
++[storage]
++specs_dir = "docs/specs"
++state_dir = "docs/state"
++cache_dir = ".qdev/cache"
++
++[[modules]]
++id = "foundation"
++paths = ["crates/foundation/**"]
++
++[[modules]]
++id = "bridge"
++paths = ["crates/bridge/**"]
++"#;
++    fs::write(root.join("qdev.toml"), toml).unwrap();
++
++    fs::create_dir_all(root.join("crates/foundation/src")).unwrap();
++    fs::create_dir_all(root.join("crates/bridge/src")).unwrap();
++    fs::write(root.join("crates/foundation/src/lib.rs"), "// foundation\n").unwrap();
++    fs::write(root.join("crates/bridge/src/lib.rs"), "// bridge\n").unwrap();
++    fs::write(root.join("README.md"), "# Readme\n").unwrap();
++
++    let story_content = r#"---
++id: E12S4
++title: Test Story
++status: in_progress
++version: 1
++created_by:
++  type: human
++  id: simon
++updated_by:
++  type: human
++  id: simon
++target_modules:
++  - foundation
++---
++# Test Story
++"#;
++    fs::write(root.join("docs/specs/stories/E12S4.md"), story_content).unwrap();
++
++    git(root, &["add", "-A"]);
++    git(root, &["commit", "-m", "Initial commit"]);
++
++    // Create develop branch so integration branch exists
++    git(root, &["branch", "develop"]);
++
++    // Sync cache so SQLite is populated
++    let mut sync_cmd = Command::cargo_bin("qdev").unwrap();
++    sync_cmd.current_dir(root).args(["sync"]).assert().success();
++}
++
++#[test]
++fn test_cli_preflight_clean_text() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd.current_dir(root).args(["preflight"]).assert().success();
++
++    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
++    assert!(stdout.contains("✓ preflight: working tree in scope, integration branch fresh, zero blocking findings"));
++}
++
++#[test]
++fn test_cli_preflight_clean_json() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd.current_dir(root).args(["preflight", "--json"]).assert().success();
++
++    let json_val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert_eq!(json_val["schema_version"], "1");
++    assert_eq!(json_val["status"], "pass");
++    assert_eq!(
++        json_val["summary"],
++        "working tree in scope, integration branch fresh, zero blocking findings"
++    );
++
++    // Validate against schema
++    let schema_str = qdev_core::PayloadKind::Preflight.schema_str();
++    let schema_val: Value = serde_json::from_str(schema_str).unwrap();
++    let validator = jsonschema::validator_for(&schema_val).unwrap();
++    assert!(validator.is_valid(&json_val));
++}
++
++#[test]
++fn test_cli_preflight_non_git_directory() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd.current_dir(root).args(["preflight"]).assert().code(4);
++
++    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
++    assert!(stderr.contains("not_a_git_repository"));
++
++    // Also test --json mode
++    let mut json_cmd = Command::cargo_bin("qdev").unwrap();
++    let json_assert = json_cmd.current_dir(root).args(["preflight", "--json"]).assert().code(4);
++    let json_val: Value = serde_json::from_slice(&json_assert.get_output().stdout).unwrap();
++    assert_eq!(json_val["error"]["code"], "not_a_git_repository");
++}
++
++#[test]
++fn test_cli_preflight_dirty_no_lease_refusal() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Modify a non-exempt file
++    fs::write(root.join("README.md"), "# Modified\n").unwrap();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd.current_dir(root).args(["preflight"]).assert().code(3);
++
++    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
++    assert!(stderr.contains("✖ preflight: no story lease or chore active"));
++    assert!(stderr.contains("Fix: git stash -u"));
++
++    // In JSON mode
++    let mut json_cmd = Command::cargo_bin("qdev").unwrap();
++    let json_assert = json_cmd.current_dir(root).args(["preflight", "--json"]).assert().code(3);
++    let json_val: Value = serde_json::from_slice(&json_assert.get_output().stdout).unwrap();
++    assert_eq!(json_val["status"], "refusal");
++    assert_eq!(json_val["remediation_commands"][0], "git stash -u");
++
++    let schema_str = qdev_core::PayloadKind::Preflight.schema_str();
++    let schema_val: Value = serde_json::from_str(schema_str).unwrap();
++    let validator = jsonschema::validator_for(&schema_val).unwrap();
++    assert!(validator.is_valid(&json_val));
++}
++
++#[test]
++fn test_cli_preflight_story_lease_in_scope_and_out_of_scope() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Claim lease for E12S4 (target_modules: foundation)
++    let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
++    claim_cmd.current_dir(root).args(["claim", "E12S4"]).assert().success();
++
++    // Modify file inside foundation (in scope)
++    fs::write(root.join("crates/foundation/src/lib.rs"), "// updated in foundation\n").unwrap();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root).args(["preflight"]).assert().success();
++
++    // Now modify file outside foundation (bridge is out of scope for E12S4)
++    fs::write(root.join("crates/bridge/src/lib.rs"), "// updated bridge\n").unwrap();
++
++    let mut cmd2 = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd2.current_dir(root).args(["preflight"]).assert().code(3);
++
++    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
++    assert!(stderr.contains("uncommitted changes outside target modules for story 'E12S4'"));
++    assert!(stderr.contains("crates/bridge/src/lib.rs"));
++    assert!(stderr.contains("Fix: git stash push -u -m \"out-of-scope\" -- \"crates/bridge/src/lib.rs\""));
++}
++
++#[test]
++fn test_cli_preflight_explicit_story_flag() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Modify file in foundation without lease, but pass `--story E12S4`
++    fs::write(root.join("crates/foundation/src/lib.rs"), "// foundation edit\n").unwrap();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root).args(["preflight", "--story", "E12S4"]).assert().success();
++
++    // Also modify bridge -> should fail
++    fs::write(root.join("crates/bridge/src/lib.rs"), "// bridge edit\n").unwrap();
++    let mut cmd2 = Command::cargo_bin("qdev").unwrap();
++    cmd2.current_dir(root).args(["preflight", "--story", "E12S4"]).assert().code(3);
++}
++
++#[test]
++fn test_cli_preflight_open_chore() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Start chore with allowlist crates/bridge/**
++    let mut chore_cmd = Command::cargo_bin("qdev").unwrap();
++    chore_cmd
++        .current_dir(root)
++        .args(["chore", "start", "Tweak bridge", "--paths", "crates/bridge/**"])
++        .assert()
++        .success();
++
++    // Edit file in bridge -> passes
++    fs::write(root.join("crates/bridge/src/lib.rs"), "// chore modification\n").unwrap();
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root).args(["preflight"]).assert().success();
++
++    // Edit file in foundation -> out of chore allowlist
++    fs::write(root.join("crates/foundation/src/lib.rs"), "// foundation edit\n").unwrap();
++    let mut cmd2 = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd2.current_dir(root).args(["preflight"]).assert().code(3);
++    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
++    assert!(stderr.contains("outside allowlist for chore"));
++}
++
++#[test]
++fn test_cli_preflight_staleness_limit() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Update max_integration_staleness_commits to 2 in qdev.toml
++    let toml = fs::read_to_string(root.join("qdev.toml")).unwrap();
++    let new_toml = toml.replace("max_integration_staleness_commits = 20", "max_integration_staleness_commits = 2");
++    fs::write(root.join("qdev.toml"), new_toml).unwrap();
++    git(root, &["commit", "-am", "Update staleness limit"]);
++
++    // Create feature branch
++    git(root, &["checkout", "-b", "feature/E12S4-staleness"]);
++
++    // Advance develop by 3 commits
++    git(root, &["checkout", "develop"]);
++    for i in 1..=3 {
++        fs::write(root.join("crates/foundation/src/lib.rs"), format!("// develop commit {}\n", i)).unwrap();
++        git(root, &["commit", "-am", &format!("develop commit {}", i)]);
++    }
++
++    // Switch back to feature branch
++    git(root, &["checkout", "feature/E12S4-staleness"]);
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd.current_dir(root).args(["preflight", "--story", "E12S4"]).assert().code(3);
++
++    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
++    assert!(stderr.contains("is 3 commits behind develop at merge-base (limit 2)"));
++    assert!(stderr.contains("Rebase onto develop before continuing E12S4."));
++    assert!(stderr.contains("Fix: git rebase develop"));
++}
++
++#[test]
++fn test_cli_preflight_integration_branch_behind_remote() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Create bare remote
++    let remote_dir = TempDir::new().unwrap();
++    git(remote_dir.path(), &["init", "--bare"]);
++    git(root, &["remote", "add", "origin", remote_dir.path().to_str().unwrap()]);
++
++    git(root, &["checkout", "develop"]);
++    git(root, &["push", "-u", "origin", "develop"]);
++
++    // Advance remote develop
++    fs::write(root.join("crates/foundation/src/lib.rs"), "// remote commit\n").unwrap();
++    git(root, &["commit", "-am", "Remote commit"]);
++    git(root, &["push", "origin", "develop"]);
++
++    // Rewind local develop
++    git(root, &["reset", "--hard", "HEAD~1"]);
++
++    // When on develop, remediation recommends git pull
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd.current_dir(root).args(["preflight"]).assert().code(3);
++    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
++    assert!(stderr.contains("local 'develop' is 1 commit(s) behind 'origin/develop'"));
++    assert!(stderr.contains("Fix: git pull origin develop"));
++
++    // When on another branch (e.g. main), remediation recommends git fetch
++    git(root, &["checkout", "main"]);
++    let mut cmd2 = Command::cargo_bin("qdev").unwrap();
++    let assert2 = cmd2.current_dir(root).args(["preflight"]).assert().code(3);
++    let stderr2 = String::from_utf8_lossy(&assert2.get_output().stderr);
++    assert!(stderr2.contains("local 'develop' is 1 commit(s) behind 'origin/develop'"));
++    assert!(stderr2.contains("Fix: git fetch origin develop:develop"));
++}
++
++#[test]
++fn test_cli_preflight_trunk_mode_behind_remote() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Switch to trunk mode in qdev.toml
++    let toml = fs::read_to_string(root.join("qdev.toml")).unwrap();
++    let new_toml = toml.replace("branching_mode = \"story-branch\"", "branching_mode = \"trunk\"");
++    fs::write(root.join("qdev.toml"), new_toml).unwrap();
++    git(root, &["commit", "-am", "Use trunk mode"]);
++
++    let remote_dir = TempDir::new().unwrap();
++    git(remote_dir.path(), &["init", "--bare"]);
++    git(root, &["remote", "add", "origin", remote_dir.path().to_str().unwrap()]);
++    git(root, &["push", "-u", "origin", "main"]);
++
++    // Remote commit
++    fs::write(root.join("crates/foundation/src/lib.rs"), "// remote main\n").unwrap();
++    git(root, &["commit", "-am", "Remote main"]);
++    git(root, &["push", "origin", "main"]);
++
++    // Rewind local
++    git(root, &["reset", "--hard", "HEAD~1"]);
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd.current_dir(root).args(["preflight"]).assert().code(3);
++
++    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
++    assert!(stderr.contains("branch 'main' is 1 commit(s) behind 'origin/main'"));
++    assert!(stderr.contains("Fix: git pull origin main"));
++}
++
++#[test]
++fn test_cli_preflight_blocking_validation_error() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Introduce an unparseable story YAML file that triggers an error finding on validate
++    fs::write(
++        root.join("docs/specs/stories/E12S99.md"),
++        "---\nid: E12S99\ntitle: Broken Story\nstatus: [bad yaml\n---\n",
++    ).unwrap();
++
++    let mut sync_cmd = Command::cargo_bin("qdev").unwrap();
++    // sync records hydration errors into cache
++    let _ = sync_cmd.current_dir(root).args(["sync"]).assert();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd.current_dir(root).args(["preflight"]).assert().code(3);
++
++    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
++    assert!(stderr.contains("workspace has") && stderr.contains("blocking validation error"));
++    assert!(stderr.contains("Fix: qdev validate"));
++}
+--- /dev/null	2026-09-25 21:08:49
++++ crates/qdev-core/schemas/payload-preflight.json	2026-09-25 19:45:31
+@@ -0,0 +1,63 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "Preflight Payload Schema",
++  "description": "Output shape of `qdev preflight --json`. Reports working tree scope, branch freshness, and validation health checks. Schema changes follow semver on schema_version; additive fields do not bump the major.",
++  "type": "object",
++  "required": [
++    "schema_version",
++    "status",
++    "summary"
++  ],
++  "properties": {
++    "schema_version": {
++      "type": "string"
++    },
++    "status": {
++      "type": "string",
++      "enum": ["pass", "refusal"]
++    },
++    "summary": {
++      "type": "string"
++    },
++    "diagnostics": {
++      "type": "array",
++      "items": {
++        "type": "object",
++        "required": [
++          "category",
++          "code",
++          "message"
++        ],
++        "properties": {
++          "category": {
++            "type": "string",
++            "enum": ["working_tree", "branch_freshness", "validation"]
++          },
++          "code": {
++            "type": "string"
++          },
++          "message": {
++            "type": "string"
++          },
++          "paths": {
++            "type": "array",
++            "items": {
++              "type": "string"
++            }
++          },
++          "remediation": {
++            "type": ["string", "null"]
++          }
++        },
++        "additionalProperties": false
++      }
++    },
++    "remediation_commands": {
++      "type": "array",
++      "items": {
++        "type": "string"
++      }
++    }
++  },
++  "additionalProperties": false
++}
+--- /dev/null	2026-09-25 21:08:49
++++ crates/qdev-core/src/preflight.rs	2026-09-25 21:04:53
+@@ -0,0 +1,740 @@
++//! Git Preflight Guard per Story 3.7.
++//!
++//! Enforces working tree cleanliness within leased story module boundaries (or active chore
++//! allowlists), integration branch remote freshness, merge-base staleness limits, and zero
++//! blocking validation errors, providing exact Git remediation commands on refusal (exit 3).
++
++use std::collections::HashSet;
++use std::path::Path;
++use std::process::Command;
++
++use serde::{Deserialize, Serialize};
++
++use crate::chore::find_open_chore;
++use crate::config::{Config, StorageConfig};
++use crate::errors::QdevError;
++use crate::lease::{discover_git_branch, find_active_lease_with_storage};
++use crate::modules::ModuleRegistry;
++use crate::schema::{extract_frontmatter, EntityKind};
++use crate::store::{FindingRecord, Store};
++use crate::validate::{glob_match, run_validation};
++use crate::write::resolve_entity_file;
++
++/// Options configuring the preflight execution.
++#[derive(Debug, Clone, PartialEq, Eq, Default)]
++pub struct PreflightOptions {
++    /// Optional story ID to evaluate module scope against.
++    pub story: Option<String>,
++}
++
++/// Preflight pass/refusal outcome status.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum PreflightStatus {
++    Pass,
++    Refusal,
++}
++
++impl PreflightStatus {
++    pub fn as_str(&self) -> &'static str {
++        match self {
++            PreflightStatus::Pass => "pass",
++            PreflightStatus::Refusal => "refusal",
++        }
++    }
++}
++
++/// A structured preflight diagnostic record.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct PreflightDiagnostic {
++    pub category: String,
++    pub code: String,
++    pub message: String,
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub paths: Vec<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub remediation: Option<String>,
++}
++
++/// Full outcome of a preflight guard evaluation.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct PreflightOutcome {
++    pub status: PreflightStatus,
++    pub summary: String,
++    pub diagnostics: Vec<PreflightDiagnostic>,
++    pub remediation_commands: Vec<String>,
++}
++
++/// JSON payload structure for `--json` output conforming to `payload-preflight.json`.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct PreflightPayload {
++    pub status: String,
++    pub summary: String,
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub diagnostics: Vec<PreflightDiagnostic>,
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub remediation_commands: Vec<String>,
++}
++
++impl From<PreflightOutcome> for PreflightPayload {
++    fn from(outcome: PreflightOutcome) -> Self {
++        Self {
++            status: outcome.status.as_str().to_string(),
++            summary: outcome.summary,
++            diagnostics: outcome.diagnostics,
++            remediation_commands: outcome.remediation_commands,
++        }
++    }
++}
++
++/// Checks whether `rel_path` belongs to exempt workspace metadata.
++pub fn is_metadata_exempt(rel_path: &str, storage: &StorageConfig) -> bool {
++    let mut normalized = rel_path.replace('\\', "/");
++    loop {
++        if let Some(stripped) = normalized.strip_prefix('/') {
++            normalized = stripped.to_string();
++        } else if let Some(stripped) = normalized.strip_prefix("./") {
++            normalized = stripped.to_string();
++        } else {
++            break;
++        }
++    }
++
++    if normalized == "qdev.toml" || normalized == ".qdev.local.toml" || normalized == ".gitignore" {
++        return true;
++    }
++    if normalized == ".qdev" || normalized.starts_with(".qdev/") {
++        return true;
++    }
++    if normalized == ".git" || normalized.starts_with(".git/") {
++        return true;
++    }
++    if normalized == "docs" || normalized.starts_with("docs/") {
++        return true;
++    }
++
++    let normalize_dir = |d: &str| -> String {
++        let mut s = d.replace('\\', "/");
++        loop {
++            if let Some(stripped) = s.strip_prefix("./") {
++                s = stripped.to_string();
++            } else if let Some(stripped) = s.strip_prefix('/') {
++                s = stripped.to_string();
++            } else {
++                break;
++            }
++        }
++        s.trim_end_matches('/').to_string()
++    };
++
++    let specs = normalize_dir(&storage.specs_dir);
++    if !specs.is_empty() && (normalized == specs || normalized.starts_with(&format!("{}/", specs))) {
++        return true;
++    }
++    let state = normalize_dir(&storage.state_dir);
++    if !state.is_empty() && (normalized == state || normalized.starts_with(&format!("{}/", state))) {
++        return true;
++    }
++    let cache = normalize_dir(&storage.cache_dir);
++    if !cache.is_empty() && (normalized == cache || normalized.starts_with(&format!("{}/", cache))) {
++        return true;
++    }
++
++    false
++}
++
++/// Resolves target modules for a story either from SQLite store or from the story specification file.
++pub fn resolve_story_target_modules(
++    workspace_root: &Path,
++    config: &Config,
++    opt_store: Option<&dyn Store>,
++    story_id: &str,
++) -> Result<Vec<String>, QdevError> {
++    if let Some(store) = opt_store {
++        if let Ok(Some(story)) = store.get_story_details(story_id) {
++            if let Some(ref tm_json) = story.target_modules {
++                if let Ok(modules) = serde_json::from_str::<Vec<String>>(tm_json) {
++                    return Ok(modules);
++                }
++            }
++        }
++    }
++
++    let (_, _, story_file) = resolve_entity_file(
++        workspace_root,
++        Some(EntityKind::Story),
++        story_id,
++        Some(&config.storage),
++    ).map_err(|_| {
++        QdevError::usage_error(format!("Story '{}' not found", story_id))
++    })?;
++
++    let content = std::fs::read_to_string(&story_file).map_err(|e| {
++        QdevError::infrastructure_failure(
++            "io_error",
++            format!("Failed to read story file '{}': {}", story_file.display(), e),
++        )
++    })?;
++
++    let frontmatter = extract_frontmatter(&content).map_err(|e| {
++        QdevError::logical_failure(
++            "schema_error",
++            format!("Failed to parse story frontmatter in '{}': {}", story_file.display(), e),
++        )
++    })?;
++
++    let mut target_modules = Vec::new();
++    if let Some(arr) = frontmatter.get("target_modules").and_then(|v| v.as_array()) {
++        for item in arr {
++            if let Some(s) = item.as_str() {
++                let trimmed = s.trim();
++                if !trimmed.is_empty() && !target_modules.contains(&trimmed.to_string()) {
++                    target_modules.push(trimmed.to_string());
++                }
++            }
++        }
++    }
++
++    Ok(target_modules)
++}
++
++/// Inspects working tree cleanliness and checks uncommitted files against module/chore scope.
++pub fn check_working_tree_scope(
++    workspace_root: &Path,
++    config: &Config,
++    opt_store: Option<&dyn Store>,
++    options: &PreflightOptions,
++) -> Result<Option<PreflightDiagnostic>, QdevError> {
++    if !config.git.require_clean_tree_in_scope {
++        return Ok(None);
++    }
++
++    let status_output = Command::new("git")
++        .args(["-c", "core.quotePath=false", "status", "--porcelain=v1", "-uall"])
++        .current_dir(workspace_root)
++        .output()
++        .map_err(|e| {
++            QdevError::infrastructure_failure(
++                "git_unavailable",
++                format!("Failed to run 'git status': {}", e),
++            )
++        })?;
++
++    if !status_output.status.success() {
++        return Err(QdevError::infrastructure_failure(
++            "git_status_failed",
++            format!(
++                "'git status' failed: {}",
++                String::from_utf8_lossy(&status_output.stderr).trim()
++            ),
++        ));
++    }
++
++    let stdout_str = String::from_utf8_lossy(&status_output.stdout);
++    let mut uncommitted_files = HashSet::new();
++
++    for line in stdout_str.lines() {
++        let trimmed_line = line.trim_end();
++        if trimmed_line.len() >= 3 {
++            let mut path_part = trimmed_line[3..].trim();
++            if let Some(idx) = path_part.find(" -> ") {
++                path_part = &path_part[idx + 4..];
++            }
++            let cleaned_path = path_part.trim_matches('"');
++            if !cleaned_path.is_empty() && !is_metadata_exempt(cleaned_path, &config.storage) {
++                uncommitted_files.insert(cleaned_path.to_string());
++            }
++        }
++    }
++
++    if uncommitted_files.is_empty() {
++        return Ok(None);
++    }
++
++    // Scope determination hierarchy
++    enum ActiveScope {
++        Story(String, Vec<String>), // (story_id, target_modules)
++        Chore(String, Vec<String>), // (chore_id, allowlist_patterns)
++        None,
++    }
++
++    let active_scope = if let Some(ref sid) = options.story {
++        let modules = resolve_story_target_modules(workspace_root, config, opt_store, sid)?;
++        ActiveScope::Story(sid.clone(), modules)
++    } else {
++        match find_active_lease_with_storage(workspace_root, Some(&config.storage)) {
++            Ok(lease) => {
++                let modules = resolve_story_target_modules(workspace_root, config, opt_store, &lease.story_id)?;
++                ActiveScope::Story(lease.story_id, modules)
++            }
++            Err(e) => {
++                if e.code() != "no_active_lease" {
++                    return Ok(Some(PreflightDiagnostic {
++                        category: "working_tree".to_string(),
++                        code: "multiple_active_leases".to_string(),
++                        message: format!(
++                            "multiple active leases in workspace; specify story with '--story <id>' to resolve scope ({})",
++                            e.message()
++                        ),
++                        paths: Vec::new(),
++                        remediation: Some("qdev preflight --story <id>".to_string()),
++                    }));
++                }
++                if let Ok(Some(chore)) = find_open_chore(workspace_root, Some(&config.storage)) {
++                    ActiveScope::Chore(chore.id, chore.paths)
++                } else {
++                    ActiveScope::None
++                }
++            }
++        }
++    };
++
++    let registry = ModuleRegistry::from_config(config);
++    let mut out_of_scope = Vec::new();
++
++    for path in &uncommitted_files {
++        let in_scope = match &active_scope {
++            ActiveScope::Story(_, target_modules) => {
++                let mut matched = false;
++                for mod_id in target_modules {
++                    if let Some(module) = registry.get(mod_id) {
++                        if module.paths.iter().any(|pattern| glob_match(pattern, path)) {
++                            matched = true;
++                            break;
++                        }
++                    }
++                }
++                matched
++            }
++            ActiveScope::Chore(_, patterns) => {
++                patterns.iter().any(|pattern| glob_match(pattern, path))
++            }
++            ActiveScope::None => false,
++        };
++
++        if !in_scope {
++            out_of_scope.push(path.clone());
++        }
++    }
++
++    if out_of_scope.is_empty() {
++        return Ok(None);
++    }
++
++    out_of_scope.sort();
++
++    let quoted_paths = out_of_scope
++        .iter()
++        .map(|p| format!("\"{}\"", p))
++        .collect::<Vec<_>>()
++        .join(" ");
++
++    let (message, remediation) = match &active_scope {
++        ActiveScope::Story(sid, _) => (
++            format!(
++                "uncommitted changes outside target modules for story '{}':\n{}",
++                sid,
++                out_of_scope.iter().map(|p| format!("    {}", p)).collect::<Vec<_>>().join("\n")
++            ),
++            format!("git stash push -u -m \"out-of-scope\" -- {}", quoted_paths),
++        ),
++        ActiveScope::Chore(cid, _) => (
++            format!(
++                "uncommitted changes outside allowlist for chore '{}':\n{}",
++                cid,
++                out_of_scope.iter().map(|p| format!("    {}", p)).collect::<Vec<_>>().join("\n")
++            ),
++            format!("git stash push -u -m \"out-of-scope\" -- {}", quoted_paths),
++        ),
++        ActiveScope::None => (
++            format!(
++                "no story lease or chore active in workspace; uncommitted changes are out of scope:\n{}",
++                out_of_scope.iter().map(|p| format!("    {}", p)).collect::<Vec<_>>().join("\n")
++            ),
++            "git stash -u".to_string(),
++        ),
++    };
++
++    Ok(Some(PreflightDiagnostic {
++        category: "working_tree".to_string(),
++        code: "out_of_scope_changes".to_string(),
++        message,
++        paths: out_of_scope,
++        remediation: Some(remediation),
++    }))
++}
++
++/// Checks branch freshness and integration merge-base staleness.
++pub fn check_branch_freshness(
++    workspace_root: &Path,
++    config: &Config,
++    active_story_id: Option<&str>,
++) -> Result<Vec<PreflightDiagnostic>, QdevError> {
++    let mut diagnostics = Vec::new();
++    let current_branch = discover_git_branch(workspace_root);
++    let remote = &config.git.remote;
++
++    match config.git.branching_mode.as_str() {
++        "trunk" => {
++            // Verify current branch is not behind upstream tracking ref
++            let tracking_ref = format!("refs/remotes/{}/{}", remote, current_branch);
++            let verify = Command::new("git")
++                .args(["rev-parse", "--verify", "--quiet", &tracking_ref])
++                .current_dir(workspace_root)
++                .output()
++                .map_err(|e| {
++                    QdevError::infrastructure_failure(
++                        "git_unavailable",
++                        format!("Failed to verify remote tracking ref: {}", e),
++                    )
++                })?;
++
++            if verify.status.success() {
++                let rev_spec = format!("HEAD..{}/{}", remote, current_branch);
++                let count_out = Command::new("git")
++                    .args(["rev-list", "--count", &rev_spec])
++                    .current_dir(workspace_root)
++                    .output()
++                    .map_err(|e| {
++                        QdevError::infrastructure_failure(
++                            "git_unavailable",
++                            format!("Failed to run 'git rev-list': {}", e),
++                        )
++                    })?;
++
++                if count_out.status.success() {
++                    let count_str = String::from_utf8_lossy(&count_out.stdout).trim().to_string();
++                    let behind_count: u32 = count_str.parse().unwrap_or(0);
++                    if behind_count > 0 {
++                        let remediation = format!("git pull {} {}", remote, current_branch);
++                        diagnostics.push(PreflightDiagnostic {
++                            category: "branch_freshness".to_string(),
++                            code: "trunk_branch_behind_remote".to_string(),
++                            message: format!(
++                                "branch '{}' is {} commit(s) behind '{}/{}'",
++                                current_branch, behind_count, remote, current_branch
++                            ),
++                            paths: Vec::new(),
++                            remediation: Some(remediation),
++                        });
++                    }
++                }
++            }
++        }
++        _ => {
++            // "story-branch" mode
++            let integration_branch = &config.git.integration_branch;
++
++            let local_exists = Command::new("git")
++                .args(["rev-parse", "--verify", "--quiet", integration_branch])
++                .current_dir(workspace_root)
++                .output()
++                .map(|o| o.status.success())
++                .unwrap_or(false);
++
++            let remote_ref = format!("refs/remotes/{}/{}", remote, integration_branch);
++            let remote_exists = Command::new("git")
++                .args(["rev-parse", "--verify", "--quiet", &remote_ref])
++                .current_dir(workspace_root)
++                .output()
++                .map(|o| o.status.success())
++                .unwrap_or(false);
++
++            if !local_exists && !remote_exists {
++                diagnostics.push(PreflightDiagnostic {
++                    category: "branch_freshness".to_string(),
++                    code: "integration_branch_missing".to_string(),
++                    message: format!(
++                        "configured integration branch '{}' does not exist locally or on remote '{}'",
++                        integration_branch, remote
++                    ),
++                    paths: Vec::new(),
++                    remediation: Some(format!("git checkout -b {}", integration_branch)),
++                });
++                return Ok(diagnostics);
++            }
++
++            // 1. Check if remote tracking ref exists and local integration branch is behind
++            if remote_exists && local_exists {
++                let rev_spec = format!("{}..{}/{}", integration_branch, remote, integration_branch);
++                let count_out = Command::new("git")
++                    .args(["rev-list", "--count", &rev_spec])
++                    .current_dir(workspace_root)
++                    .output()
++                    .map_err(|e| {
++                        QdevError::infrastructure_failure(
++                            "git_unavailable",
++                            format!("Failed to run 'git rev-list': {}", e),
++                        )
++                    })?;
++
++                if count_out.status.success() {
++                    let count_str = String::from_utf8_lossy(&count_out.stdout).trim().to_string();
++                    let behind_count: u32 = count_str.parse().unwrap_or(0);
++                    if behind_count > 0 {
++                        let remediation = if current_branch == *integration_branch {
++                            format!("git pull {} {}", remote, integration_branch)
++                        } else {
++                            format!(
++                                "git fetch {} {}:{}",
++                                remote, integration_branch, integration_branch
++                            )
++                        };
++                        diagnostics.push(PreflightDiagnostic {
++                            category: "branch_freshness".to_string(),
++                            code: "integration_branch_behind_remote".to_string(),
++                            message: format!(
++                                "local '{}' is {} commit(s) behind '{}/{}'",
++                                integration_branch, behind_count, remote, integration_branch
++                            ),
++                            paths: Vec::new(),
++                            remediation: Some(remediation),
++                        });
++                    }
++                }
++            } else if remote_exists && !local_exists {
++                diagnostics.push(PreflightDiagnostic {
++                    category: "branch_freshness".to_string(),
++                    code: "local_integration_branch_missing".to_string(),
++                    message: format!(
++                        "local integration branch '{}' does not exist; remote tracking ref '{}/{}' exists",
++                        integration_branch, remote, integration_branch
++                    ),
++                    paths: Vec::new(),
++                    remediation: Some(format!(
++                        "git checkout -b {} {}/{}",
++                        integration_branch, remote, integration_branch
++                    )),
++                });
++            }
++
++            // 2. Check merge-base staleness against local integration branch
++            let verify_local_ib = Command::new("git")
++                .args(["rev-parse", "--verify", "--quiet", integration_branch])
++                .current_dir(workspace_root)
++                .output()
++                .map_err(|e| {
++                    QdevError::infrastructure_failure(
++                        "git_unavailable",
++                        format!("Failed to check integration branch: {}", e),
++                    )
++                })?;
++
++            if verify_local_ib.status.success() {
++                let mb_output = Command::new("git")
++                    .args(["merge-base", "HEAD", integration_branch])
++                    .current_dir(workspace_root)
++                    .output()
++                    .map_err(|e| {
++                        QdevError::infrastructure_failure(
++                            "git_unavailable",
++                            format!("Failed to compute merge-base: {}", e),
++                        )
++                    })?;
++
++                if mb_output.status.success() {
++                    let mb = String::from_utf8_lossy(&mb_output.stdout).trim().to_string();
++                    if !mb.is_empty() {
++                        let staleness_spec = format!("{}..{}", mb, integration_branch);
++                        let count_out = Command::new("git")
++                            .args(["rev-list", "--count", &staleness_spec])
++                            .current_dir(workspace_root)
++                            .output()
++                            .map_err(|e| {
++                                QdevError::infrastructure_failure(
++                                    "git_unavailable",
++                                    format!("Failed to count staleness commits: {}", e),
++                                )
++                            })?;
++
++                        if count_out.status.success() {
++                            let count_str = String::from_utf8_lossy(&count_out.stdout).trim().to_string();
++                            let staleness: u32 = count_str.parse().unwrap_or(0);
++                            let max_staleness = config.git.max_integration_staleness_commits;
++                            if staleness > max_staleness {
++                                let story_part = if let Some(sid) = active_story_id {
++                                    format!(" before continuing {}", sid)
++                                } else {
++                                    String::new()
++                                };
++                                let message = format!(
++                                    "{} is {} commits behind {} at merge-base (limit {}).\n  Rebase onto {}{}.",
++                                    current_branch, staleness, integration_branch, max_staleness, integration_branch, story_part
++                                );
++                                let remediation = format!("git rebase {}", integration_branch);
++                                diagnostics.push(PreflightDiagnostic {
++                                    category: "branch_freshness".to_string(),
++                                    code: "merge_base_stale".to_string(),
++                                    message,
++                                    paths: Vec::new(),
++                                    remediation: Some(remediation),
++                                });
++                            }
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    Ok(diagnostics)
++}
++
++/// Evaluates live validation findings and flags any error-severity findings as blocking.
++pub fn check_validation_health(
++    workspace_root: &Path,
++    config: &Config,
++    opt_store: Option<&dyn Store>,
++) -> Result<Option<PreflightDiagnostic>, QdevError> {
++    let findings: Vec<FindingRecord> = if let Some(store) = opt_store {
++        run_validation(store, workspace_root, config)?
++    } else {
++        let db_path = workspace_root.join(&config.storage.cache_dir).join("cache.sqlite");
++        if db_path.is_file() {
++            if let Ok(store) = crate::store::SqliteStore::open(&db_path) {
++                run_validation(&store, workspace_root, config)?
++            } else {
++                Vec::new()
++            }
++        } else if let Ok(mem_store) = crate::store::SqliteStore::open_in_memory() {
++            run_validation(&mem_store, workspace_root, config)?
++        } else {
++            Vec::new()
++        }
++    };
++
++    let error_findings: Vec<&FindingRecord> = findings.iter().filter(|f| f.severity == "error").collect();
++    if error_findings.is_empty() {
++        return Ok(None);
++    }
++
++    let mut paths = Vec::new();
++    let mut details = Vec::new();
++    for f in &error_findings {
++        if !paths.contains(&f.path) {
++            paths.push(f.path.clone());
++        }
++        details.push(format!("[{}] {}", f.code, f.path));
++    }
++
++    let message = format!(
++        "workspace has {} blocking validation error(s):\n{}",
++        error_findings.len(),
++        details.iter().map(|d| format!("    {}", d)).collect::<Vec<_>>().join("\n")
++    );
++
++    Ok(Some(PreflightDiagnostic {
++        category: "validation".to_string(),
++        code: "blocking_validation_errors".to_string(),
++        message,
++        paths,
++        remediation: Some("qdev validate".to_string()),
++    }))
++}
++
++/// Runs full preflight inspection.
++pub fn run_preflight(
++    workspace_root: &Path,
++    config: &Config,
++    options: &PreflightOptions,
++    opt_store: Option<&dyn Store>,
++) -> Result<PreflightOutcome, QdevError> {
++    // 0. Verify git repository existence
++    let is_git_repo = Command::new("git")
++        .args(["rev-parse", "--is-inside-work-tree"])
++        .current_dir(workspace_root)
++        .output();
++
++    match is_git_repo {
++        Ok(output) => {
++            if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "true" {
++                return Err(QdevError::infrastructure_failure(
++                    "not_a_git_repository",
++                    "Workspace is not a git repository",
++                ));
++            }
++        }
++        Err(e) => {
++            return Err(QdevError::infrastructure_failure(
++                "git_unavailable",
++                format!("Failed to execute git: {}", e),
++            ));
++        }
++    }
++
++    let mut diagnostics = Vec::new();
++    let mut remediation_commands = Vec::new();
++
++    // 1. Working tree scope check
++    if let Some(scope_diag) = check_working_tree_scope(workspace_root, config, opt_store, options)? {
++        if let Some(ref cmd) = scope_diag.remediation {
++            if !remediation_commands.contains(cmd) {
++                remediation_commands.push(cmd.clone());
++            }
++        }
++        diagnostics.push(scope_diag);
++    }
++
++    // Determine active story id for diagnostics
++    let lease_story = if options.story.is_none() {
++        find_active_lease_with_storage(workspace_root, Some(&config.storage))
++            .ok()
++            .map(|l| l.story_id)
++    } else {
++        None
++    };
++    let effective_story_id = options.story.as_deref().or(lease_story.as_deref());
++
++    // 2. Branch freshness check
++    let freshness_diags = check_branch_freshness(workspace_root, config, effective_story_id)?;
++    for diag in freshness_diags {
++        if let Some(ref cmd) = diag.remediation {
++            if !remediation_commands.contains(cmd) {
++                remediation_commands.push(cmd.clone());
++            }
++        }
++        diagnostics.push(diag);
++    }
++
++    // 3. Validation health check
++    if let Some(val_diag) = check_validation_health(workspace_root, config, opt_store)? {
++        if let Some(ref cmd) = val_diag.remediation {
++            if !remediation_commands.contains(cmd) {
++                remediation_commands.push(cmd.clone());
++            }
++        }
++        diagnostics.push(val_diag);
++    }
++
++    if diagnostics.is_empty() {
++        Ok(PreflightOutcome {
++            status: PreflightStatus::Pass,
++            summary: "working tree in scope, integration branch fresh, zero blocking findings".to_string(),
++            diagnostics: Vec::new(),
++            remediation_commands: Vec::new(),
++        })
++    } else {
++        Ok(PreflightOutcome {
++            status: PreflightStatus::Refusal,
++            summary: format!("preflight checks failed with {} issue(s)", diagnostics.len()),
++            diagnostics,
++            remediation_commands,
++        })
++    }
++}
++
++/// Formats the human-readable text output for preflight.
++pub fn format_preflight_text(outcome: &PreflightOutcome) -> String {
++    if outcome.status == PreflightStatus::Pass {
++        format!("✓ preflight: {}", outcome.summary)
++    } else {
++        let mut lines = Vec::new();
++        for diag in &outcome.diagnostics {
++            lines.push(format!("✖ preflight: {}", diag.message));
++            if let Some(ref cmd) = diag.remediation {
++                lines.push(format!("  Fix: {}", cmd));
++            }
++        }
++        lines.join("\n")
++    }
++}
+--- /dev/null	2026-09-25 21:08:49
++++ crates/qdev-core/tests/preflight_tests.rs	2026-09-25 21:06:09
+@@ -0,0 +1,539 @@
++use std::fs;
++use std::path::Path;
++use std::process::Command;
++
++use qdev_core::config::{Config, GitConfig, ModuleConfig, StorageConfig};
++use qdev_core::lease::claim_story;
++use qdev_core::preflight::{
++    check_branch_freshness, format_preflight_text, is_metadata_exempt, run_preflight,
++    PreflightOptions, PreflightPayload, PreflightStatus,
++};
++use qdev_core::schema::PayloadKind;
++use qdev_core::store::{FindingRecord, SqliteStore, Store};
++use qdev_core::write::Author;
++use tempfile::TempDir;
++
++fn git(root: &Path, args: &[&str]) -> String {
++    let output = Command::new("git")
++        .args(args)
++        .current_dir(root)
++        .output()
++        .unwrap_or_else(|e| panic!("failed to run `git {}`: {}", args.join(" "), e));
++    assert!(
++        output.status.success(),
++        "`git {}` failed: {}",
++        args.join(" "),
++        String::from_utf8_lossy(&output.stderr)
++    );
++    String::from_utf8_lossy(&output.stdout).trim().to_string()
++}
++
++fn setup_repo(root: &Path) -> Config {
++    git(root, &["init", "-b", "main"]);
++    git(root, &["config", "user.email", "test@example.com"]);
++    git(root, &["config", "user.name", "Test User"]);
++    git(root, &["config", "commit.gpgsign", "false"]);
++
++    fs::create_dir_all(root.join(".qdev/cache")).unwrap();
++    fs::create_dir_all(root.join(".qdev/leases")).unwrap();
++    fs::create_dir_all(root.join(".qdev/chores")).unwrap();
++    fs::create_dir_all(root.join("docs/specs/stories")).unwrap();
++    fs::create_dir_all(root.join("docs/state/decisions")).unwrap();
++    fs::create_dir_all(root.join("crates/foundation/src")).unwrap();
++    fs::create_dir_all(root.join("crates/bridge/src")).unwrap();
++
++    fs::write(root.join("crates/foundation/src/lib.rs"), "// foundation\n").unwrap();
++    fs::write(root.join("crates/bridge/src/lib.rs"), "// bridge\n").unwrap();
++    fs::write(root.join("README.md"), "# Test\n").unwrap();
++
++    let story_yaml = "---\nid: E12S4\ntitle: Test Story\nstatus: in_progress\ntarget_modules:\n  - foundation\n---\n# Story\n";
++    fs::write(root.join("docs/specs/stories/E12S4.md"), story_yaml).unwrap();
++
++    let toml = r#"
++[project]
++name = "TestProject"
++
++[git]
++remote = "origin"
++integration_branch = "develop"
++branching_mode = "story-branch"
++require_clean_tree_in_scope = true
++max_integration_staleness_commits = 20
++
++[storage]
++specs_dir = "docs/specs"
++state_dir = "docs/state"
++cache_dir = ".qdev/cache"
++
++[[modules]]
++id = "foundation"
++paths = ["crates/foundation/**"]
++
++[[modules]]
++id = "bridge"
++paths = ["crates/bridge/**"]
++"#;
++    fs::write(root.join("qdev.toml"), toml).unwrap();
++
++    git(root, &["add", "-A"]);
++    git(root, &["commit", "-m", "Initial commit"]);
++
++    Config {
++        git: GitConfig {
++            remote: "origin".to_string(),
++            integration_branch: "develop".to_string(),
++            branching_mode: "story-branch".to_string(),
++            branch_template: "feature/{story_id}-{slug}".to_string(),
++            require_clean_tree_in_scope: true,
++            max_integration_staleness_commits: 20,
++        },
++        storage: StorageConfig {
++            specs_dir: "docs/specs".to_string(),
++            state_dir: "docs/state".to_string(),
++            cache_dir: ".qdev/cache".to_string(),
++        },
++        modules: vec![
++            ModuleConfig {
++                id: "foundation".to_string(),
++                paths: vec!["crates/foundation/**".to_string()],
++                layer: None,
++                may_depend_on: Vec::new(),
++            },
++            ModuleConfig {
++                id: "bridge".to_string(),
++                paths: vec!["crates/bridge/**".to_string()],
++                layer: None,
++                may_depend_on: Vec::new(),
++            },
++        ],
++        ..Default::default()
++    }
++}
++
++#[test]
++fn test_is_metadata_exempt() {
++    let storage = StorageConfig::default();
++
++    assert!(is_metadata_exempt("qdev.toml", &storage));
++    assert!(is_metadata_exempt(".qdev.local.toml", &storage));
++    assert!(is_metadata_exempt(".gitignore", &storage));
++    assert!(is_metadata_exempt(".qdev/leases/E12S4.json", &storage));
++    assert!(is_metadata_exempt(".qdev/cache/cache.sqlite", &storage));
++    assert!(is_metadata_exempt(".git/index", &storage));
++    assert!(is_metadata_exempt("docs/specs/stories/E12S4.md", &storage));
++    assert!(is_metadata_exempt("docs/state/decisions/DEC-1.json", &storage));
++
++    assert!(!is_metadata_exempt("crates/foundation/src/lib.rs", &storage));
++    assert!(!is_metadata_exempt("README.md", &storage));
++}
++
++#[test]
++fn test_preflight_non_git_directory() {
++    let temp = TempDir::new().unwrap();
++    let config = Config::default();
++    let options = PreflightOptions::default();
++
++    let result = run_preflight(temp.path(), &config, &options, None);
++    assert!(result.is_err());
++    let err = result.unwrap_err();
++    assert_eq!(err.exit_code().as_i32(), 4);
++    assert_eq!(err.code(), "not_a_git_repository");
++}
++
++#[test]
++fn test_preflight_clean_repository() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    let config = setup_repo(root);
++
++    // Create develop branch so integration branch exists
++    git(root, &["branch", "develop"]);
++
++    let options = PreflightOptions::default();
++    let outcome = run_preflight(root, &config, &options, None).unwrap();
++    assert_eq!(outcome.status, PreflightStatus::Pass);
++    assert_eq!(
++        outcome.summary,
++        "working tree in scope, integration branch fresh, zero blocking findings"
++    );
++    assert!(outcome.diagnostics.is_empty());
++    assert_eq!(
++        format_preflight_text(&outcome),
++        "✓ preflight: working tree in scope, integration branch fresh, zero blocking findings"
++    );
++}
++
++#[test]
++fn test_working_tree_no_lease_no_chore_dirty_refusal() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    let config = setup_repo(root);
++    git(root, &["branch", "develop"]);
++
++    // Dirty an uncommitted non-exempt file
++    fs::write(root.join("README.md"), "# Modified\n").unwrap();
++
++    let options = PreflightOptions::default();
++    let outcome = run_preflight(root, &config, &options, None).unwrap();
++    assert_eq!(outcome.status, PreflightStatus::Refusal);
++    assert_eq!(outcome.diagnostics.len(), 1);
++    assert_eq!(outcome.diagnostics[0].category, "working_tree");
++    assert_eq!(outcome.diagnostics[0].code, "out_of_scope_changes");
++    assert_eq!(outcome.diagnostics[0].remediation.as_deref(), Some("git stash -u"));
++    assert_eq!(outcome.remediation_commands, vec!["git stash -u".to_string()]);
++}
++
++#[test]
++fn test_working_tree_exempt_files_dirty_passes() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    let config = setup_repo(root);
++    git(root, &["branch", "develop"]);
++
++    // Dirty an exempt metadata file
++    fs::write(root.join("docs/specs/stories/E12S4.md"), "---\nmodified: true\n---\n").unwrap();
++    fs::write(root.join(".gitignore"), "target/\n").unwrap();
++
++    let options = PreflightOptions::default();
++    let outcome = run_preflight(root, &config, &options, None).unwrap();
++    assert_eq!(outcome.status, PreflightStatus::Pass);
++}
++
++#[test]
++fn test_working_tree_with_story_lease_in_scope_passes() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    let config = setup_repo(root);
++    git(root, &["branch", "develop"]);
++
++    // Claim lease for E12S4 (target_modules: [foundation])
++    let author = Author::new("human", "simon");
++    claim_story(root, "E12S4", &author, Some(&config.storage), None).unwrap();
++
++    // Modify a file in foundation (in scope!)
++    fs::write(root.join("crates/foundation/src/lib.rs"), "// updated in scope\n").unwrap();
++
++    let options = PreflightOptions::default();
++    let outcome = run_preflight(root, &config, &options, None).unwrap();
++    assert_eq!(outcome.status, PreflightStatus::Pass);
++}
++
++#[test]
++fn test_working_tree_with_story_lease_out_of_scope_refusal() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    let config = setup_repo(root);
++    git(root, &["branch", "develop"]);
++
++    // Claim lease for E12S4 (target_modules: [foundation])
++    let author = Author::new("human", "simon");
++    claim_story(root, "E12S4", &author, Some(&config.storage), None).unwrap();
++
++    // Modify a file in bridge (out of scope for E12S4!)
++    fs::write(root.join("crates/bridge/src/lib.rs"), "// modified outside scope\n").unwrap();
++
++    let options = PreflightOptions::default();
++    let outcome = run_preflight(root, &config, &options, None).unwrap();
++    assert_eq!(outcome.status, PreflightStatus::Refusal);
++    assert_eq!(outcome.diagnostics.len(), 1);
++    assert_eq!(outcome.diagnostics[0].category, "working_tree");
++    assert_eq!(outcome.diagnostics[0].paths, vec!["crates/bridge/src/lib.rs"]);
++    assert_eq!(
++        outcome.diagnostics[0].remediation.as_deref(),
++        Some("git stash push -u -m \"out-of-scope\" -- \"crates/bridge/src/lib.rs\"")
++    );
++}
++
++#[test]
++fn test_working_tree_explicit_story_flag_overrides_scope() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    let config = setup_repo(root);
++    git(root, &["branch", "develop"]);
++
++    // No lease held, but pass `--story E12S4`
++    fs::write(root.join("crates/foundation/src/lib.rs"), "// updated in foundation\n").unwrap();
++
++    let options = PreflightOptions {
++        story: Some("E12S4".to_string()),
++    };
++    let outcome = run_preflight(root, &config, &options, None).unwrap();
++    assert_eq!(outcome.status, PreflightStatus::Pass);
++
++    // Now touch bridge
++    fs::write(root.join("crates/bridge/src/lib.rs"), "// updated bridge\n").unwrap();
++    let outcome2 = run_preflight(root, &config, &options, None).unwrap();
++    assert_eq!(outcome2.status, PreflightStatus::Refusal);
++    assert_eq!(outcome2.diagnostics[0].paths, vec!["crates/bridge/src/lib.rs"]);
++}
++
++#[test]
++fn test_working_tree_with_open_chore() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    let config = setup_repo(root);
++    git(root, &["branch", "develop"]);
++
++    // Start chore with allowlist crates/bridge/**
++    let author = Author::new("human", "simon");
++    qdev_core::chore::start_chore(&qdev_core::chore::StartChoreInput {
++        workspace_root: root,
++        storage: Some(&config.storage),
++        title: "Tweak bridge".to_string(),
++        paths: vec!["crates/bridge/**".to_string()],
++        author,
++        alongside: false,
++    })
++    .unwrap();
++
++    // Modify file in bridge -> should pass!
++    fs::write(root.join("crates/bridge/src/lib.rs"), "// chore edit\n").unwrap();
++    let options = PreflightOptions::default();
++    let outcome = run_preflight(root, &config, &options, None).unwrap();
++    assert_eq!(outcome.status, PreflightStatus::Pass);
++
++    // Modify file in foundation -> out of chore scope!
++    fs::write(root.join("crates/foundation/src/lib.rs"), "// out of chore scope\n").unwrap();
++    let outcome2 = run_preflight(root, &config, &options, None).unwrap();
++    assert_eq!(outcome2.status, PreflightStatus::Refusal);
++    assert_eq!(outcome2.diagnostics[0].paths, vec!["crates/foundation/src/lib.rs"]);
++}
++
++#[test]
++fn test_require_clean_tree_false_skips_scope_check() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    let mut config = setup_repo(root);
++    config.git.require_clean_tree_in_scope = false;
++    git(root, &["branch", "develop"]);
++
++    // Dirty tree without lease
++    fs::write(root.join("README.md"), "# Modified\n").unwrap();
++
++    let options = PreflightOptions::default();
++    let outcome = run_preflight(root, &config, &options, None).unwrap();
++    assert_eq!(outcome.status, PreflightStatus::Pass);
++}
++
++#[test]
++fn test_branch_freshness_integration_branch_behind_remote() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    let config = setup_repo(root);
++
++    // Create a bare remote
++    let remote_dir = TempDir::new().unwrap();
++    git(remote_dir.path(), &["init", "--bare"]);
++    git(root, &["remote", "add", "origin", remote_dir.path().to_str().unwrap()]);
++
++    // Push develop to remote
++    git(root, &["checkout", "-b", "develop"]);
++    git(root, &["push", "-u", "origin", "develop"]);
++
++    // Reset local develop back by 1 commit, while remote remains ahead
++    fs::write(root.join("crates/foundation/src/lib.rs"), "// commit 2\n").unwrap();
++    git(root, &["commit", "-am", "Commit 2 on remote"]);
++    git(root, &["push", "origin", "develop"]);
++
++    // Now rewind local develop to HEAD~1
++    git(root, &["reset", "--hard", "HEAD~1"]);
++
++    // When on develop branch itself, remediation recommends git pull
++    let diags = check_branch_freshness(root, &config, None).unwrap();
++    assert_eq!(diags.len(), 1);
++    assert_eq!(diags[0].code, "integration_branch_behind_remote");
++    assert_eq!(
++        diags[0].remediation.as_deref(),
++        Some("git pull origin develop")
++    );
++
++    // When on another branch, remediation recommends git fetch
++    git(root, &["checkout", "main"]);
++    let diags2 = check_branch_freshness(root, &config, None).unwrap();
++    assert_eq!(diags2.len(), 1);
++    assert_eq!(diags2[0].code, "integration_branch_behind_remote");
++    assert_eq!(
++        diags2[0].remediation.as_deref(),
++        Some("git fetch origin develop:develop")
++    );
++}
++
++#[test]
++fn test_branch_freshness_merge_base_staleness_limit() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    let mut config = setup_repo(root);
++    config.git.max_integration_staleness_commits = 2;
++
++    // Create develop branch
++    git(root, &["checkout", "-b", "develop"]);
++
++    // Create feature branch from develop
++    git(root, &["checkout", "-b", "feature/E12S4-test"]);
++
++    // Advance develop by 3 commits (limit is 2)
++    git(root, &["checkout", "develop"]);
++    for i in 1..=3 {
++        fs::write(root.join("crates/foundation/src/lib.rs"), format!("// develop commit {}\n", i)).unwrap();
++        git(root, &["commit", "-am", &format!("develop commit {}", i)]);
++    }
++
++    // Switch back to feature branch
++    git(root, &["checkout", "feature/E12S4-test"]);
++
++    let diags = check_branch_freshness(root, &config, Some("E12S4")).unwrap();
++    assert_eq!(diags.len(), 1);
++    assert_eq!(diags[0].code, "merge_base_stale");
++    assert!(diags[0].message.contains("is 3 commits behind develop at merge-base (limit 2)"));
++    assert!(diags[0].message.contains("Rebase onto develop before continuing E12S4."));
++    assert_eq!(diags[0].remediation.as_deref(), Some("git rebase develop"));
++
++    // Feature branch being ahead of develop is NOT an error
++    git(root, &["checkout", "feature/E12S4-test"]);
++    fs::write(root.join("crates/bridge/src/lib.rs"), "// feature commit\n").unwrap();
++    git(root, &["commit", "-am", "feature commit"]);
++
++    // If we rebase develop onto feature, staleness becomes 0
++    git(root, &["rebase", "develop"]);
++    let diags2 = check_branch_freshness(root, &config, Some("E12S4")).unwrap();
++    assert!(diags2.is_empty());
++}
++
++#[test]
++fn test_branch_freshness_trunk_mode_behind_remote() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    let mut config = setup_repo(root);
++    config.git.branching_mode = "trunk".to_string();
++
++    let remote_dir = TempDir::new().unwrap();
++    git(remote_dir.path(), &["init", "--bare"]);
++    git(root, &["remote", "add", "origin", remote_dir.path().to_str().unwrap()]);
++    git(root, &["push", "-u", "origin", "main"]);
++
++    // Add commit on remote
++    fs::write(root.join("crates/foundation/src/lib.rs"), "// commit on remote\n").unwrap();
++    git(root, &["commit", "-am", "Commit on remote"]);
++    git(root, &["push", "origin", "main"]);
++
++    // Rewind local
++    git(root, &["reset", "--hard", "HEAD~1"]);
++
++    let diags = check_branch_freshness(root, &config, None).unwrap();
++    assert_eq!(diags.len(), 1);
++    assert_eq!(diags[0].code, "trunk_branch_behind_remote");
++    assert_eq!(diags[0].remediation.as_deref(), Some("git pull origin main"));
++}
++
++#[test]
++fn test_validation_health_blocking_error() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    let config = setup_repo(root);
++    git(root, &["branch", "develop"]);
++
++    let store = SqliteStore::open_in_memory().unwrap();
++    // Insert an error finding into store
++    store.upsert_finding(&FindingRecord {
++        path: "docs/specs/stories/E99S99.md".to_string(),
++        code: "orphan_deferred_work".to_string(),
++        severity: "error".to_string(),
++        message: Some("Orphan deferred work record".to_string()),
++        found_at: "2026-09-25T00:00:00Z".to_string(),
++    }).unwrap();
++
++    let options = PreflightOptions::default();
++    let outcome = run_preflight(root, &config, &options, Some(&store)).unwrap();
++    assert_eq!(outcome.status, PreflightStatus::Refusal);
++    assert_eq!(outcome.diagnostics.len(), 1);
++    assert_eq!(outcome.diagnostics[0].category, "validation");
++    assert_eq!(outcome.diagnostics[0].code, "blocking_validation_errors");
++    assert_eq!(outcome.diagnostics[0].remediation.as_deref(), Some("qdev validate"));
++}
++
++#[test]
++fn test_preflight_payload_schema_conformance() {
++    let schema_str = PayloadKind::Preflight.schema_str();
++    let schema_val: serde_json::Value = serde_json::from_str(schema_str).unwrap();
++    let validator = jsonschema::validator_for(&schema_val).unwrap();
++
++    // 1. Pass payload
++    let pass_payload = PreflightPayload {
++        status: "pass".to_string(),
++        summary: "working tree in scope, integration branch fresh, zero blocking findings".to_string(),
++        diagnostics: Vec::new(),
++        remediation_commands: Vec::new(),
++    };
++    let pass_val = serde_json::to_value(qdev_core::JsonEnvelope::new(pass_payload)).unwrap();
++    assert!(validator.is_valid(&pass_val));
++
++    // 2. Refusal payload
++    let refusal_payload = PreflightPayload {
++        status: "refusal".to_string(),
++        summary: "preflight checks failed with 1 issue(s)".to_string(),
++        diagnostics: vec![qdev_core::preflight::PreflightDiagnostic {
++            category: "working_tree".to_string(),
++            code: "out_of_scope_changes".to_string(),
++            message: "uncommitted changes outside target modules".to_string(),
++            paths: vec!["crates/bridge/src/lib.rs".to_string()],
++            remediation: Some("git stash push -u -m \"out-of-scope\" -- \"crates/bridge/src/lib.rs\"".to_string()),
++        }],
++        remediation_commands: vec!["git stash push -u -m \"out-of-scope\" -- \"crates/bridge/src/lib.rs\"".to_string()],
++    };
++    let refusal_val = serde_json::to_value(qdev_core::JsonEnvelope::new(refusal_payload)).unwrap();
++    assert!(validator.is_valid(&refusal_val));
++}
++
++#[test]
++fn test_branch_freshness_within_staleness_limit_passes() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    let mut config = setup_repo(root);
++    config.git.max_integration_staleness_commits = 2;
++
++    // Create develop branch
++    git(root, &["checkout", "-b", "develop"]);
++
++    // Create feature branch from develop
++    git(root, &["checkout", "-b", "feature/E12S4-test"]);
++
++    // Advance develop by 1 commit (limit is 2, so 1 <= 2 passes)
++    git(root, &["checkout", "develop"]);
++    fs::write(root.join("crates/foundation/src/lib.rs"), "// develop commit 1\n").unwrap();
++    git(root, &["commit", "-am", "develop commit 1"]);
++
++    // Switch back to feature branch
++    git(root, &["checkout", "feature/E12S4-test"]);
++
++    let diags = check_branch_freshness(root, &config, Some("E12S4")).unwrap();
++    assert!(diags.is_empty(), "expected 0 diagnostics when staleness (1) <= limit (2)");
++
++    let options = PreflightOptions {
++        story: Some("E12S4".to_string()),
++    };
++    let outcome = run_preflight(root, &config, &options, None).unwrap();
++    assert_eq!(outcome.status, PreflightStatus::Pass);
++}
++
++#[test]
++fn test_validation_health_warning_does_not_block() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    let config = setup_repo(root);
++    git(root, &["branch", "develop"]);
++
++    let store = SqliteStore::open_in_memory().unwrap();
++    // Insert a warning finding into store (severity = "warning")
++    store.upsert_finding(&FindingRecord {
++        path: "docs/specs/stories/E12S4.md".to_string(),
++        code: "orphan_warning".to_string(),
++        severity: "warning".to_string(),
++        message: Some("Non-blocking warning".to_string()),
++        found_at: "2026-09-25T00:00:00Z".to_string(),
++    }).unwrap();
++
++    let options = PreflightOptions::default();
++    let outcome = run_preflight(root, &config, &options, Some(&store)).unwrap();
++    assert_eq!(outcome.status, PreflightStatus::Pass);
++    assert_eq!(outcome.summary, "working tree in scope, integration branch fresh, zero blocking findings");
++}
+--- /dev/null	2026-09-25 21:08:49
++++ docs/bmad/implementation-artifacts/spec-3-7-git-preflight-guard.md	2026-09-25 21:08:41
+@@ -0,0 +1,162 @@
++---
++title: 'Story 3.7: Git Preflight Guard'
++type: 'feature'
++created: '2026-09-25'
++status: 'in-review'
++baseline_commit: '36d842ca25c93ed5869303a35d69c7d6727b9091'
++route: 'dispatch'
++review_loop_iteration: 0
++context:
++  - 'docs/compliance-and-safety.md'
++  - 'docs/bmad/implementation-artifacts/epic-3-context.md'
++---
++
++<frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
++
++## Intent
++
++**Problem:** Story work and push operations can commence from stale or dirty workspaces with out-of-scope modifications, diverged integration branches, or unresolved schema/entity validation errors, causing avoidable merge conflicts, broken pipelines, and boundary violations.
++**Approach:** Implement `qdev preflight [--story <id>]` enforcing working tree cleanliness within leased story module boundaries (or active chore allowlists), integration branch remote freshness, merge-base staleness limits (`max_integration_staleness_commits`), and zero blocking validation errors, providing exact Git remediation commands on refusal (exit 3).
++
++## Boundaries & Constraints
++
++**Always:**
++- Execute preflight checks across three primary dimensions:
++  1. **Working Tree Scope Check:**
++     - When `config.git.require_clean_tree_in_scope` is `true`: detect uncommitted changes (tracked staged/unstaged modifications and untracked files via `git status --porcelain=v1 -uall`).
++     - Workspace metadata directories and files (`.qdev/`, `.git/`, `.gitignore`, `qdev.toml`, `.qdev.local.toml`, `docs/`, and configured `storage.specs_dir`, `storage.state_dir`, `storage.cache_dir`) are exempt.
++     - Scope determination:
++       - If `--story <id>` is provided, resolve target modules from the specified story entity.
++       - If `--story` is omitted: check for an active story lease in the current workspace. If present, resolve target modules from the leased story.
++       - If no story lease is active, check for an open chore record. If present, use the chore's path allowlist patterns.
++       - If neither a story nor a chore is active, any uncommitted changes outside workspace metadata are considered out of scope.
++     - If any uncommitted change falls outside allowed target module or chore paths, refuse with exit code 3 (`ExitCode::PolicyRefusal`), listing the out-of-scope paths and recommending `git stash push -m "out-of-scope" -- <paths>` or `git stash`.
++  2. **Branch Freshness Check:**
++     - In `story-branch` mode (`config.git.branching_mode == "story-branch"`):
++       - If the remote integration branch tracking ref exists (e.g. `refs/remotes/<remote>/<integration_branch>`), verify the local integration branch (`<integration_branch>`) is not behind the remote tracking ref. If behind, refuse with exit 3, recommending `git fetch <remote> <integration_branch>:<integration_branch>` (or `git checkout <integration_branch> && git pull <remote> <integration_branch>`).
++       - Compute the merge-base between HEAD and the local integration branch (`git merge-base HEAD <integration_branch>`).
++       - If the merge-base is more than `config.git.max_integration_staleness_commits` behind the local integration branch (`git rev-list --count <merge-base>..<integration_branch>`), refuse with exit 3, stating `<branch> is <N> commits behind <integration_branch> at merge-base (limit <max>)` and recommending `git rebase <integration_branch>`.
++       - A story branch having commits that the integration branch does not have (or the integration branch having commits ahead of the story branch within the staleness limit) is not an error.
++     - In `trunk` mode (`config.git.branching_mode == "trunk"`):
++       - Verify the current branch is not behind its upstream tracking ref (`git rev-list --count HEAD..<remote>/<branch>`). If behind, refuse with exit 3, recommending `git pull <remote> <branch>`.
++  3. **Validation Health Check:**
++     - Query live workspace validation findings using `run_validation`.
++     - If any finding has severity `"error"`, refuse with exit 3, listing the blocking finding codes and paths, and recommending `qdev validate`.
++- In JSON mode (`--json`), emit a structured `payload-preflight` envelope containing `status: "pass"` (on success) or `status: "refusal"` with structured diagnostics and remediation commands.
++- Print clear, actionable diagnostic output with exact Git remediation commands on standard error (or stdout JSON in `--json` mode).
++
++**Never:**
++- Never block a story branch in `story-branch` mode solely because it is behind `integration_branch`, unless its merge-base exceeds `max_integration_staleness_commits`.
++- Never silently ignore git failures (missing git binary or corrupted repository); treat external process crashes or missing repositories as infrastructure failures (exit 4).
++- Never modify git state, create stashes, or run rebases automatically; preflight is an inspection guard and must strictly inform and refuse.
++
++## I/O & Edge-Case Matrix
++
++| Scenario | Input / State | Expected Output / Behavior | Error Handling |
++|----------|--------------|---------------------------|----------------|
++| All clean | Clean git status, fresh branch, 0 error findings | Exit 0; `✓ preflight: working tree in scope, integration branch fresh, zero blocking findings` | N/A |
++| Out of scope uncommitted files | Working tree has modified file outside story modules | Exit 3; lists offending files, gives `git stash push -m "out-of-scope" -- <paths>` | PolicyRefusal (exit 3) |
++| In scope uncommitted files | Working tree has modified file inside story target modules | Passes scope check; proceeds to remaining checks | N/A |
++| Open chore active | Open chore allowlist matches uncommitted edits | Passes scope check; proceeds to remaining checks | N/A |
++| No lease and no chore with dirty tree | Uncommitted changes outside exempt metadata | Exit 3; states no lease or chore active, gives `git stash` | PolicyRefusal (exit 3) |
++| Local integration branch behind remote | `develop` is 2 commits behind `origin/develop` | Exit 3; diagnostics state local `develop` behind `origin/develop`, recommends fetch/pull | PolicyRefusal (exit 3) |
++| Merge-base exceeds staleness limit | Feature branch merge-base is 25 commits behind `develop` (limit 20) | Exit 3; diagnostics state `is 25 commits behind develop at merge-base (limit 20)`, recommends `git rebase develop` | PolicyRefusal (exit 3) |
++| Trunk mode behind remote | Trunk branch is 3 commits behind `origin/main` | Exit 3; diagnostics state branch behind remote, recommends `git pull` | PolicyRefusal (exit 3) |
++| Blocking validation error | Orphan deferred work or unreadable entity file | Exit 3; diagnostics list blocking error findings, recommends `qdev validate` | PolicyRefusal (exit 3) |
++| Non-git directory | Workspace is not a git repository | Exit 4; infrastructure failure `not_a_git_repository` | InfrastructureFailure (exit 4) |
++
++</frozen-after-approval>
++
++## Code Map
++
++- `crates/qdev-core/src/config/types.rs` -- `GitConfig` options: `remote`, `integration_branch`, `branching_mode`, `require_clean_tree_in_scope`, `max_integration_staleness_commits`.
++- `crates/qdev-core/src/preflight.rs` -- New preflight engine implementing working tree scope inspection, branch freshness checks, validation findings evaluation, and exact Git remediation command formatting.
++- `crates/qdev-core/src/schema.rs` -- Register `PayloadKind::Preflight` ("preflight") and embed `payload-preflight.json`.
++- `crates/qdev-core/schemas/payload-preflight.json` -- JSON Schema for preflight payload contract.
++- `crates/qdev-core/src/lib.rs` -- Export `preflight` module and preflight types.
++- `crates/qdev-cli/src/cli.rs` -- Add `Preflight(PreflightArgs)` subcommand to `Commands` with optional `--story <id>`.
++- `crates/qdev-cli/src/handlers/preflight.rs` -- CLI preflight handler executing core preflight checks and emitting text / JSON envelope outputs.
++- `crates/qdev-cli/src/main.rs` -- Dispatch `Commands::Preflight` in command router.
++- `crates/qdev-core/tests/preflight_tests.rs` -- Unit tests for preflight git inspection, scope checking, and staleness calculation.
++- `crates/qdev-cli/tests/preflight_cli_tests.rs` -- CLI integration tests verifying exit 0 on clean state, exit 3 on scope breaches / stale integration / validation errors, and JSON output schema conformity.
++
++## Tasks & Acceptance
++
++**Execution:**
++- [x] `crates/qdev-core/schemas/payload-preflight.json` -- Define JSON Schema for preflight payload -- Preflight contract definition.
++- [x] `crates/qdev-core/src/schema.rs` -- Register `PayloadKind::Preflight` and embed schema -- Schema payload registry.
++- [x] `crates/qdev-core/src/preflight.rs` -- Implement `run_preflight`, working tree scope checking, git staleness calculations, and Git remediation advice -- Core preflight engine.
++- [x] `crates/qdev-core/src/lib.rs` -- Export preflight module and public functions/types -- Core library exports.
++- [x] `crates/qdev-cli/src/cli.rs` -- Add `Preflight` subcommand and `PreflightArgs` -- CLI argument parsing.
++- [x] `crates/qdev-cli/src/handlers/preflight.rs` -- Implement `handle_preflight` for text and JSON formatting -- CLI preflight handler.
++- [x] `crates/qdev-cli/src/handlers/mod.rs` -- Expose preflight handler -- Handler module export.
++- [x] `crates/qdev-cli/src/main.rs` -- Route `Commands::Preflight` to `handle_preflight` -- CLI main routing.
++- [x] `crates/qdev-core/tests/preflight_tests.rs` -- Unit tests for scope filtering, branch staleness checks, and remediation suggestions -- Core test coverage.
++- [x] `crates/qdev-cli/tests/preflight_cli_tests.rs` -- Integration tests for `qdev preflight` CLI commands, flags, exit codes, and JSON schemas -- CLI test coverage.
++
++**Acceptance Criteria:**
++- Given `[git]` configuration, when I run `qdev preflight [--story E12S4]`, then uncommitted changes outside the leased story's module paths (or chore paths) cause a refusal (exit 3) listing the paths.
++- In `story-branch` mode, it checks that the local integration branch is not behind its remote and that the story branch's merge-base is within `max_integration_staleness_commits`, and a story branch being behind the integration branch is not itself an error.
++- In `trunk` mode, it checks the current branch against its remote.
++- Blocking validation findings cause a refusal (exit 3).
++- The refusal message names the exact Git command to fix the state.
++
++## Implementation Notes
++
++- Implemented preflight engine in `crates/qdev-core/src/preflight.rs`:
++  - `is_metadata_exempt`: Ignores `.qdev/`, `.git/`, `.gitignore`, `qdev.toml`, `.qdev.local.toml`, `docs/`, and configured storage directories (`specs_dir`, `state_dir`, `cache_dir`), normalizing both `/` and `./` prefixes.
++  - `check_working_tree_scope`: Collects uncommitted files via `git status --porcelain=v1 -uall`. Resolves scope hierarchy: `--story <id>` -> active story lease in workspace -> open chore allowlist -> empty scope. Out-of-scope files trigger exit 3 with exact remediation `git stash push -u -m "out-of-scope" -- "<path1>" "<path2>"` or `git stash -u`.
++  - `check_branch_freshness`: In `story-branch` mode, verifies local integration branch is not behind remote (recommending `git pull` if checked out, else `git fetch`), and calculates merge-base staleness (`MB..integration_branch`) against `max_integration_staleness_commits` (recommending `git rebase`). In `trunk` mode, verifies current branch is not behind remote (recommending `git pull`). Flags missing integration branch as diagnostic.
++  - `check_validation_health`: Runs `run_validation` and flags any severity `"error"` findings as blocking (recommending `qdev validate`), while allowing `"warning"` findings.
++  - `run_preflight`: Verifies git work-tree existence (`is-inside-work-tree` output == "true", returning exit 4 `not_a_git_repository` on non-git directories), evaluates all checks, and returns `PreflightOutcome`.
++  - `format_preflight_text`: Emits formatted single-line pass receipt or diagnostic refusal blocks.
++- Defined `payload-preflight.json` schema and registered `PayloadKind::Preflight` in `crates/qdev-core/src/schema.rs`.
++- Added `Commands::Preflight(PreflightArgs)` in `crates/qdev-cli/src/cli.rs` and implemented `handle_preflight` in `crates/qdev-cli/src/handlers/preflight.rs`.
++- Verified with 17 unit tests in `crates/qdev-core/tests/preflight_tests.rs` and 11 CLI integration tests in `crates/qdev-cli/tests/preflight_cli_tests.rs`. Clippy runs with zero warnings.
++
++## Spec Change Log
++
++## Review Triage Log
++
++| Finding | Reviewer | Verdict | Evidence / Rationale | Disposition |
++|---|---|---|---|---|
++| Remediation commands fail on untracked files | blind-hunter / edge-case-hunter / verification-gap | `medium` | `git stash push` without `-u` refuses to stash untracked files; added `-u` / `--include-untracked` to remediation strings | patch |
++| Fetch remediation fails on checked-out integration branch | blind-hunter / edge-case-hunter / verification-gap | `medium` | `git fetch origin develop:develop` rejected by Git when develop is checked out; switched to `git pull` when `current_branch == integration_branch` | patch |
++| Intermediate staleness tolerance unverified | verification-gap | `medium` | Tests verified 0 and 3 commits behind limit 2; added test verifying 1 commit behind passes | patch |
++| Warning-severity validation finding tolerance unverified | verification-gap | `medium` | Tests only asserted error-severity findings; added test verifying warning finding passes | patch |
++| Multi-lease error swallowed as no lease | blind-hunter / edge-case-hunter | `low` | `find_active_lease_with_storage` error was caught with `.ok()`; now checks for non-`no_active_lease` errors and advises `--story <id>` | patch |
++| Unquoted paths in stash remediation | blind-hunter / edge-case-hunter | `low` | Paths containing whitespace would split shell arguments; added double quotes around each pathspec | patch |
++| Git work-tree check accepts bare repos or .git dir | blind-hunter | `low` | `rev-parse --is-inside-work-tree` exits 0 with `false` in bare repos/.git; now verifies stdout trimmed is `"true"` | patch |
++| Inconsistent path normalization in `is_metadata_exempt` | blind-hunter | `low` | Configured storage directories with leading `./` failed prefix match; normalized by stripping `./` and `/` | patch |
++| Silent skip on missing integration branch | blind-hunter / edge-case-hunter | `low` | Missing local and remote integration branch skipped silently; now reports `integration_branch_missing` diagnostic | patch |
++| Silent suppression of SQLite errors in `check_validation_health` | blind-hunter | `low` | If cache database is unreadable, returns an infrastructure failure rather than falsely reporting 0 findings | patch |
++| Bypassing workspace requirement in `main.rs` | blind-hunter | `false` | Preflight must run its own git checks to report `not_a_git_repository` (exit 4) before standard workspace checks intercept | reject |
++| Incomplete rename detection | blind-hunter | `false` | Parsing rename target paths from porcelain v1 matches existing standard scope gate parser across codebase | reject |
++| Hardcoded upstream branch in trunk mode | blind-hunter | `false` | Spec and AC explicitly mandate checking against configured `[git] remote` (`refs/remotes/{remote}/{branch}`) | reject |
++| Unvalidated branching mode configuration | blind-hunter | `false` | Config parser already validates branching mode during configuration loading | reject |
++| Redundant lease lookup in `run_preflight` | blind-hunter | `false` | Calling lease lookup during scope check and diagnostics formatting is lightweight and causes no correctness issues | reject |
++
++## Design Notes
++
++### Staleness Calculation
++For a story branch `B` with integration branch `I`:
++1. Find merge-base: `MB = git merge-base HEAD I`.
++2. Count commits from `MB` to `I`: `staleness = git rev-list --count MB..I`.
++3. If `staleness > max_integration_staleness_commits`, refusal:
++   `✖ preflight: <branch> is <staleness> commits behind <integration_branch> at merge-base (limit <limit>).`
++   `  Rebase onto <integration_branch> before continuing <story_id>.`
++   `  Fix: git rebase <integration_branch>`
++
++### Scope Check Hierarchy
++1. If `--story <id>` specified: look up story in cache/specs; extract `target_modules`; resolve paths via `ModuleRegistry`.
++2. Else if active story lease exists in workspace: look up story; extract `target_modules`; resolve paths via `ModuleRegistry`.
++3. Else if open chore exists: extract chore `paths` allowlist patterns.
++4. Else: empty allowed paths (any non-exempt uncommitted file triggers refusal).
++
++## Verification
++
++**Commands:**
++- `cargo test --test preflight_tests` -- expected: All core preflight unit tests pass.
++- `cargo test --test preflight_cli_tests` -- expected: CLI integration tests for preflight pass with proper exit codes (0, 3, 4).
++- `cargo test` -- expected: Full test suite passes.
++- `cargo clippy --all-targets -- -D warnings` -- expected: Zero clippy warnings.

@@ -5,6 +5,7 @@ pub mod decision;
 pub mod dw;
 pub mod gate;
 pub mod next;
+pub mod preflight;
 pub mod pulse;
 pub mod scratch;
 pub mod sprint;

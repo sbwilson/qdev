@@ -13,6 +13,7 @@ pub mod interactivity;
 pub mod lease;
 pub mod modules;
 pub mod next;
+pub mod preflight;
 pub mod pulse;
 pub mod query;
 pub mod schema;
@@ -23,6 +24,12 @@ pub mod store;
 pub mod transition;
 pub mod validate;
 pub mod write;
+
+pub use preflight::{
+    check_branch_freshness, check_validation_health, check_working_tree_scope,
+    format_preflight_text, is_metadata_exempt, resolve_story_target_modules, run_preflight,
+    PreflightDiagnostic, PreflightOptions, PreflightOutcome, PreflightPayload, PreflightStatus,
+};
 
 pub use gate::{
     evaluate_ratchet, execute_deps_gate, execute_gate, execute_gate_set, execute_scope_gate,

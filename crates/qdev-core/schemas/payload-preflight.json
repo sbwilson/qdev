@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Preflight Payload Schema",
+  "description": "Output shape of `qdev preflight --json`. Reports working tree scope, branch freshness, and validation health checks. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pass", "refusal"]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "category",
+          "code",
+          "message"
+        ],
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": ["working_tree", "branch_freshness", "validation"]
+          },
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "remediation": {
+            "type": ["string", "null"]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "remediation_commands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}

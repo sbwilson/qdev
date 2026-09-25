@@ -407,6 +407,9 @@ fn run(raw_args: &[String]) -> ExitCode {
         Some(Commands::Gate(ref gate_args)) => {
             handlers::gate::handle_gate(gate_args, &annotated_config, &cli, &output, &root)
         }
+        Some(Commands::Preflight(ref preflight_args)) => {
+            handlers::preflight::handle_preflight(preflight_args, &annotated_config, &cli, &output, &root)
+        }
         Some(Commands::Init(_)) => unreachable!(),
         Some(Commands::Schema(_)) => unreachable!(),
     }
@@ -469,7 +472,11 @@ pub(crate) fn reject_empty_filter_values(flags: &[(&str, Option<&str>)]) -> Resu
 /// with a raw `sqlite_error` after `get`/`list` were fixed.
 fn requires_workspace(command: Option<&Commands>) -> bool {
     match command {
-        None | Some(Commands::Status) | Some(Commands::Init(_)) | Some(Commands::Schema(_)) => {
+        None
+        | Some(Commands::Status)
+        | Some(Commands::Init(_))
+        | Some(Commands::Schema(_))
+        | Some(Commands::Preflight(_)) => {
             false
         }
         // Matched at subcommand granularity, not by whole variant: a future `create epic` or

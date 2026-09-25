@@ -166,6 +166,7 @@ pub enum PayloadKind {
     GateList,
     GateSet,
     GateBaseline,
+    Preflight,
 }
 
 impl PayloadKind {
@@ -189,6 +190,7 @@ impl PayloadKind {
             PayloadKind::GateList => include_str!("../schemas/payload-gate-list.json"),
             PayloadKind::GateSet => include_str!("../schemas/payload-gate-set.json"),
             PayloadKind::GateBaseline => include_str!("../schemas/payload-gate-baseline.json"),
+            PayloadKind::Preflight => include_str!("../schemas/payload-preflight.json"),
         }
     }
 
@@ -223,11 +225,12 @@ impl PayloadKind {
             PayloadKind::GateList => "gate_list",
             PayloadKind::GateSet => "gate_set",
             PayloadKind::GateBaseline => "gate_baseline",
+            PayloadKind::Preflight => "preflight",
         }
     }
 
     /// Returns an array of all currently-supported payload kinds.
-    pub const fn all() -> &'static [PayloadKind; 17] {
+    pub const fn all() -> &'static [PayloadKind; 18] {
         &[
             PayloadKind::Story,
             PayloadKind::Error,
@@ -246,6 +249,7 @@ impl PayloadKind {
             PayloadKind::GateList,
             PayloadKind::GateSet,
             PayloadKind::GateBaseline,
+            PayloadKind::Preflight,
         ]
     }
 
@@ -283,6 +287,7 @@ impl PayloadKind {
             "gate_baseline" | "gatebaseline" | "baseline" | "baselines" => {
                 Ok(PayloadKind::GateBaseline)
             }
+            "preflight" => Ok(PayloadKind::Preflight),
             _ => Err(QdevError::usage_error(format!(
                 "Unknown payload name '{}'. Valid payload names: {}",
                 s,
