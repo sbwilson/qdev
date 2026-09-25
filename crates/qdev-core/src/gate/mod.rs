@@ -89,6 +89,8 @@ pub struct GateRunPayload {
     pub metric: Option<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constraint_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_path: Option<String>,
 }
 
 /// Outcome of running a single gate.
@@ -114,6 +116,8 @@ pub struct GateRunOutcome {
     pub metric: Option<f64>,
     #[serde(default)]
     pub constraint_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_path: Option<String>,
 }
 
 impl GateRunOutcome {
@@ -137,6 +141,7 @@ impl GateRunOutcome {
             failures: self.failures.clone(),
             metric: self.metric,
             constraint_ids: self.constraint_ids.clone(),
+            evidence_path: self.evidence_path.clone(),
         }
     }
 
@@ -152,18 +157,24 @@ impl GateRunOutcome {
                         let char_count = s.chars().count();
                         if char_count >= 7 {
                             s.chars().take(7).collect::<String>()
-                        } else {
+                        } else if !s.trim().is_empty() {
                             s.to_string()
+                        } else {
+                            "unknown".to_string()
                         }
                     })
                     .unwrap_or_else(|| "unknown".to_string());
-                format!(
+                let mut line = format!(
                     "[PASS] {} | {} | {} | {}",
                     self.gate_id,
                     clean_summary,
                     sha,
                     format_duration(self.duration_ms)
-                )
+                );
+                if let Some(ref path) = self.evidence_path {
+                    line.push_str(&format!(" | evidence {}", path));
+                }
+                line
             }
             GateStatus::Fail => {
                 if self.failures.is_empty() {
@@ -578,3 +589,123 @@ pub fn evaluate_ratchet(
         }
     }
 }
+
+/// Immutable, committed JSON evidence bundle written on gate completion conforming to
+/// docs/compliance-and-safety.md §4.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EvidenceBundle {
+    pub schema_version: String,
+    pub gate: String,
+    pub story: Option<String>,
+    pub commit: String,
+    pub status: String,
+    pub exit_code: i32,
+    pub duration_ms: u64,
+    pub metric: Option<f64>,
+    pub summary: String,
+    pub output_sha256: String,
+    pub run_by: Author,
+    pub ran_at: String,
+    pub verifies: Vec<String>,
+    pub skipped_locally: bool,
+}
+
+impl EvidenceBundle {
+    /// Validates the evidence bundle against the embedded evidence schema.
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        let value = serde_json::to_value(self).map_err(|e| vec![e.to_string()])?;
+        crate::schema::validate_evidence(&value)
+    }
+}
+
+/// Resolves a collision-free filename and paths for an evidence bundle.
+///
+/// Directory: `<workspace_root>/<state_dir>/evidence/<story-or-_workspace>/`
+/// Filename: `<sha>-<gate>.json` (or `<sha>-<gate>-2.json`, `-3.json`, etc.)
+/// Returns `(absolute_path, workspace_relative_path, filename_stem)`.
+pub fn resolve_collision_free_evidence_path(
+    workspace_root: &Path,
+    state_dir: &str,
+    story_id: Option<&str>,
+    short_sha: &str,
+    gate_id: &str,
+) -> (PathBuf, String, String) {
+    let target = story_id
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains(".."))
+        .unwrap_or("_workspace");
+    let clean_state = state_dir.trim_matches('/').replace('\\', "/");
+    let dir = workspace_root.join(&clean_state).join("evidence").join(target);
+    let base_name = format!("{}-{}", short_sha, gate_id);
+
+    let first_cand = format!("{}.json", base_name);
+    let first_path = dir.join(&first_cand);
+    if !first_path.exists() {
+        let rel = format!("{}/evidence/{}/{}", clean_state, target, first_cand);
+        return (first_path, rel, base_name);
+    }
+
+    let mut n = 2;
+    loop {
+        let suffixed_stem = format!("{}-{}", base_name, n);
+        let cand = format!("{}.json", suffixed_stem);
+        let path = dir.join(&cand);
+        if !path.exists() {
+            let rel = format!("{}/evidence/{}/{}", clean_state, target, cand);
+            return (path, rel, suffixed_stem);
+        }
+        n += 1;
+    }
+}
+
+/// Writes an immutable evidence bundle JSON file under workspace write lock.
+/// Never overwrites an existing file; uses collision-free resolution.
+pub fn write_evidence_bundle(
+    workspace_root: &Path,
+    storage: &StorageConfig,
+    bundle: &EvidenceBundle,
+) -> Result<(PathBuf, String, String), QdevError> {
+    bundle.validate().map_err(|errs| {
+        QdevError::logical_failure(
+            "invalid_evidence_bundle",
+            format!("Evidence bundle failed schema validation: {}", errs.join("; ")),
+        )
+    })?;
+
+    let _lock = acquire_workspace_write_lock(workspace_root, Some(storage))?;
+
+    let (abs_path, rel_path, stem) = resolve_collision_free_evidence_path(
+        workspace_root,
+        &storage.state_dir,
+        bundle.story.as_deref(),
+        &bundle.commit,
+        &bundle.gate,
+    );
+
+    if let Some(parent) = abs_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "io_error",
+                format!(
+                    "Failed to create evidence directory '{}': {}",
+                    parent.display(),
+                    e
+                ),
+            )
+        })?;
+    }
+
+    let mut content = serde_json::to_string_pretty(bundle).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "json_serialize_error",
+            format!("Failed to serialize evidence bundle: {}", e),
+        )
+    })?;
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+
+    write_file_atomic(&abs_path, &content)?;
+    Ok((abs_path, rel_path, stem))
+}
+

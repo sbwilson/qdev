@@ -455,6 +455,7 @@ pub trait Store: Send + Sync {
     fn upsert_gate_run(&self, run: &GateRunRecord) -> Result<(), QdevError>;
     fn get_gate_run(&self, id: &str) -> Result<Option<GateRunRecord>, QdevError>;
     fn list_gate_runs(&self) -> Result<Vec<GateRunRecord>, QdevError>;
+    fn get_gate_runs_for_story(&self, story_id: &str) -> Result<Vec<GateRunRecord>, QdevError>;
     fn delete_gate_run(&self, id: &str) -> Result<bool, QdevError>;
 
     // SOUP dependencies

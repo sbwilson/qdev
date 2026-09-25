@@ -635,6 +635,7 @@ fn test_query_sprint_projection() {
     // Query via "sprint-6"
     let q_opts = QueryOptions {
         expand_scratch: false,
+        ..Default::default()
     };
     let res = query_entity(&store, None, "sprint-6", &q_opts).unwrap();
     match res {

@@ -1,98 +1,87 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Evidence Record Frontmatter Schema",
+  "description": "Immutable committed JSON evidence bundle written on gate completion conforming to docs/compliance-and-safety.md §4.",
   "type": "object",
   "required": [
-    "id",
+    "schema_version",
+    "gate",
+    "story",
+    "commit",
     "status",
-    "version",
-    "created_by",
-    "updated_by"
+    "exit_code",
+    "duration_ms",
+    "metric",
+    "summary",
+    "output_sha256",
+    "run_by",
+    "ran_at",
+    "verifies",
+    "skipped_locally"
   ],
   "properties": {
-    "id": {
+    "schema_version": {
+      "type": "string"
+    },
+    "gate": {
+      "type": "string",
+      "minLength": 1
+    },
+    "story": {
+      "type": ["string", "null"]
+    },
+    "commit": {
       "type": "string",
       "minLength": 1
     },
     "status": {
       "type": "string",
-      "minLength": 1
-    },
-    "version": {
-      "type": "integer",
-      "minimum": 1
-    },
-    "created_by": {
-      "type": "object",
-      "required": [
-        "type",
-        "id"
-      ],
-      "properties": {
-        "type": {
-          "type": "string",
-          "enum": [
-            "human",
-            "agent"
-          ]
-        },
-        "id": {
-          "type": "string",
-          "minLength": 1
-        }
-      },
-      "additionalProperties": false
-    },
-    "updated_by": {
-      "type": "object",
-      "required": [
-        "type",
-        "id"
-      ],
-      "properties": {
-        "type": {
-          "type": "string",
-          "enum": [
-            "human",
-            "agent"
-          ]
-        },
-        "id": {
-          "type": "string",
-          "minLength": 1
-        }
-      },
-      "additionalProperties": false
-    },
-    "story_id": {
-      "type": "string"
-    },
-    "gate_id": {
-      "type": "string"
-    },
-    "commit_sha": {
-      "type": "string"
+      "enum": ["pass", "fail", "infra"]
     },
     "exit_code": {
       "type": "integer"
     },
     "duration_ms": {
-      "type": "integer"
+      "type": "integer",
+      "minimum": 0
     },
-    "metric_value": {
-      "type": "number"
+    "metric": {
+      "type": ["number", "null"]
     },
     "summary": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
-    "evidence_path": {
-      "type": "string"
+    "output_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     },
-    "output_hash": {
-      "type": "string"
+    "run_by": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["human", "agent"]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
     },
     "ran_at": {
       "type": "string"
+    },
+    "verifies": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "skipped_locally": {
+      "type": "boolean"
     }
   }
 }

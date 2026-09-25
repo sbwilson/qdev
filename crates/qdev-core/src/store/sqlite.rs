@@ -181,6 +181,8 @@ CREATE TABLE IF NOT EXISTS gate_runs (
     ran_at TEXT
 );
 
+CREATE INDEX IF NOT EXISTS idx_gate_runs_story_id ON gate_runs(story_id);
+
 CREATE TABLE IF NOT EXISTS soup_dependencies (
     id TEXT PRIMARY KEY,
     name TEXT,
@@ -2413,6 +2415,64 @@ FROM gate_runs ORDER BY id ASC;
                     QdevError::infrastructure_failure(
                         "sqlite_error",
                         format!("Failed to query gate runs: {}", e),
+                    )
+                })?;
+
+            let mut results = Vec::new();
+            for r in rows {
+                results.push(r.map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed reading gate run row: {}", e),
+                    )
+                })?);
+            }
+            Ok(results)
+        })
+    }
+
+    fn get_gate_runs_for_story(&self, story_id: &str) -> Result<Vec<GateRunRecord>, QdevError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    r#"
+SELECT id, story_id, gate_id, commit_sha, status, exit_code, duration_ms,
+       metric_value, summary, evidence_path, output_hash, run_by_type, run_by_id, ran_at
+FROM gate_runs
+WHERE story_id = ?1
+ORDER BY (ran_at IS NOT NULL) DESC, ran_at DESC, id DESC;
+"#,
+                )
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to prepare get_gate_runs_for_story: {}", e),
+                    )
+                })?;
+
+            let rows = stmt
+                .query_map(rusqlite::params![story_id], |row| {
+                    Ok(GateRunRecord {
+                        id: row.get(0)?,
+                        story_id: row.get(1)?,
+                        gate_id: row.get(2)?,
+                        commit_sha: row.get(3)?,
+                        status: row.get(4)?,
+                        exit_code: row.get(5)?,
+                        duration_ms: row.get(6)?,
+                        metric_value: row.get(7)?,
+                        summary: row.get(8)?,
+                        evidence_path: row.get(9)?,
+                        output_hash: row.get(10)?,
+                        run_by_type: row.get(11)?,
+                        run_by_id: row.get(12)?,
+                        ran_at: row.get(13)?,
+                    })
+                })
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to query gate runs for story '{}': {}", story_id, e),
                     )
                 })?;
 
@@ -5749,21 +5809,33 @@ fn hydrate_evidence_file(
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .unwrap_or_else(|| {
-                file_path
+                let stem = file_path
                     .file_stem()
                     .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string()
+                    .unwrap_or("");
+                let parent = file_path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str());
+                match parent {
+                    Some(p) if p != "evidence" && !p.is_empty() => format!("{}:{}", p, stem),
+                    _ => stem.to_string(),
+                }
             });
 
         if !ev_id.is_empty() {
-            let story_id = ev_json.get("story_id").and_then(|v| v.as_str());
+            let story_id = ev_json
+                .get("story")
+                .or_else(|| ev_json.get("story_id"))
+                .and_then(|v| v.as_str());
             let gate_id = ev_json
-                .get("gate_id")
+                .get("gate")
+                .or_else(|| ev_json.get("gate_id"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let commit_sha = ev_json
-                .get("commit_sha")
+                .get("commit")
+                .or_else(|| ev_json.get("commit_sha"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let ev_status = ev_json.get("status").and_then(|v| v.as_str());
@@ -5772,9 +5844,15 @@ fn hydrate_evidence_file(
                 .and_then(|v| v.as_i64())
                 .map(|i| i as i32);
             let duration_ms = ev_json.get("duration_ms").and_then(|v| v.as_u64());
-            let metric_val = ev_json.get("metric_value").and_then(|v| v.as_f64());
+            let metric_val = ev_json
+                .get("metric")
+                .or_else(|| ev_json.get("metric_value"))
+                .and_then(|v| v.as_f64());
             let summary = ev_json.get("summary").and_then(|v| v.as_str());
-            let output_hash = ev_json.get("output_hash").and_then(|v| v.as_str());
+            let output_hash = ev_json
+                .get("output_sha256")
+                .or_else(|| ev_json.get("output_hash"))
+                .and_then(|v| v.as_str());
             let ran_at = ev_json.get("ran_at").and_then(|v| v.as_str());
             let run_by_type = ev_json
                 .get("run_by")

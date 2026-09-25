@@ -222,6 +222,7 @@ fn test_expand_scratch_only_adds_scratch_field() {
         "E12S4",
         &QueryOptions {
             expand_scratch: true,
+            ..Default::default()
         },
     )
     .unwrap()

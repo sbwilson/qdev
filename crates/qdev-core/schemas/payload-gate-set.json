@@ -87,6 +87,9 @@
             "items": {
               "type": "string"
             }
+          },
+          "evidence_path": {
+            "type": ["string", "null"]
           }
         },
         "additionalProperties": false

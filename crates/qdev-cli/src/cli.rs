@@ -432,7 +432,7 @@ pub struct GetArgs {
     /// Target entity identifier when kind is specified (e.g. "E12S4")
     pub id: Option<String>,
 
-    /// Additional sections to include: scratch (relations/constraints are always included and
+    /// Additional sections to include: scratch, evidence (relations/constraints are always included and
     /// are accepted here as no-ops for forward compatibility)
     #[arg(long = "expand", value_delimiter = ',')]
     pub expand: Vec<String>,

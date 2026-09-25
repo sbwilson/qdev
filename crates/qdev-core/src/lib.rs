@@ -27,11 +27,12 @@ pub mod write;
 pub use gate::{
     evaluate_ratchet, execute_gate, execute_gate_set, format_duration, format_metric_number,
     get_gate_list, parse_with_adapter, read_baseline, resolve_baseline_path, resolve_commit_sha,
-    resolve_gate_execution_order, validate_adapter_name, validate_gate_dependencies,
-    write_baseline, GateBaselinePayload, GateFailure, GateListItem, GateListPayload,
-    GateResultDocument, GateRunOptions, GateRunOutcome, GateRunPayload, GateRunSetOutcome,
-    GateRunSetPayload, GateStatus, HeadTailBuffer, RatchetBaseline, RatchetDirection,
-    RatchetEvaluation, VALID_ADAPTERS,
+    resolve_collision_free_evidence_path, resolve_gate_execution_order, validate_adapter_name,
+    validate_gate_dependencies, write_baseline, write_evidence_bundle, EvidenceBundle,
+    GateBaselinePayload, GateFailure, GateListItem, GateListPayload, GateResultDocument,
+    GateRunOptions, GateRunOutcome, GateRunPayload, GateRunSetOutcome, GateRunSetPayload,
+    GateStatus, HeadTailBuffer, RatchetBaseline, RatchetDirection, RatchetEvaluation,
+    VALID_ADAPTERS,
 };
 
 pub use chore::{
@@ -128,16 +129,18 @@ pub use init::{
 };
 pub use interactivity::Interactivity;
 pub use query::{
-    query_entity, query_list, ConstraintProjection, EntityProjection, GetResult,
-    ListEntryProjection, ListQueryOptions, QueryOptions, ScratchEntryProjection,
+    query_entity, query_list, ConstraintProjection, EntityProjection, EvidenceProjection,
+    GetResult, ListEntryProjection, ListQueryOptions, QueryOptions, ScratchEntryProjection,
     SprintAssignmentProjection,
 };
 pub use regex;
 pub use rusqlite;
 pub use schema::{
-    extract_frontmatter, extract_frontmatter_str, validate_frontmatter,
-    validate_frontmatter_detailed, validate_frontmatter_value, validate_value_detailed, EntityKind,
-    PayloadKind, SchemaError, ValidationError,
+    evidence_bundle_schema_json, evidence_bundle_schema_str, extract_frontmatter,
+    extract_frontmatter_str, validate_evidence, validate_evidence_detailed, validate_frontmatter,
+    validate_frontmatter_detailed, validate_frontmatter_value, validate_gate_result,
+    validate_gate_result_detailed, validate_value_detailed, EntityKind, PayloadKind, SchemaError,
+    ValidationError,
 };
 pub use serde_yaml;
 pub use sprint::{

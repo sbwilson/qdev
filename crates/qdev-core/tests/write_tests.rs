@@ -1894,6 +1894,16 @@ metric_value: 1.5
 summary: "a summary"
 output_hash: abc123
 ran_at: "2026-01-01T00:00:00Z"
+schema_version: "1"
+commit: deadbeef
+story: E1S9
+metric: 1.5
+output_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+run_by:
+  type: human
+  id: simon
+verifies: ["FR-1"]
+skipped_locally: false
 ---
 
 Body for {id}.

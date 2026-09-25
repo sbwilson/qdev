@@ -760,6 +760,7 @@ fn test_receipt_formatting_multiple_failures() {
         ],
         metric: None,
         constraint_ids: Vec::new(),
+        evidence_path: None,
     };
 
     let receipt = outcome.receipt();
@@ -789,6 +790,7 @@ fn test_receipt_formatting_empty_message_omits_trailing_separator() {
         }],
         metric: None,
         constraint_ids: Vec::new(),
+        evidence_path: None,
     };
 
     assert_eq!(outcome.receipt(), "[FAIL] empty-msg-gate (exit 1) | src/empty.rs:5");
@@ -1421,6 +1423,7 @@ fn test_aggregate_exit_code_precedence() {
         failures: vec![],
         metric: None,
         constraint_ids: vec![],
+        evidence_path: None,
     };
 
     let outcome_infra = GateRunOutcome {
@@ -1438,6 +1441,7 @@ fn test_aggregate_exit_code_precedence() {
         failures: vec![],
         metric: None,
         constraint_ids: vec![],
+        evidence_path: None,
     };
 
     let outcome_pass = GateRunOutcome {
@@ -1455,6 +1459,7 @@ fn test_aggregate_exit_code_precedence() {
         failures: vec![],
         metric: None,
         constraint_ids: vec![],
+        evidence_path: None,
     };
 
     // Fail + Infra -> ExitCode::LogicalFailure (1)

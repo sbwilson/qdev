@@ -1699,16 +1699,18 @@ fn handle_get(
         }
     };
 
-    // Validate --expand values: only "scratch" changes behavior; "relations"/"constraints" are
+    // Validate --expand values: only "scratch" and "evidence" change behavior; "relations"/"constraints" are
     // accepted as no-ops since the default projection already includes them.
     let mut expand_scratch = false;
+    let mut expand_evidence = false;
     for value in &get_args.expand {
         match value.trim() {
             "scratch" => expand_scratch = true,
+            "evidence" => expand_evidence = true,
             "relations" | "constraints" | "" => {}
             other => {
                 let err = QdevError::usage_error(format!(
-                    "Unknown --expand value '{}', expected one of: relations, constraints, scratch",
+                    "Unknown --expand value '{}', expected one of: relations, constraints, scratch, evidence",
                     other
                 ));
                 let _ = output.emit_error(&err);
@@ -1725,7 +1727,10 @@ fn handle_get(
         }
     };
 
-    let query_opts = qdev_core::QueryOptions { expand_scratch };
+    let query_opts = qdev_core::QueryOptions {
+        expand_scratch,
+        expand_evidence,
+    };
 
     let result = match qdev_core::query_entity(&store, kind_hint, &entity_id, &query_opts) {
         Ok(r) => r,
@@ -2518,6 +2523,35 @@ fn render_get_entity_text(p: &qdev_core::EntityProjection) -> String {
             sorted_counts.sort_by_key(|(k, _)| *k);
             for (status, count) in sorted_counts {
                 out.push_str(&format!("  {}: {}\n", status, count));
+            }
+        }
+    }
+
+    if let Some(ref evidence) = p.evidence {
+        out.push_str("evidence:\n");
+        if evidence.is_empty() {
+            out.push_str("  (none)\n");
+        } else {
+            for e in evidence {
+                let status_upper = e.status.to_uppercase();
+                let clean_summary = e
+                    .summary
+                    .as_deref()
+                    .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .unwrap_or_default();
+                let duration_str = e
+                    .duration_ms
+                    .map(qdev_core::gate::format_duration)
+                    .unwrap_or_else(|| "0 ms".to_string());
+                let summary_disp = if clean_summary.is_empty() {
+                    "-"
+                } else {
+                    &clean_summary
+                };
+                out.push_str(&format!(
+                    "  [{}] {} | {} | {} | {} | evidence {}\n",
+                    status_upper, e.gate, summary_disp, e.commit, duration_str, e.evidence_path
+                ));
             }
         }
     }

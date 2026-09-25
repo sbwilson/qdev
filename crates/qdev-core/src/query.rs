@@ -55,6 +55,33 @@ impl From<ScratchpadRecord> for ScratchEntryProjection {
     }
 }
 
+/// One gate run evidence projection, included only when `--expand evidence` is requested on stories.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceProjection {
+    pub gate: String,
+    pub status: String,
+    pub commit: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub evidence_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ran_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_by: Option<crate::write::Author>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verifies: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped_locally: bool,
+}
+
 /// A single sprint story assignment, included in `EntityProjection` for sprint entities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SprintAssignmentProjection {
@@ -98,6 +125,8 @@ pub struct EntityProjection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scratch: Option<Vec<ScratchEntryProjection>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<Vec<EvidenceProjection>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignments: Option<Vec<SprintAssignmentProjection>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_counts: Option<BTreeMap<String, usize>>,
@@ -116,6 +145,8 @@ pub enum GetResult {
 pub struct QueryOptions {
     /// `--expand scratch`: append the entity's scratchpad ledger.
     pub expand_scratch: bool,
+    /// `--expand evidence`: append the entity's gate run evidence (stories only).
+    pub expand_evidence: bool,
 }
 
 /// Parses a cache column storing a JSON array of strings (e.g. `owners`, `target_modules`)
@@ -225,6 +256,53 @@ fn build_entity_projection(
         None
     };
 
+    let evidence = if options.expand_evidence && entity.kind == EntityKind::Story {
+        let runs = store.get_gate_runs_for_story(&entity.id)?;
+        let mut seen = std::collections::HashSet::new();
+        let mut latest = Vec::new();
+        for r in runs {
+            if seen.insert(r.gate_id.clone()) {
+                let mut run_by = match (r.run_by_type.as_deref(), r.run_by_id.as_deref()) {
+                    (Some(t), Some(id)) => Some(crate::write::Author {
+                        author_type: t.to_string(),
+                        id: id.to_string(),
+                    }),
+                    _ => None,
+                };
+                let mut verifies = Vec::new();
+                let mut skipped_locally = false;
+
+                if let Ok(content) = std::fs::read_to_string(&r.evidence_path) {
+                    if let Ok(bundle) = serde_json::from_str::<crate::gate::EvidenceBundle>(&content) {
+                        run_by = Some(bundle.run_by);
+                        verifies = bundle.verifies;
+                        skipped_locally = bundle.skipped_locally;
+                    }
+                }
+
+                latest.push(EvidenceProjection {
+                    gate: r.gate_id,
+                    status: r.status.unwrap_or_else(|| "unknown".to_string()),
+                    commit: r.commit_sha,
+                    exit_code: r.exit_code,
+                    duration_ms: r.duration_ms,
+                    metric: r.metric_value,
+                    summary: r.summary,
+                    evidence_path: r.evidence_path,
+                    output_sha256: r.output_hash,
+                    ran_at: r.ran_at,
+                    run_by,
+                    verifies,
+                    skipped_locally,
+                });
+            }
+        }
+        latest.sort_by(|a, b| a.gate.cmp(&b.gate));
+        Some(latest)
+    } else {
+        None
+    };
+
     let (assignments, status_counts) = if entity.kind == EntityKind::Sprint {
         let sprint_num: i64 = if let Some(rest) = entity.id.strip_prefix("sprint-") {
             rest.parse().unwrap_or(0)
@@ -269,6 +347,7 @@ fn build_entity_projection(
         version: entity.version,
         stale: entity.stale,
         scratch,
+        evidence,
         assignments,
         status_counts,
     })

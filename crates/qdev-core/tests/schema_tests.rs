@@ -26,6 +26,46 @@ fn test_detailed_validation_and_value_validation() {
 }
 
 #[test]
+fn test_evidence_bundle_schema_validation() {
+    let valid_bundle = serde_json::json!({
+        "schema_version": "1",
+        "gate": "c-abi-round-trip",
+        "story": "E12S4",
+        "commit": "8f1b2c4",
+        "status": "pass",
+        "exit_code": 0,
+        "duration_ms": 1200,
+        "metric": null,
+        "summary": "18 tests passed",
+        "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "run_by": { "type": "agent", "id": "claude-code" },
+        "ran_at": "2026-09-06T09:52:11Z",
+        "verifies": ["FR-102"],
+        "skipped_locally": false
+    });
+    assert!(qdev_core::validate_evidence(&valid_bundle).is_ok());
+
+    let invalid_missing = serde_json::json!({
+        "schema_version": "1",
+        "gate": "c-abi-round-trip"
+    });
+    assert!(qdev_core::validate_evidence(&invalid_missing).is_err());
+
+    let mut invalid_author_type = valid_bundle.clone();
+    invalid_author_type["run_by"]["type"] = serde_json::json!("robot");
+    assert!(qdev_core::validate_evidence(&invalid_author_type).is_err());
+
+    let mut invalid_author_id = valid_bundle.clone();
+    invalid_author_id["run_by"]["id"] = serde_json::json!("");
+    assert!(qdev_core::validate_evidence(&invalid_author_id).is_err());
+
+    let mut invalid_author_extra = valid_bundle.clone();
+    invalid_author_extra["run_by"]["extra"] = serde_json::json!("value");
+    assert!(qdev_core::validate_evidence(&invalid_author_extra).is_err());
+}
+
+
+#[test]
 fn test_all_13_schemas_embedded_and_valid_json() {
     let all_kinds = EntityKind::all();
     assert_eq!(all_kinds.len(), 13);
@@ -70,8 +110,35 @@ fn test_attribution_and_required_fields_contract_on_all_schemas() {
     let kinds_without_title = [
         EntityKind::Scratchpad,
         EntityKind::Soup,
-        EntityKind::Evidence,
     ];
+
+    let ev_json = EntityKind::Evidence.schema_json();
+    let ev_req = ev_json["required"]
+        .as_array()
+        .expect("required must be an array");
+    let ev_keys: Vec<&str> = ev_req.iter().filter_map(|v| v.as_str()).collect();
+    for expected in [
+        "schema_version",
+        "gate",
+        "story",
+        "commit",
+        "status",
+        "exit_code",
+        "duration_ms",
+        "metric",
+        "summary",
+        "output_sha256",
+        "run_by",
+        "ran_at",
+        "verifies",
+        "skipped_locally",
+    ] {
+        assert!(
+            ev_keys.contains(&expected),
+            "Evidence schema missing required '{}'",
+            expected
+        );
+    }
 
     for kind in kinds_with_title {
         let json = kind.schema_json();
@@ -150,6 +217,9 @@ fn test_golden_fixtures_validation() {
     let fixtures_dir = manifest_dir.join("tests").join("fixtures");
 
     for kind in EntityKind::all() {
+        if *kind == EntityKind::Evidence {
+            continue;
+        }
         let kind_dir = fixtures_dir.join(kind.as_str());
         assert!(
             kind_dir.is_dir(),

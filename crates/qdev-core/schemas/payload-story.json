@@ -140,6 +140,94 @@
         }
       }
     },
+    "evidence": {
+      "type": "array",
+      "description": "Present only when --expand evidence is requested on stories.",
+      "items": {
+        "type": "object",
+        "required": [
+          "gate",
+          "status",
+          "commit",
+          "evidence_path"
+        ],
+        "properties": {
+          "gate": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "commit": {
+            "type": "string"
+          },
+          "exit_code": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "metric": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "evidence_path": {
+            "type": "string"
+          },
+          "output_sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ran_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_by": {
+            "type": ["object", "null"],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["human", "agent"]
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": ["type", "id"],
+            "additionalProperties": false
+          },
+          "verifies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "skipped_locally": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
     "assignments": {
       "type": "array",
       "description": "Sprint entities only: list of story assignments.",

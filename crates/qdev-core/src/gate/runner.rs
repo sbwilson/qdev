@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use sha2::Digest;
+
 use crate::config::{Config, GateConfig};
 use crate::errors::QdevError;
 use crate::gate::adapter::{parse_with_adapter, validate_adapter_name};
@@ -10,7 +12,7 @@ use crate::gate::process::ProcessGroupIsolation;
 use crate::gate::result::GateResultDocument;
 use crate::gate::ring_buffer::HeadTailBuffer;
 use crate::gate::{
-    GateFailure, GateListItem, GateRunOutcome, GateRunSetOutcome, GateStatus,
+    EvidenceBundle, GateFailure, GateListItem, GateRunOutcome, GateRunSetOutcome, GateStatus,
 };
 use crate::lease::find_active_lease_with_storage;
 use crate::modules::ModuleRegistry;
@@ -215,6 +217,121 @@ fn extract_metric_from_text(text: &str, metric_name: &str) -> Option<f64> {
         .filter(|v| v.is_finite())
 }
 
+/// Helper function to write an immutable evidence bundle and hydrate into SQLite cache.
+#[allow(clippy::too_many_arguments)]
+fn record_gate_evidence(
+    workspace_root: &Path,
+    config: &Config,
+    gate_config: &GateConfig,
+    story_id: Option<&str>,
+    commit_sha: Option<&str>,
+    status: &str,
+    exit_code: i32,
+    duration_ms: u64,
+    metric: Option<f64>,
+    summary: &str,
+    stdout: Option<&str>,
+    stderr: Option<&str>,
+    skipped_locally: bool,
+) -> Result<String, QdevError> {
+    let short_sha = commit_sha
+        .map(|s| {
+            let char_count = s.chars().count();
+            if char_count >= 7 {
+                s.chars().take(7).collect::<String>()
+            } else if !s.is_empty() {
+                s.to_string()
+            } else {
+                "unknown".to_string()
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let output_sha256 = {
+        let mut hasher = sha2::Sha256::new();
+        if let Some(out) = stdout {
+            if !out.is_empty() {
+                sha2::Digest::update(&mut hasher, out.as_bytes());
+            }
+        }
+        if let Some(err) = stderr {
+            if !err.is_empty() {
+                sha2::Digest::update(&mut hasher, err.as_bytes());
+            }
+        }
+        format!("{:x}", sha2::Digest::finalize(hasher))
+    };
+
+    let annotated_config =
+        crate::config::AnnotatedConfig::new(config.clone(), std::collections::BTreeMap::new());
+    let run_by = crate::write::resolve_author(None, None, &annotated_config, workspace_root)
+        .unwrap_or_else(|_| crate::write::Author::new("human", "developer"));
+
+    let bundle = EvidenceBundle {
+        schema_version: "1".to_string(),
+        gate: gate_config.id.clone(),
+        story: story_id.map(str::to_string),
+        commit: short_sha,
+        status: status.to_string(),
+        exit_code,
+        duration_ms,
+        metric,
+        summary: summary.to_string(),
+        output_sha256,
+        run_by,
+        ran_at: crate::write::current_iso8601(),
+        verifies: gate_config.verifies.clone(),
+        skipped_locally,
+    };
+
+    let (evidence_path, rel_evidence_path, stem) =
+        crate::gate::write_evidence_bundle(workspace_root, &config.storage, &bundle)?;
+
+    // Hydrate into SQLite cache if database exists and is valid
+    let cache_db_path = workspace_root
+        .join(&config.storage.cache_dir)
+        .join("cache.sqlite");
+    if cache_db_path.is_file() {
+        if let Ok(crate::store::CacheSchemaStatus::Valid) =
+            crate::store::inspect_cache_schema(&cache_db_path)
+        {
+            if let Ok(store) = crate::store::SqliteStore::open(&cache_db_path) {
+                let target_dir = bundle.story.as_deref().unwrap_or("_workspace");
+                let run_id = format!("{}:{}", target_dir, stem);
+                let gate_run_record = crate::store::GateRunRecord {
+                    id: run_id,
+                    story_id: bundle.story.clone(),
+                    gate_id: bundle.gate.clone(),
+                    commit_sha: bundle.commit.clone(),
+                    status: Some(bundle.status.clone()),
+                    exit_code: Some(bundle.exit_code),
+                    duration_ms: Some(bundle.duration_ms),
+                    metric_value: bundle.metric,
+                    summary: Some(bundle.summary.clone()),
+                    evidence_path: rel_evidence_path.clone(),
+                    output_hash: Some(bundle.output_sha256.clone()),
+                    run_by_type: Some(bundle.run_by.author_type.clone()),
+                    run_by_id: Some(bundle.run_by.id.clone()),
+                    ran_at: Some(bundle.ran_at.clone()),
+                };
+                let _ = store.upsert_gate_run(&gate_run_record);
+                let (mtime, size) = crate::store::sqlite::file_change_stamp(&evidence_path);
+                let content_hash = crate::write::sha256_digest(
+                    std::fs::read(&evidence_path).unwrap_or_default().as_slice(),
+                );
+                let _ = store.upsert_sync_state(
+                    &rel_evidence_path,
+                    mtime,
+                    size,
+                    Some(&content_hash),
+                );
+            }
+        }
+    }
+
+    Ok(rel_evidence_path)
+}
+
 /// Executes a verification gate external subprocess according to Story 3.2 specification.
 pub fn execute_gate(
     workspace_root: &Path,
@@ -240,6 +357,21 @@ pub fn execute_gate(
 
     // 1. Check local gate skip configuration
     if gate_config.skip == Some(true) {
+        let evidence_path = record_gate_evidence(
+            workspace_root,
+            config,
+            gate_config,
+            story_id.as_deref(),
+            commit_sha.as_deref(),
+            "pass",
+            0,
+            0,
+            None,
+            "skipped_locally",
+            None,
+            None,
+            true,
+        )?;
         return Ok(GateRunOutcome {
             gate_id: gate_id.to_string(),
             status: GateStatus::Skip,
@@ -255,6 +387,7 @@ pub fn execute_gate(
             failures: Vec::new(),
             metric: None,
             constraint_ids: Vec::new(),
+            evidence_path: Some(evidence_path),
         });
     }
 
@@ -262,12 +395,28 @@ pub fn execute_gate(
     let cmd_str = match &gate_config.command {
         Some(s) if !s.trim().is_empty() => s.trim(),
         _ => {
+            let summary = "missing executable: <none>".to_string();
+            let evidence_path = record_gate_evidence(
+                workspace_root,
+                config,
+                gate_config,
+                story_id.as_deref(),
+                commit_sha.as_deref(),
+                "infra",
+                4,
+                0,
+                None,
+                &summary,
+                None,
+                None,
+                false,
+            )?;
             return Ok(GateRunOutcome {
                 gate_id: gate_id.to_string(),
                 status: GateStatus::Infra,
                 exit_code: 4,
                 duration_ms: 0,
-                summary: "missing executable: <none>".to_string(),
+                summary,
                 skipped_locally: false,
                 commit_sha,
                 story_id,
@@ -277,18 +426,35 @@ pub fn execute_gate(
                 failures: Vec::new(),
                 metric: None,
                 constraint_ids: Vec::new(),
+                evidence_path: Some(evidence_path),
             });
         }
     };
 
     let args = parse_command_args(cmd_str);
     if args.is_empty() {
+        let summary = "missing executable: <empty>".to_string();
+        let evidence_path = record_gate_evidence(
+            workspace_root,
+            config,
+            gate_config,
+            story_id.as_deref(),
+            commit_sha.as_deref(),
+            "infra",
+            4,
+            0,
+            None,
+            &summary,
+            None,
+            None,
+            false,
+        )?;
         return Ok(GateRunOutcome {
             gate_id: gate_id.to_string(),
             status: GateStatus::Infra,
             exit_code: 4,
             duration_ms: 0,
-            summary: "missing executable: <empty>".to_string(),
+            summary,
             skipped_locally: false,
             commit_sha,
             story_id,
@@ -298,6 +464,7 @@ pub fn execute_gate(
             failures: Vec::new(),
             metric: None,
             constraint_ids: Vec::new(),
+            evidence_path: Some(evidence_path),
         });
     }
 
@@ -307,12 +474,28 @@ pub fn execute_gate(
     // 3. Check if executable exists
     let (resolved_path, binary_exists) = resolve_binary(workspace_root, binary_str);
     if !binary_exists {
+        let summary = format!("missing executable: {}", resolved_path);
+        let evidence_path = record_gate_evidence(
+            workspace_root,
+            config,
+            gate_config,
+            story_id.as_deref(),
+            commit_sha.as_deref(),
+            "infra",
+            4,
+            0,
+            None,
+            &summary,
+            None,
+            None,
+            false,
+        )?;
         return Ok(GateRunOutcome {
             gate_id: gate_id.to_string(),
             status: GateStatus::Infra,
             exit_code: 4,
             duration_ms: 0,
-            summary: format!("missing executable: {}", resolved_path),
+            summary,
             skipped_locally: false,
             commit_sha,
             story_id,
@@ -322,6 +505,7 @@ pub fn execute_gate(
             failures: Vec::new(),
             metric: None,
             constraint_ids: Vec::new(),
+            evidence_path: Some(evidence_path),
         });
     }
 
@@ -368,12 +552,28 @@ pub fn execute_gate(
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let summary = format!("missing executable: {}", resolved_path);
+            let evidence_path = record_gate_evidence(
+                workspace_root,
+                config,
+                gate_config,
+                story_id.as_deref(),
+                commit_sha.as_deref(),
+                "infra",
+                4,
+                0,
+                None,
+                &summary,
+                None,
+                None,
+                false,
+            )?;
             return Ok(GateRunOutcome {
                 gate_id: gate_id.to_string(),
                 status: GateStatus::Infra,
                 exit_code: 4,
                 duration_ms: 0,
-                summary: format!("missing executable: {}", resolved_path),
+                summary,
                 skipped_locally: false,
                 commit_sha,
                 story_id,
@@ -383,15 +583,32 @@ pub fn execute_gate(
                 failures: Vec::new(),
                 metric: None,
                 constraint_ids: Vec::new(),
+                evidence_path: Some(evidence_path),
             });
         }
         Err(e) => {
+            let summary = format!("failed to spawn executable {}: {}", resolved_path, e);
+            let evidence_path = record_gate_evidence(
+                workspace_root,
+                config,
+                gate_config,
+                story_id.as_deref(),
+                commit_sha.as_deref(),
+                "infra",
+                4,
+                0,
+                None,
+                &summary,
+                None,
+                None,
+                false,
+            )?;
             return Ok(GateRunOutcome {
                 gate_id: gate_id.to_string(),
                 status: GateStatus::Infra,
                 exit_code: 4,
                 duration_ms: 0,
-                summary: format!("failed to spawn executable {}: {}", resolved_path, e),
+                summary,
                 skipped_locally: false,
                 commit_sha,
                 story_id,
@@ -401,6 +618,7 @@ pub fn execute_gate(
                 failures: Vec::new(),
                 metric: None,
                 constraint_ids: Vec::new(),
+                evidence_path: Some(evidence_path),
             });
         }
     };
@@ -475,22 +693,41 @@ pub fn execute_gate(
         let stdout_buf = stdout_handle.join().unwrap_or_default();
         let stderr_buf = stderr_handle.join().unwrap_or_default();
         let duration_ms = start_time.elapsed().as_millis() as u64;
+        let summary = format!("timeout after {}ms", timeout_ms);
+        let stdout_str = stdout_buf.to_string_lossy();
+        let stderr_str = stderr_buf.to_string_lossy();
+        let evidence_path = record_gate_evidence(
+            workspace_root,
+            config,
+            gate_config,
+            story_id.as_deref(),
+            commit_sha.as_deref(),
+            "infra",
+            4,
+            duration_ms,
+            None,
+            &summary,
+            Some(&stdout_str),
+            Some(&stderr_str),
+            false,
+        )?;
 
         return Ok(GateRunOutcome {
             gate_id: gate_id.to_string(),
             status: GateStatus::Infra,
             exit_code: 4,
             duration_ms,
-            summary: format!("timeout after {}ms", timeout_ms),
+            summary,
             skipped_locally: false,
             commit_sha,
             story_id,
-            stdout: Some(stdout_buf.to_string_lossy()),
-            stderr: Some(stderr_buf.to_string_lossy()),
+            stdout: Some(stdout_str),
+            stderr: Some(stderr_str),
             agent_instruction: Some("halt_and_alert".to_string()),
             failures: Vec::new(),
             metric: None,
             constraint_ids: Vec::new(),
+            evidence_path: Some(evidence_path),
         });
     }
 
@@ -524,12 +761,28 @@ pub fn execute_gate(
     let killed_by_signal: Option<i32> = None;
 
     if let Some(sig) = killed_by_signal {
+        let summary = format!("process terminated by signal {}", sig);
+        let evidence_path = record_gate_evidence(
+            workspace_root,
+            config,
+            gate_config,
+            story_id.as_deref(),
+            commit_sha.as_deref(),
+            "infra",
+            4,
+            duration_ms,
+            None,
+            &summary,
+            Some(&stdout_str),
+            Some(&stderr_str),
+            false,
+        )?;
         return Ok(GateRunOutcome {
             gate_id: gate_id.to_string(),
             status: GateStatus::Infra,
             exit_code: 4,
             duration_ms,
-            summary: format!("process terminated by signal {}", sig),
+            summary,
             skipped_locally: false,
             commit_sha,
             story_id,
@@ -539,6 +792,7 @@ pub fn execute_gate(
             failures: Vec::new(),
             metric: None,
             constraint_ids: Vec::new(),
+            evidence_path: Some(evidence_path),
         });
     }
 
@@ -832,6 +1086,28 @@ pub fn execute_gate(
         }
     }
 
+    let ev_status = match status {
+        GateStatus::Pass => "pass",
+        GateStatus::Fail => "fail",
+        GateStatus::Infra => "infra",
+        GateStatus::Skip => "pass",
+    };
+    let evidence_path = record_gate_evidence(
+        workspace_root,
+        config,
+        gate_config,
+        story_id.as_deref(),
+        commit_sha.as_deref(),
+        ev_status,
+        exit_code,
+        duration_ms,
+        metric,
+        &summary,
+        Some(&stdout_str),
+        Some(&stderr_str),
+        false,
+    )?;
+
     Ok(GateRunOutcome {
         gate_id: gate_id.to_string(),
         status,
@@ -847,6 +1123,7 @@ pub fn execute_gate(
         failures,
         metric,
         constraint_ids,
+        evidence_path: Some(evidence_path),
     })
 }
 
@@ -1064,6 +1341,7 @@ pub fn execute_gate_set(
                 failures: Vec::new(),
                 metric: None,
                 constraint_ids: Vec::new(),
+                evidence_path: None,
             };
             gate_status_map.insert(gate_id.clone(), GateStatus::Skip);
             skipped_locally_map.insert(gate_id.clone(), false);
