@@ -707,6 +707,8 @@ updated_by:
         justification: None,
         author: author.clone(),
         if_version: None,
+        skip_gates: false,
+        interactivity: qdev_core::Interactivity::Interactive,
     };
 
     let result = engine.transition(&opts).unwrap();

@@ -2,12 +2,14 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::StorageConfig;
 use crate::errors::QdevError;
+use crate::interactivity::Interactivity;
 use crate::schema::EntityKind;
 use crate::store::{ScratchpadRecord, SqliteStore, Store};
 use crate::write::{
@@ -170,6 +172,9 @@ pub struct TransitionContext {
     pub justification: Option<String>,
     pub author: Author,
     pub storage: Option<StorageConfig>,
+    pub skip_gates: bool,
+    pub interactivity: Interactivity,
+    pub gate_skip_justification: Arc<Mutex<Option<String>>>,
 }
 
 /// Synchronous hook executed prior to updating the story frontmatter.
@@ -211,6 +216,161 @@ pub struct TransitionOptions {
     pub justification: Option<String>,
     pub author: Author,
     pub if_version: Option<u64>,
+    pub skip_gates: bool,
+    pub interactivity: Interactivity,
+}
+
+impl TransitionOptions {
+    pub fn new(
+        workspace_root: PathBuf,
+        story_id: impl Into<String>,
+        target_status: impl Into<String>,
+        author: Author,
+    ) -> Self {
+        Self {
+            workspace_root,
+            storage: None,
+            entity_kind: "story".to_string(),
+            story_id: story_id.into(),
+            target_status: target_status.into(),
+            justification: None,
+            author,
+            if_version: None,
+            skip_gates: false,
+            interactivity: Interactivity::Interactive,
+        }
+    }
+}
+
+/// Pre-transition hook executing transition-bound gates on transitions to `review`.
+pub struct TransitionGateHook {
+    pub config: crate::config::Config,
+}
+
+impl TransitionGateHook {
+    pub fn new(config: crate::config::Config) -> Self {
+        Self { config }
+    }
+}
+
+impl PreTransitionHook for TransitionGateHook {
+    fn run(&self, ctx: &TransitionContext) -> Result<(), QdevError> {
+        if ctx.to_state != StoryState::Review {
+            return Ok(());
+        }
+
+        if ctx.skip_gates {
+            let justification = ctx
+                .justification
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("");
+            if justification.is_empty() {
+                return Err(QdevError::policy_refusal(
+                    "needs_justification",
+                    "--skip-gates requires non-empty justification",
+                ));
+            }
+
+            if !ctx.interactivity.is_interactive() {
+                return Err(QdevError::policy_refusal(
+                    "tty_required",
+                    "--skip-gates is available only to humans on an interactive terminal (TTY)",
+                ));
+            }
+
+            if ctx.author.author_type != "human" {
+                return Err(QdevError::policy_refusal(
+                    "human_required",
+                    "--skip-gates is available only to human authors",
+                ));
+            }
+
+            // Defer writing the gate_skip decision until after the transition commits.
+            *ctx.gate_skip_justification.lock().unwrap() = Some(justification.to_string());
+            return Ok(());
+        }
+
+        let gate_options = crate::gate::GateRunOptions {
+            story: Some(ctx.story_id.clone()),
+            timeout_ms: None,
+        };
+
+        let review_gate_ids: Vec<String> = self
+            .config
+            .gates
+            .iter()
+            .filter(|g| g.on_transition.iter().any(|t| t == "review"))
+            .map(|g| g.id.clone())
+            .collect();
+
+        // 1. Built-in qdev-scope (run first for fast failure)
+        if !review_gate_ids.iter().any(|id| id == crate::gate::BUILTIN_GATE_SCOPE) {
+            let scope_outcome = crate::gate::execute_scope_gate(
+                &ctx.workspace_root,
+                &self.config,
+                &gate_options,
+            )?;
+
+            if scope_outcome.status == crate::gate::GateStatus::Fail {
+                let payload = serde_json::to_value(scope_outcome.to_payload()).unwrap_or_default();
+                return Err(QdevError::logical_failure("gate_failed", scope_outcome.summary)
+                    .with_details(payload));
+            } else if scope_outcome.status == crate::gate::GateStatus::Infra {
+                let payload = serde_json::to_value(scope_outcome.to_payload()).unwrap_or_default();
+                return Err(QdevError::infrastructure_failure("gate_infra_failure", scope_outcome.summary)
+                    .with_details(payload));
+            }
+        }
+
+        // 2. Built-in qdev-deps (run second for fast failure)
+        if !review_gate_ids.iter().any(|id| id == crate::gate::BUILTIN_GATE_DEPS) {
+            let deps_outcome = crate::gate::execute_deps_gate(
+                &ctx.workspace_root,
+                &self.config,
+                &gate_options,
+            )?;
+
+            if deps_outcome.status == crate::gate::GateStatus::Fail {
+                let payload = serde_json::to_value(deps_outcome.to_payload()).unwrap_or_default();
+                return Err(QdevError::logical_failure("gate_failed", deps_outcome.summary)
+                    .with_details(payload));
+            } else if deps_outcome.status == crate::gate::GateStatus::Infra {
+                let payload = serde_json::to_value(deps_outcome.to_payload()).unwrap_or_default();
+                return Err(QdevError::infrastructure_failure("gate_infra_failure", deps_outcome.summary)
+                    .with_details(payload));
+            }
+        }
+
+        // 3. External gates configured with on_transition = ["review"]
+        if !review_gate_ids.is_empty() {
+            let execution_order = crate::gate::resolve_gate_execution_order(
+                &self.config.gates,
+                Some(&review_gate_ids),
+            )?;
+
+            let set_outcome = crate::gate::execute_gate_set(
+                &ctx.workspace_root,
+                &self.config,
+                &execution_order,
+                &gate_options,
+            )?;
+
+            for outcome in set_outcome.outcomes {
+                if outcome.status == crate::gate::GateStatus::Fail {
+                    let payload = serde_json::to_value(outcome.to_payload()).unwrap_or_default();
+                    return Err(QdevError::logical_failure("gate_failed", outcome.summary)
+                        .with_details(payload));
+                } else if outcome.status == crate::gate::GateStatus::Infra {
+                    let payload = serde_json::to_value(outcome.to_payload()).unwrap_or_default();
+                    return Err(QdevError::infrastructure_failure("gate_infra_failure", outcome.summary)
+                        .with_details(payload));
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Successful output payload emitted by story transition.
@@ -695,6 +855,7 @@ impl TransitionEngine {
 
         // 4. Execute pre_transition hooks synchronously in order; the first error aborts
         //    before any mutation.
+        let gate_skip_justification = Arc::new(Mutex::new(None));
         let ctx = TransitionContext {
             workspace_root: options.workspace_root.clone(),
             story_id: id.clone(),
@@ -703,6 +864,9 @@ impl TransitionEngine {
             justification: options.justification.clone(),
             author: options.author.clone(),
             storage: options.storage.clone(),
+            skip_gates: options.skip_gates,
+            interactivity: options.interactivity,
+            gate_skip_justification: gate_skip_justification.clone(),
         };
 
         for hook in &self.pre_hooks {
@@ -810,6 +974,30 @@ impl TransitionEngine {
             )?;
 
             Some(dec_id)
+        } else if let Some(skip_just) = gate_skip_justification.lock().unwrap().take() {
+            let dec_input = crate::decision::DecisionInput {
+                subject_id: id.clone(),
+                decision_type: "human_ruling".to_string(),
+                topic: Some("gate_skip".to_string()),
+                context: Some(format!(
+                    "{} -> {}",
+                    revalidated.from_state.as_str(),
+                    target_state.as_str()
+                )),
+                ruling: skip_just,
+                author: options.author.clone(),
+                title: Some("Gate Skip".to_string()),
+                timestamp: Some(current_iso8601()),
+                validate_subject: true,
+            };
+
+            let dec_res = crate::decision::log_decision(
+                &options.workspace_root,
+                options.storage.as_ref(),
+                &dec_input,
+            )?;
+
+            Some(dec_res.id)
         } else {
             None
         };

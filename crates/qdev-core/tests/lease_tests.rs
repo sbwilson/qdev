@@ -287,6 +287,8 @@ fn test_transition_done_auto_releases_lease() {
             justification: None,
             author: author.clone(),
             if_version: None,
+            skip_gates: false,
+            interactivity: qdev_core::Interactivity::Interactive,
         })
         .unwrap();
 

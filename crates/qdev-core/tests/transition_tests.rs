@@ -10,7 +10,7 @@ use std::time::Duration;
 use qdev_core::store::{SqliteStore, Store};
 use qdev_core::{
     acquire_write_lock, classify_transition, Author, EntityKind, EntityRecord, ExitCode, QdevError,
-    StoryState, TransitionContext, TransitionEngine, TransitionKind, TransitionOptions,
+    Interactivity, StoryState, TransitionContext, TransitionEngine, TransitionGateHook, TransitionKind, TransitionOptions,
 };
 use tempfile::TempDir;
 
@@ -256,6 +256,8 @@ Some description without acceptance criteria.
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let err = engine.transition(&opts).unwrap_err();
@@ -304,6 +306,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let err = engine.transition(&opts).unwrap_err();
@@ -351,6 +355,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let err = engine.transition(&opts).unwrap_err();
@@ -397,6 +403,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let payload = engine.transition(&opts).unwrap();
@@ -456,6 +464,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let err = engine.transition(&opts).unwrap_err();
@@ -515,6 +525,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let payload = engine.transition(&opts).unwrap();
@@ -562,6 +574,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let err = engine.transition(&opts_no_just).unwrap_err();
@@ -627,6 +641,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let err = engine.transition(&opts_no_just).unwrap_err();
@@ -682,6 +698,8 @@ updated_by:
         justification: Some("Reopening".to_string()),
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let err = engine.transition(&opts).unwrap_err();
@@ -754,6 +772,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let payload = engine.transition(&opts).unwrap();
@@ -828,6 +848,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let payload = engine.transition(&opts).unwrap();
@@ -888,6 +910,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let err = engine.transition(&opts).unwrap_err();
@@ -960,6 +984,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     // apply_entity_update will wait up to 5000ms and time out
@@ -1018,6 +1044,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let err = engine.transition(&opts).unwrap_err();
@@ -1066,6 +1094,8 @@ Only description here, no AC section in markdown body.
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let err = engine.transition(&opts).unwrap_err();
@@ -1114,6 +1144,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let err = engine.transition(&opts).unwrap_err();
@@ -1166,6 +1198,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let err = engine.transition(&opts).unwrap_err();
@@ -1213,6 +1247,8 @@ updated_by:
         justification: Some("Failed AC-3".to_string()),
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let payload = engine.transition(&opts).unwrap();
@@ -1326,6 +1362,8 @@ updated_by:
         justification: Some("Re-scoping appetite".to_string()),
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let payload = engine.transition(&opts).unwrap();
@@ -1388,6 +1426,8 @@ updated_by:
         justification: Some("Needs scope refinement".to_string()),
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let payload = engine.transition(&opts).unwrap();
@@ -1483,6 +1523,8 @@ updated_by:
         ),
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let payload = engine.transition(&opts).unwrap();
@@ -1589,6 +1631,8 @@ updated_by:
             justification: Some("First rejection".to_string()),
             author: Author::new("human", "simon"),
             if_version: None,
+            skip_gates: false,
+            interactivity: Interactivity::Interactive,
         })
         .unwrap();
 
@@ -1605,6 +1649,8 @@ updated_by:
             justification: None,
             author: Author::new("human", "simon"),
             if_version: None,
+            skip_gates: false,
+            interactivity: Interactivity::Interactive,
         })
         .unwrap();
     assert!(payload_fwd.decision_id.is_none());
@@ -1620,6 +1666,8 @@ updated_by:
             justification: Some("Second rejection".to_string()),
             author: Author::new("human", "simon"),
             if_version: None,
+            skip_gates: false,
+            interactivity: Interactivity::Interactive,
         })
         .unwrap();
 
@@ -1640,6 +1688,8 @@ updated_by:
             justification: Some("Pivot to ready".to_string()),
             author: Author::new("human", "simon"),
             if_version: None,
+            skip_gates: false,
+            interactivity: Interactivity::Interactive,
         })
         .unwrap();
 
@@ -1719,6 +1769,8 @@ updated_by:
             justification: Some("Failed manual review check".to_string()),
             author: Author::new("human", "simon"),
             if_version: None,
+            skip_gates: false,
+            interactivity: Interactivity::Interactive,
         })
         .unwrap();
 
@@ -1782,6 +1834,8 @@ updated_by:
             justification: None,
             author: Author::new("human", "simon"),
             if_version: None,
+            skip_gates: false,
+            interactivity: Interactivity::Interactive,
         })
         .unwrap_err();
     assert_eq!(err1.exit_code(), ExitCode::PolicyRefusal);
@@ -1798,6 +1852,8 @@ updated_by:
             justification: Some("".to_string()),
             author: Author::new("human", "simon"),
             if_version: None,
+            skip_gates: false,
+            interactivity: Interactivity::Interactive,
         })
         .unwrap_err();
     assert_eq!(err2.exit_code(), ExitCode::PolicyRefusal);
@@ -1814,6 +1870,8 @@ updated_by:
             justification: Some("   \t\n  ".to_string()),
             author: Author::new("human", "simon"),
             if_version: None,
+            skip_gates: false,
+            interactivity: Interactivity::Interactive,
         })
         .unwrap_err();
     assert_eq!(err3.exit_code(), ExitCode::PolicyRefusal);
@@ -1902,6 +1960,8 @@ updated_by:
         justification: Some("Decided before the story was killed".to_string()),
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let err = engine.transition(&opts).unwrap_err();
@@ -1961,6 +2021,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let err = engine.transition(&opts).unwrap_err();
@@ -2076,6 +2138,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let err = engine.transition(&opts).unwrap_err();
@@ -2191,6 +2255,8 @@ updated_by:
         justification: None,
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let payload = engine.transition(&opts).unwrap();
@@ -2244,6 +2310,8 @@ updated_by:
         justification: Some("Superseded by the rewrite".to_string()),
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let payload = engine.transition(&opts).unwrap();
@@ -2328,6 +2396,8 @@ updated_by:
         justification: Some("Story 2.9 does this instead".to_string()),
         author: Author::new("human", "simon"),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let payload = engine.transition(&opts).unwrap();
@@ -2423,6 +2493,8 @@ updated_by:
         justification: None,
         author: author.clone(),
         if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
     };
 
     let err = engine.transition(&opts).unwrap_err();
@@ -2440,4 +2512,554 @@ updated_by:
     // Verify story is STILL in review
     let story_content = fs::read_to_string(tmp.path().join("docs/specs/stories/E12S4.md")).unwrap();
     assert!(story_content.contains("status: review"), "Story must remain in review");
+}
+
+#[test]
+fn test_transition_gate_hook_executes_on_review_transition() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    let script_path = tmp.path().join("check_story.sh");
+    fs::write(
+        &script_path,
+        "#!/bin/sh\n[ \"$QDEV_STORY\" = \"E12S4\" ] || exit 1\nexit 0\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let qdev_toml = tmp.path().join("qdev.toml");
+    fs::write(
+        qdev_toml,
+        format!(
+            r#"
+[project]
+name = "TestProject"
+
+[identity]
+developer_id = "simon"
+teams = ["core-platform"]
+
+[storage]
+specs_dir = "docs/specs"
+cache_dir = ".qdev/cache"
+
+[[modules]]
+id = "bridge"
+paths = ["crates/bridge/**"]
+
+[[gates]]
+id = "review-gate"
+command = "{}"
+on_transition = ["review"]
+"#,
+            script_path.display()
+        ),
+    )
+    .unwrap();
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: Story 4
+status: in-progress
+version: 1
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    let author = Author::new("human", "simon");
+    let config = qdev_core::load_config(tmp.path()).unwrap().config;
+    let mut engine = TransitionEngine::new();
+    engine.add_pre_hook(TransitionGateHook::new(config));
+
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "review".to_string(),
+        justification: None,
+        author: author.clone(),
+        if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
+    };
+
+    let payload = engine.transition(&opts).unwrap();
+    assert_eq!(payload.to_status, "review");
+
+    let content = fs::read_to_string(tmp.path().join("docs/specs/stories/E12S4.md")).unwrap();
+    assert!(content.contains("status: review"));
+}
+
+#[test]
+fn test_transition_gate_hook_fails_blocks_transition() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    let script_path = tmp.path().join("failing_gate.sh");
+    fs::write(&script_path, "#!/bin/sh\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let qdev_toml = tmp.path().join("qdev.toml");
+    fs::write(
+        qdev_toml,
+        format!(
+            r#"
+[project]
+name = "TestProject"
+
+[identity]
+developer_id = "simon"
+teams = ["core-platform"]
+
+[storage]
+specs_dir = "docs/specs"
+cache_dir = ".qdev/cache"
+
+[[modules]]
+id = "bridge"
+paths = ["crates/bridge/**"]
+
+[[gates]]
+id = "fail-gate"
+command = "{}"
+on_transition = ["review"]
+"#,
+            script_path.display()
+        ),
+    )
+    .unwrap();
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: Story 4
+status: in-progress
+version: 1
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    let author = Author::new("human", "simon");
+    let lease = qdev_core::lease::claim_story(tmp.path(), "E12S4", &author, None, None).unwrap();
+    assert_eq!(lease.story_id, "E12S4");
+
+    let config = qdev_core::load_config(tmp.path()).unwrap().config;
+    let mut engine = TransitionEngine::new();
+    engine.add_pre_hook(TransitionGateHook::new(config));
+
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "review".to_string(),
+        justification: None,
+        author: author.clone(),
+        if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
+    };
+
+    let err = engine.transition(&opts).unwrap_err();
+    assert_eq!(err.exit_code(), ExitCode::LogicalFailure);
+    assert_eq!(err.code(), "gate_failed");
+
+    // Story stays in in-progress
+    let content = fs::read_to_string(tmp.path().join("docs/specs/stories/E12S4.md")).unwrap();
+    assert!(content.contains("status: in-progress"));
+
+    // Lease is still active
+    let active_lease = qdev_core::lease::get_lease(tmp.path(), "E12S4");
+    assert!(active_lease.is_some());
+}
+
+#[test]
+fn test_transition_gate_hook_infra_failure_blocks_transition() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    let qdev_toml = tmp.path().join("qdev.toml");
+    fs::write(
+        qdev_toml,
+        r#"
+[project]
+name = "TestProject"
+
+[identity]
+developer_id = "simon"
+teams = ["core-platform"]
+
+[storage]
+specs_dir = "docs/specs"
+cache_dir = ".qdev/cache"
+
+[[modules]]
+id = "bridge"
+paths = ["crates/bridge/**"]
+
+[[gates]]
+id = "missing-gate"
+command = "/nonexistent/path/to/binary"
+on_transition = ["review"]
+"#,
+    )
+    .unwrap();
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: Story 4
+status: in-progress
+version: 1
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    let author = Author::new("human", "simon");
+    let config = qdev_core::load_config(tmp.path()).unwrap().config;
+    let mut engine = TransitionEngine::new();
+    engine.add_pre_hook(TransitionGateHook::new(config));
+
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "review".to_string(),
+        justification: None,
+        author: author.clone(),
+        if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
+    };
+
+    let err = engine.transition(&opts).unwrap_err();
+    assert_eq!(err.exit_code(), ExitCode::InfrastructureFailure);
+    assert_eq!(err.code(), "gate_infra_failure");
+}
+
+#[test]
+fn test_transition_gate_hook_skip_gates_guardrails() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: Story 4
+status: in-progress
+version: 1
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    let config = qdev_core::load_config(tmp.path()).unwrap().config;
+    let mut engine = TransitionEngine::new();
+    engine.add_pre_hook(TransitionGateHook::new(config));
+
+    // 1. Rejection on non-interactive TTY
+    let opts_non_tty = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "review".to_string(),
+        justification: Some("emergency hotfix".to_string()),
+        author: Author::new("human", "simon"),
+        if_version: None,
+        skip_gates: true,
+        interactivity: Interactivity::NonInteractive,
+    };
+    let err = engine.transition(&opts_non_tty).unwrap_err();
+    assert_eq!(err.exit_code(), ExitCode::PolicyRefusal);
+    assert_eq!(err.code(), "tty_required");
+
+    // 2. Rejection on agent author
+    let opts_agent = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "review".to_string(),
+        justification: Some("emergency hotfix".to_string()),
+        author: Author::new("agent", "claude"),
+        if_version: None,
+        skip_gates: true,
+        interactivity: Interactivity::Interactive,
+    };
+    let err = engine.transition(&opts_agent).unwrap_err();
+    assert_eq!(err.exit_code(), ExitCode::PolicyRefusal);
+    assert_eq!(err.code(), "human_required");
+
+    // 3. Rejection on missing justification
+    let opts_no_just = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "review".to_string(),
+        justification: None,
+        author: Author::new("human", "simon"),
+        if_version: None,
+        skip_gates: true,
+        interactivity: Interactivity::Interactive,
+    };
+    let err = engine.transition(&opts_no_just).unwrap_err();
+    assert_eq!(err.exit_code(), ExitCode::PolicyRefusal);
+    assert_eq!(err.code(), "needs_justification");
+
+    // 4. Success path: human on interactive TTY with justification
+    let opts_ok = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "review".to_string(),
+        justification: Some("emergency hotfix for production issue".to_string()),
+        author: Author::new("human", "simon"),
+        if_version: None,
+        skip_gates: true,
+        interactivity: Interactivity::Interactive,
+    };
+    let payload = engine.transition(&opts_ok).unwrap();
+    assert_eq!(payload.to_status, "review");
+    let dec_id = payload.decision_id.expect("must return decision_id on gate skip");
+    assert!(dec_id.starts_with("DEC-"));
+
+    let dec_file = tmp.path().join(format!("docs/state/decisions/{}.md", dec_id));
+    assert!(dec_file.exists());
+    let dec_content = fs::read_to_string(&dec_file).unwrap();
+    assert!(dec_content.contains("decision_type: human_ruling"));
+    assert!(dec_content.contains("topic: gate_skip"));
+}
+
+#[test]
+fn test_transition_engine_review_fails_on_scope_violation() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    // Init git repo so diff works
+    let _ = std::process::Command::new("git")
+        .current_dir(tmp.path())
+        .args(["init", "-b", "main"])
+        .output();
+    let _ = std::process::Command::new("git")
+        .current_dir(tmp.path())
+        .args(["config", "user.name", "Test User"])
+        .output();
+    let _ = std::process::Command::new("git")
+        .current_dir(tmp.path())
+        .args(["config", "user.email", "test@example.com"])
+        .output();
+    let _ = std::process::Command::new("git")
+        .current_dir(tmp.path())
+        .args(["config", "commit.gpgsign", "false"])
+        .output();
+    let _ = std::process::Command::new("git")
+        .current_dir(tmp.path())
+        .args(["add", "."])
+        .output();
+    let _ = std::process::Command::new("git")
+        .current_dir(tmp.path())
+        .args(["commit", "-m", "init"])
+        .output();
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: Story 4
+status: in-progress
+version: 1
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    // Edit a file outside target_modules
+    let foundation_dir = tmp.path().join("crates/foundation");
+    fs::create_dir_all(&foundation_dir).unwrap();
+    fs::write(foundation_dir.join("lib.rs"), "// out of scope\n").unwrap();
+
+    let config = qdev_core::load_config(tmp.path()).unwrap().config;
+    let mut engine = TransitionEngine::new();
+    engine.add_pre_hook(TransitionGateHook::new(config));
+
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "review".to_string(),
+        justification: None,
+        author: Author::new("human", "simon"),
+        if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
+    };
+
+    let err = engine.transition(&opts).unwrap_err();
+    assert_eq!(err.exit_code(), ExitCode::LogicalFailure);
+    assert_eq!(err.code(), "gate_failed");
+
+    // Story stays in in-progress
+    let content = fs::read_to_string(tmp.path().join("docs/specs/stories/E12S4.md")).unwrap();
+    assert!(content.contains("status: in-progress"));
+}
+
+#[test]
+fn test_transition_engine_review_fails_on_layer_inversion() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    // Update qdev.toml with layer hierarchy
+    let toml_path = tmp.path().join("qdev.toml");
+    let toml = r#"
+[project]
+name = "TestProject"
+
+[identity]
+developer_id = "simon"
+teams = ["core-platform"]
+
+[storage]
+specs_dir = "docs/specs"
+cache_dir = ".qdev/cache"
+
+[[modules]]
+id = "bridge"
+paths = ["crates/bridge/**"]
+layer = 2
+may_depend_on = ["app"]
+
+[[modules]]
+id = "app"
+paths = ["crates/app/**"]
+layer = 3
+may_depend_on = []
+"#;
+    fs::write(toml_path, toml).unwrap();
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: Story 4
+status: in-progress
+version: 1
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    // In bridge module, import higher layer module app
+    let bridge_dir = tmp.path().join("crates/bridge");
+    fs::create_dir_all(&bridge_dir).unwrap();
+    fs::write(bridge_dir.join("lib.rs"), "use app::AppUi;\n").unwrap();
+
+    let config = qdev_core::load_config(tmp.path()).unwrap().config;
+    let mut engine = TransitionEngine::new();
+    engine.add_pre_hook(TransitionGateHook::new(config));
+
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "review".to_string(),
+        justification: None,
+        author: Author::new("human", "simon"),
+        if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
+    };
+
+    let err = engine.transition(&opts).unwrap_err();
+    assert_eq!(err.exit_code(), ExitCode::LogicalFailure);
+    assert_eq!(err.code(), "gate_failed");
+
+    let content = fs::read_to_string(tmp.path().join("docs/specs/stories/E12S4.md")).unwrap();
+    assert!(content.contains("status: in-progress"));
 }

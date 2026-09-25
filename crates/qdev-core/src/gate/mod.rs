@@ -18,8 +18,9 @@ pub use adapter::{parse_with_adapter, validate_adapter_name, VALID_ADAPTERS};
 pub use result::GateResultDocument;
 pub use ring_buffer::HeadTailBuffer;
 pub use runner::{
-    execute_gate, execute_gate_set, get_gate_list, resolve_commit_sha,
-    resolve_gate_execution_order, validate_gate_dependencies, GateRunOptions,
+    execute_deps_gate, execute_gate, execute_gate_set, execute_scope_gate, get_gate_list,
+    resolve_commit_sha, resolve_gate_execution_order, scan_rust_imports, scan_swift_imports,
+    validate_gate_dependencies, GateRunOptions, BUILTIN_GATE_DEPS, BUILTIN_GATE_SCOPE,
 };
 
 /// Gate execution status taxonomy conforming to AD-5 and compliance & safety specification.

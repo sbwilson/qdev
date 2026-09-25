@@ -63,7 +63,11 @@ pub fn handle_transition(
         Err(code) => return code,
     };
 
-    let effective_justification = cli.justification.clone().or(gov_just);
+    let effective_justification = transition_args
+        .justification
+        .clone()
+        .or_else(|| cli.justification.clone())
+        .or(gov_just);
 
     let options = qdev_core::TransitionOptions {
         workspace_root: root.clone(),
@@ -74,9 +78,14 @@ pub fn handle_transition(
         justification: effective_justification,
         author: author.clone(),
         if_version,
+        skip_gates: transition_args.skip_gates,
+        interactivity,
     };
 
-    let engine = qdev_core::TransitionEngine::new();
+    let mut engine = qdev_core::TransitionEngine::new();
+    engine.add_pre_hook(qdev_core::TransitionGateHook::new(
+        annotated_config.config.clone(),
+    ));
     let res = match engine.transition(&options) {
         Ok(r) => r,
         Err(e) => {

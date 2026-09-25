@@ -25,14 +25,15 @@ pub mod validate;
 pub mod write;
 
 pub use gate::{
-    evaluate_ratchet, execute_gate, execute_gate_set, format_duration, format_metric_number,
-    get_gate_list, parse_with_adapter, read_baseline, resolve_baseline_path, resolve_commit_sha,
-    resolve_collision_free_evidence_path, resolve_gate_execution_order, validate_adapter_name,
+    evaluate_ratchet, execute_deps_gate, execute_gate, execute_gate_set, execute_scope_gate,
+    format_duration, format_metric_number, get_gate_list, parse_with_adapter, read_baseline,
+    resolve_baseline_path, resolve_commit_sha, resolve_collision_free_evidence_path,
+    resolve_gate_execution_order, scan_rust_imports, scan_swift_imports, validate_adapter_name,
     validate_gate_dependencies, write_baseline, write_evidence_bundle, EvidenceBundle,
     GateBaselinePayload, GateFailure, GateListItem, GateListPayload, GateResultDocument,
     GateRunOptions, GateRunOutcome, GateRunPayload, GateRunSetOutcome, GateRunSetPayload,
     GateStatus, HeadTailBuffer, RatchetBaseline, RatchetDirection, RatchetEvaluation,
-    VALID_ADAPTERS,
+    BUILTIN_GATE_DEPS, BUILTIN_GATE_SCOPE, VALID_ADAPTERS,
 };
 
 pub use chore::{
@@ -151,7 +152,8 @@ pub use sprint::{
 pub use transition::{
     append_scratchpad_entry, classify_transition, create_transition_decision,
     record_transition_decision, PostTransitionHook, PreTransitionHook, StoryState,
-    TransitionContext, TransitionEngine, TransitionKind, TransitionOptions, TransitionPayload,
+    TransitionContext, TransitionEngine, TransitionGateHook, TransitionKind, TransitionOptions,
+    TransitionPayload,
 };
 pub use validate::{
     collect_workspace_files_matching, filter_by_changed, find_duplicate_active_sprint_assignments,

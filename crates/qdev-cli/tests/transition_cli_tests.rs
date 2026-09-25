@@ -1230,3 +1230,279 @@ updated_by:
     assert_eq!(multi_dec_fm["context"], "review -> ready");
     assert!(multi_dec_content.contains("Transition: review -> ready"));
 }
+
+#[test]
+fn test_transition_cli_review_runs_bound_gates_and_records_evidence() {
+    let tmp = TempDir::new().unwrap();
+    setup_workspace(tmp.path());
+
+    // Configure gate bound to review transition
+    let toml_path = tmp.path().join("qdev.toml");
+    let mut toml = fs::read_to_string(&toml_path).unwrap();
+    toml.push_str(
+        r#"
+[[gates]]
+id = "cli-bound-gate"
+command = "true"
+on_transition = ["review"]
+"#,
+    );
+    fs::write(toml_path, toml).unwrap();
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: "CoreResponse Buffer Layout"
+status: in-progress
+version: 1
+owners: ["simon"]
+epic_id: E12
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#,
+    );
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(tmp.path())
+        .args(["transition", "story", "E12S4", "review", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"to_status\": \"review\""));
+
+    // Check evidence directory
+    let evidence_dir = tmp.path().join("docs/state/evidence/E12S4");
+    assert!(evidence_dir.exists(), "Evidence directory must exist");
+    let file_names: Vec<String> = fs::read_dir(evidence_dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect();
+    assert!(!file_names.is_empty(), "Evidence bundle must be written");
+    assert!(
+        file_names.iter().any(|f| f.ends_with("-qdev-scope.json")),
+        "Evidence bundle must contain qdev-scope evidence: {:?}",
+        file_names
+    );
+    assert!(
+        file_names.iter().any(|f| f.ends_with("-qdev-deps.json")),
+        "Evidence bundle must contain qdev-deps evidence: {:?}",
+        file_names
+    );
+    assert!(
+        file_names.iter().any(|f| f.ends_with("-cli-bound-gate.json")),
+        "Evidence bundle must contain custom gate evidence: {:?}",
+        file_names
+    );
+}
+
+#[test]
+fn test_transition_cli_review_gate_failure_blocks_transition_exit_1() {
+    let tmp = TempDir::new().unwrap();
+    setup_workspace(tmp.path());
+
+    let toml_path = tmp.path().join("qdev.toml");
+    let mut toml = fs::read_to_string(&toml_path).unwrap();
+    toml.push_str(
+        r#"
+[[gates]]
+id = "failing-review-gate"
+command = "false"
+on_transition = ["review"]
+"#,
+    );
+    fs::write(toml_path, toml).unwrap();
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: "CoreResponse Buffer Layout"
+status: in-progress
+version: 1
+owners: ["simon"]
+epic_id: E12
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#,
+    );
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(tmp.path())
+        .args(["transition", "story", "E12S4", "review", "--json"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("\"code\": \"gate_failed\""));
+
+    // Verify story status remained in-progress
+    let story_content = fs::read_to_string(tmp.path().join("docs/specs/stories/E12S4.md")).unwrap();
+    assert!(story_content.contains("status: in-progress"));
+}
+
+#[test]
+fn test_transition_cli_skip_gates_guardrails_exit_3() {
+    let tmp = TempDir::new().unwrap();
+    setup_workspace(tmp.path());
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: "CoreResponse Buffer Layout"
+status: in-progress
+version: 1
+owners: ["simon"]
+epic_id: E12
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC.
+"#,
+    );
+
+    // 1. Non-TTY / Non-interactive: in test harness stdin is piped (non-interactive), so skip-gates fails with tty_required
+    let mut cmd_tty = Command::cargo_bin("qdev").unwrap();
+    cmd_tty
+        .current_dir(tmp.path())
+        .args([
+            "transition",
+            "story",
+            "E12S4",
+            "review",
+            "--skip-gates",
+            "--justification",
+            "Emergency prod fix",
+            "--json",
+        ])
+        .assert()
+        .code(3)
+        .stdout(predicate::str::contains("\"code\": \"tty_required\""));
+
+    // 2. Missing justification: --skip-gates without --justification fails with needs_justification
+    let mut cmd_no_just = Command::cargo_bin("qdev").unwrap();
+    cmd_no_just
+        .current_dir(tmp.path())
+        .args([
+            "transition",
+            "story",
+            "E12S4",
+            "review",
+            "--skip-gates",
+            "--json",
+        ])
+        .assert()
+        .code(3)
+        .stdout(predicate::str::contains("\"code\": \"needs_justification\""));
+
+    // 3. Non-interactive with agent: still fails with exit 3 (tty_required checked first on non-TTY pipe)
+    let mut cmd_agent = Command::cargo_bin("qdev").unwrap();
+    cmd_agent
+        .current_dir(tmp.path())
+        .args([
+            "transition",
+            "story",
+            "E12S4",
+            "review",
+            "--skip-gates",
+            "--author-type",
+            "agent",
+            "--author-id",
+            "claude",
+            "--justification",
+            "Automated skip",
+            "--json",
+        ])
+        .assert()
+        .code(3)
+        .stdout(predicate::str::contains("\"code\": \"tty_required\""));
+
+    // 4. Interactive TTY with agent author: fails with exit 3 and human_required
+    let mut cmd_agent_tty = Command::cargo_bin("qdev").unwrap();
+    cmd_agent_tty
+        .current_dir(tmp.path())
+        .env("_QDEV_MOCK_TTY", "1")
+        .args([
+            "transition",
+            "story",
+            "E12S4",
+            "review",
+            "--skip-gates",
+            "--author-type",
+            "agent",
+            "--author-id",
+            "claude",
+            "--justification",
+            "Automated skip attempt",
+            "--json",
+        ])
+        .assert()
+        .code(3)
+        .stdout(predicate::str::contains("\"code\": \"human_required\""));
+
+    // 5. Interactive TTY with human author: succeeds with exit 0, records DEC- record
+    let mut cmd_human_tty = Command::cargo_bin("qdev").unwrap();
+    let assert_skip = cmd_human_tty
+        .current_dir(tmp.path())
+        .env("_QDEV_MOCK_TTY", "1")
+        .args([
+            "transition",
+            "story",
+            "E12S4",
+            "review",
+            "--skip-gates",
+            "--justification",
+            "Manual review approved offline",
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let skip_json: Value =
+        serde_json::from_slice(&assert_skip.get_output().stdout).expect("Valid JSON envelope");
+    assert_eq!(skip_json["to_status"], "review");
+    let skip_dec_id = skip_json["decision_id"]
+        .as_str()
+        .expect("decision_id must be in json");
+    assert!(skip_dec_id.starts_with("DEC-"));
+
+    let dec_path = tmp
+        .path()
+        .join(format!("docs/state/decisions/{}.md", skip_dec_id));
+    assert!(dec_path.exists(), "DEC- record file must exist");
+    let dec_content = fs::read_to_string(&dec_path).unwrap();
+    let dec_fm = qdev_core::extract_frontmatter(&dec_content).unwrap();
+    assert_eq!(dec_fm["decision_type"], "human_ruling");
+    assert_eq!(dec_fm["topic"], "gate_skip");
+    assert_eq!(dec_fm["subject_id"], "E12S4");
+    assert_eq!(dec_fm["ruling"], "Manual review approved offline");
+}

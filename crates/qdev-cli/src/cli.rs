@@ -528,6 +528,14 @@ pub struct TransitionArgs {
     /// Target status to transition to
     pub target_status: String,
 
+    /// Skip transition-bound gates (requires justification, interactive TTY, human author)
+    #[arg(long = "skip-gates")]
+    pub skip_gates: bool,
+
+    /// Justification for transition or skipping gates
+    #[arg(long = "justification")]
+    pub justification: Option<String>,
+
     /// Attribution author type override ('human' or 'agent')
     #[arg(long = "author-type")]
     pub author_type: Option<String>,

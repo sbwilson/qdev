@@ -5,7 +5,8 @@ use std::fs;
 use qdev_core::config::{Config, EnvironmentConfig, GateConfig, ModuleConfig};
 use qdev_core::errors::ExitCode;
 use qdev_core::gate::{
-    execute_gate, execute_gate_set, get_gate_list, resolve_gate_execution_order,
+    execute_deps_gate, execute_gate, execute_gate_set, execute_scope_gate, get_gate_list,
+    resolve_gate_execution_order, scan_rust_imports, scan_swift_imports,
     validate_gate_dependencies, GateRunOptions, GateRunOutcome, GateRunSetOutcome, GateStatus,
     HeadTailBuffer,
 };
@@ -1674,5 +1675,204 @@ fn test_get_gate_list_respects_custom_state_dir() {
     assert_eq!(items[0].id, "custom-gate");
     assert_eq!(items[0].last_status.as_deref(), Some("infra"));
 }
+
+#[test]
+fn test_scan_rust_imports() {
+    let code = r#"
+// use commented_out::Foo;
+// line comment with /* block opener should not trigger block comment
+/*
+use block_commented::Bar;
+*/
+use std::collections::HashMap;
+use core::fmt::Debug;
+use alloc::vec::Vec;
+use crate::local::Mod;
+use super::parent::Mod;
+use self::current::Mod;
+pub use target_mod::Item;
+pub(crate) use another_mod::{A, B};
+use third_mod::*;
+"#;
+    let imports = scan_rust_imports(code);
+    assert_eq!(imports.len(), 3);
+    assert_eq!(imports[0].1, "target_mod");
+    assert_eq!(imports[1].1, "another_mod");
+    assert_eq!(imports[2].1, "third_mod");
+}
+
+#[test]
+fn test_scan_swift_imports() {
+    let code = r#"
+// import CommentedOut
+// line comment with /* block opener should not trigger block comment
+/*
+import BlockCommented
+*/
+import Foundation
+@testable import TargetModule
+@_exported import ExportedModule
+@preconcurrency import ConcurrencyModule
+public import PublicModule
+import class SpecificModule.SomeClass
+import struct StructModule.SomeStruct
+"#;
+    let imports = scan_swift_imports(code);
+    assert_eq!(imports.len(), 7);
+    assert_eq!(imports[0].1, "Foundation");
+    assert_eq!(imports[1].1, "TargetModule");
+    assert_eq!(imports[2].1, "ExportedModule");
+    assert_eq!(imports[3].1, "ConcurrencyModule");
+    assert_eq!(imports[4].1, "PublicModule");
+    assert_eq!(imports[5].1, "SpecificModule");
+    assert_eq!(imports[6].1, "StructModule");
+}
+
+#[test]
+fn test_builtin_scope_gate_passing_and_failing() {
+    let temp = setup_test_workspace();
+    let mut config = Config::default();
+    config.git.integration_branch = "main".to_string();
+    config.modules = vec![
+        ModuleConfig {
+            id: "bridge".to_string(),
+            paths: vec!["crates/bridge/**".to_string()],
+            layer: None,
+            may_depend_on: vec![],
+        },
+        ModuleConfig {
+            id: "core".to_string(),
+            paths: vec!["crates/core/**".to_string()],
+            layer: None,
+            may_depend_on: vec![],
+        },
+    ];
+
+    let stories_dir = temp.path().join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    let story_path = stories_dir.join("E12S4.md");
+    fs::write(
+        &story_path,
+        r#"---
+id: E12S4
+title: Test Story
+status: in-progress
+target_modules:
+  - bridge
+constraints:
+  no_go:
+    - id: NG-1
+      statement: "Do not modify auth logic"
+---
+## Acceptance Criteria
+- AC1
+"#,
+    )
+    .unwrap();
+
+    let mut opts = GateRunOptions::default();
+    opts.story = Some("E12S4".to_string());
+
+    // 1. Passing scope check: change inside crates/bridge/
+    let bridge_dir = temp.path().join("crates/bridge");
+    fs::create_dir_all(&bridge_dir).unwrap();
+    fs::write(bridge_dir.join("lib.rs"), "// bridge code\n").unwrap();
+    let outcome = execute_scope_gate(temp.path(), &config, &opts).unwrap();
+    assert_eq!(outcome.status, GateStatus::Pass);
+
+    // 2. Failing scope check citing matching no-go: modify crates/core/auth.rs
+    let core_dir = temp.path().join("crates/core");
+    fs::create_dir_all(&core_dir).unwrap();
+    fs::write(core_dir.join("auth.rs"), "// core auth code\n").unwrap();
+    let outcome_fail = execute_scope_gate(temp.path(), &config, &opts).unwrap();
+    assert_eq!(outcome_fail.status, GateStatus::Fail);
+    assert_eq!(outcome_fail.constraint_ids, vec!["E12S4/NG-1"]);
+    assert_eq!(
+        outcome_fail.failures[0].location,
+        "crates/core/auth.rs"
+    );
+    assert!(outcome_fail.failures[0].message.contains("E12S4/NG-1"));
+
+    // 3. Failing scope check citing policy: modify another file outside target_modules with no matching no-go
+    fs::remove_file(core_dir.join("auth.rs")).unwrap();
+    fs::write(core_dir.join("misc.rs"), "// misc code\n").unwrap();
+    let outcome_policy_fail = execute_scope_gate(temp.path(), &config, &opts).unwrap();
+    assert_eq!(outcome_policy_fail.status, GateStatus::Fail);
+    assert!(outcome_policy_fail.failures[0].message.contains("policy: target_modules"));
+}
+
+#[test]
+fn test_builtin_deps_gate_passing_and_failing() {
+    let temp = setup_test_workspace();
+    let mut config = Config::default();
+    config.modules = vec![
+        ModuleConfig {
+            id: "bridge".to_string(),
+            paths: vec!["crates/bridge/**".to_string()],
+            layer: Some(2),
+            may_depend_on: vec!["foundation".to_string()],
+        },
+        ModuleConfig {
+            id: "foundation".to_string(),
+            paths: vec!["crates/foundation/**".to_string()],
+            layer: Some(1),
+            may_depend_on: vec![],
+        },
+        ModuleConfig {
+            id: "app".to_string(),
+            paths: vec!["crates/app/**".to_string()],
+            layer: Some(3),
+            may_depend_on: vec!["bridge".to_string()],
+        },
+    ];
+
+    let stories_dir = temp.path().join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+    let story_path = stories_dir.join("E12S4.md");
+    fs::write(
+        &story_path,
+        r#"---
+id: E12S4
+title: Test Story
+status: in-progress
+target_modules:
+  - bridge
+---
+## Acceptance Criteria
+- AC1
+"#,
+    )
+    .unwrap();
+
+    let mut opts = GateRunOptions::default();
+    opts.story = Some("E12S4".to_string());
+
+    let bridge_dir = temp.path().join("crates/bridge");
+    fs::create_dir_all(&bridge_dir).unwrap();
+
+    // 1. Pass: bridge imports foundation (layer 2 -> 1, allowed in may_depend_on)
+    fs::write(bridge_dir.join("lib.rs"), "use foundation::Base;\n").unwrap();
+    let outcome = execute_deps_gate(temp.path(), &config, &opts).unwrap();
+    assert_eq!(outcome.status, GateStatus::Pass);
+
+    // 2. Fail: bridge imports undeclared internal module (app is not in may_depend_on)
+    fs::write(bridge_dir.join("lib.rs"), "use app::Something;\n").unwrap();
+    let outcome_fail = execute_deps_gate(temp.path(), &config, &opts).unwrap();
+    assert_eq!(outcome_fail.status, GateStatus::Fail);
+    assert!(outcome_fail.failures[0].message.contains("undeclared dependency"));
+    assert!(outcome_fail.failures[0].message.contains("may_depend_on"));
+
+    // 3. Fail: layer inversion (bridge layer 2 -> app layer 3)
+    config.modules[0].may_depend_on.push("app".to_string());
+    fs::write(bridge_dir.join("lib.rs"), "use app::AppUi;\n").unwrap();
+    let outcome_inversion = execute_deps_gate(temp.path(), &config, &opts).unwrap();
+    assert_eq!(outcome_inversion.status, GateStatus::Fail);
+    assert!(outcome_inversion.failures[0].message.contains("layer inversion"));
+    assert!(
+        outcome_inversion.failures[0].message.contains("layer 2")
+            && outcome_inversion.failures[0].message.contains("layer 3")
+    );
+}
+
 
 
