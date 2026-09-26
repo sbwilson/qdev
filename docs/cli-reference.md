@@ -456,7 +456,7 @@ review = "strongest"
 
 [commit_messages]
 enabled = false                           # opt-in prepare-commit-msg
-format = "conventional"
+format = "conventional"                  # conventional (default) | simple
 
 [environment]
 CARGO_TARGET_DIR = "target/qdev"
@@ -531,6 +531,20 @@ Every `[storage]` value names a directory inside the workspace: an empty value, 
 or one containing `..` is a schema violation (exit 2) from every command. Values are normalized
 once by the loader — surrounding whitespace and a trailing `/` are stripped — so `init` and every
 other command resolve the same directory.
+
+### Commit-message drafts
+
+`[commit_messages]` is opt-in: with its default `enabled = false`, `qdev hook
+prepare-commit-msg` makes no qdev edit. When enabled, it uses the active worktree lease and the
+leased story's on-disk title to draft a message only when Git's message file has no non-comment,
+nonblank content. It never overwrites a message supplied by the developer, and Git comments or
+templates remain in the file.
+
+`format = "conventional"` (the default) writes `feat(E12S4): Story title`; `format = "simple"`
+writes `E12S4: Story title`. Both forms append up to the three most recent scratchpad entries of
+kind `decision` or `tradeoff`, oldest to newest. Any other format is rejected when configuration
+loads. Enabled drafting requires an active lease and a readable leased story; qdev refuses the
+commit rather than writing a contextless message.
 
 ---
 

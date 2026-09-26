@@ -47,6 +47,49 @@ fn setup_workspace(root: &Path) {
     git(root, &["commit", "-m", "initial commit"]);
 }
 
+fn create_story(root: &Path, id: &str, title: &str) {
+    let stories = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories).unwrap();
+    fs::write(
+        stories.join(format!("{id}.md")),
+        format!(
+            r#"---
+id: {id}
+title: "{title}"
+status: in-progress
+version: 1
+owners:
+  - simon
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+"#
+        ),
+    )
+    .unwrap();
+}
+
+fn claim_story(root: &Path, id: &str) {
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["claim", "story", id])
+        .assert()
+        .success();
+}
+
+fn enable_commit_messages(root: &Path, format: &str) {
+    let path = root.join("qdev.toml");
+    let mut config = fs::read_to_string(&path).unwrap();
+    config.push_str(&format!(
+        "\n[commit_messages]\nenabled = true\nformat = \"{format}\"\n"
+    ));
+    fs::write(path, config).unwrap();
+}
+
 #[test]
 fn test_cli_install_hooks_text() {
     let temp = TempDir::new().unwrap();
@@ -416,6 +459,281 @@ fn test_cli_hook_prepare_commit_msg_default_noop_and_legacy_chaining() {
 }
 
 #[test]
+fn test_cli_hook_prepare_commit_msg_drafts_selected_format_and_recent_context() {
+    for (format, expected_header) in [
+        ("simple", "E12S4: Lease-aware title"),
+        ("conventional", "feat(E12S4): Lease-aware title"),
+    ] {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        setup_workspace(root);
+        enable_commit_messages(root, format);
+        create_story(root, "E12S4", "Lease-aware title");
+        claim_story(root, "E12S4");
+
+        let scratch_dir = root.join("docs/state/scratch");
+        fs::create_dir_all(&scratch_dir).unwrap();
+        fs::write(
+            scratch_dir.join("E12S4.jsonl"),
+            concat!(
+                "{\"seq\":1,\"at\":\"2026-01-01T00:00:00Z\",\"author\":{\"type\":\"human\",\"id\":\"simon\"},\"kind\":\"decision\",\"text\":\"first decision\"}\n",
+                "{\"seq\":2,\"at\":\"2026-01-01T00:00:01Z\",\"author\":{\"type\":\"human\",\"id\":\"simon\"},\"kind\":\"note\",\"text\":\"ignored note\"}\n",
+                "{\"seq\":3,\"at\":\"2026-01-01T00:00:02Z\",\"author\":{\"type\":\"human\",\"id\":\"simon\"},\"kind\":\"tradeoff\",\"text\":\"first tradeoff\"}\n",
+                "{\"seq\":4,\"at\":\"2026-01-01T00:00:03Z\",\"author\":{\"type\":\"human\",\"id\":\"simon\"},\"kind\":\"decision\",\"text\":\"second decision\"}\n",
+                "{\"seq\":5,\"at\":\"2026-01-01T00:00:04Z\",\"author\":{\"type\":\"human\",\"id\":\"simon\"},\"kind\":\"tradeoff\",\"text\":\"second tradeoff\"}\n"
+            ),
+        )
+        .unwrap();
+        let message = root.join(".git/COMMIT_EDITMSG");
+        fs::write(&message, "# Git template comment\n").unwrap();
+
+        let mut cmd = Command::cargo_bin("qdev").unwrap();
+        cmd.current_dir(root)
+            .args(["hook", "prepare-commit-msg", ".git/COMMIT_EDITMSG"])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read_to_string(message).unwrap(),
+            format!(
+                "{expected_header}\n\n- first tradeoff\n- second decision\n- second tradeoff\n\n# Git template comment\n"
+            )
+        );
+    }
+}
+
+#[test]
+fn test_cli_hook_prepare_commit_msg_preserves_existing_message_and_requires_context() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    enable_commit_messages(root, "conventional");
+    let message = root.join(".git/COMMIT_EDITMSG");
+    let supplied = "custom message\n\n# keep this comment\n";
+    fs::write(&message, supplied).unwrap();
+
+    let legacy = root.join(".git/hooks/prepare-commit-msg.legacy");
+    fs::write(&legacy, "#!/bin/sh\nexit 91\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&legacy).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&legacy, permissions).unwrap();
+    }
+
+    let mut preserve = Command::cargo_bin("qdev").unwrap();
+    preserve
+        .current_dir(root)
+        .args(["hook", "prepare-commit-msg", ".git/COMMIT_EDITMSG"])
+        .assert()
+        .code(91);
+    assert_eq!(fs::read_to_string(&message).unwrap(), supplied);
+
+    fs::remove_file(&legacy).unwrap();
+    fs::write(&message, "# empty template\n").unwrap();
+    let mut missing_context = Command::cargo_bin("qdev").unwrap();
+    missing_context
+        .current_dir(root)
+        .args(["hook", "prepare-commit-msg", ".git/COMMIT_EDITMSG"])
+        .assert()
+        .code(1);
+    assert_eq!(fs::read_to_string(&message).unwrap(), "# empty template\n");
+
+    create_story(root, "E12S4", "Missing after lease");
+    claim_story(root, "E12S4");
+    fs::remove_file(root.join("docs/specs/stories/E12S4.md")).unwrap();
+    let mut missing_story = Command::cargo_bin("qdev").unwrap();
+    missing_story
+        .current_dir(root)
+        .args(["hook", "prepare-commit-msg", ".git/COMMIT_EDITMSG"])
+        .assert()
+        .code(2);
+    assert_eq!(fs::read_to_string(&message).unwrap(), "# empty template\n");
+}
+
+#[test]
+fn test_cli_hook_prepare_commit_msg_honors_git_comment_character_and_empty_context() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    enable_commit_messages(root, "conventional");
+    create_story(root, "E12S4", "Comment character title");
+    claim_story(root, "E12S4");
+    git(root, &["config", "core.commentChar", ";"]);
+
+    let message = root.join(".git/COMMIT_EDITMSG");
+    fs::write(&message, "; Git template comment\n").unwrap();
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["hook", "prepare-commit-msg", ".git/COMMIT_EDITMSG"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(message).unwrap(),
+        "feat(E12S4): Comment character title\n\n; Git template comment\n"
+    );
+}
+
+#[test]
+fn test_cli_hook_prepare_commit_msg_draft_chains_legacy_hook() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    enable_commit_messages(root, "simple");
+    create_story(root, "E12S4", "No scratchpad title");
+    claim_story(root, "E12S4");
+    let message = root.join(".git/COMMIT_EDITMSG");
+    fs::write(&message, "").unwrap();
+
+    let legacy = root.join(".git/hooks/prepare-commit-msg.legacy");
+    fs::write(&legacy, "#!/bin/sh\nexit 73\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&legacy).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&legacy, permissions).unwrap();
+    }
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["hook", "prepare-commit-msg", ".git/COMMIT_EDITMSG"])
+        .assert()
+        .code(73);
+    assert_eq!(fs::read_to_string(message).unwrap(), "E12S4: No scratchpad title\n");
+}
+
+#[test]
+fn test_cli_hook_prepare_commit_msg_uses_configured_storage_paths() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    let config_path = root.join("qdev.toml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str(
+        "\n[storage]\nspecs_dir = \"planning\"\nstate_dir = \"workspace-state\"\n\n[commit_messages]\nenabled = true\nformat = \"conventional\"\n",
+    );
+    fs::write(&config_path, config).unwrap();
+
+    let stories = root.join("planning/stories");
+    fs::create_dir_all(&stories).unwrap();
+    fs::write(
+        stories.join("E12S4.md"),
+        r#"---
+id: E12S4
+title: "Configured storage title"
+status: in-progress
+version: 1
+owners:
+  - simon
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+"#,
+    )
+    .unwrap();
+    claim_story(root, "E12S4");
+    let scratch = root.join("workspace-state/scratch");
+    fs::create_dir_all(&scratch).unwrap();
+    fs::write(
+        scratch.join("E12S4.jsonl"),
+        "{\"seq\":1,\"at\":\"2026-01-01T00:00:00Z\",\"author\":{\"type\":\"human\",\"id\":\"simon\"},\"kind\":\"decision\",\"text\":\"configured decision\"}\n",
+    )
+    .unwrap();
+    let message = root.join(".git/COMMIT_EDITMSG");
+    fs::write(&message, "").unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["hook", "prepare-commit-msg", ".git/COMMIT_EDITMSG"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(message).unwrap(),
+        "feat(E12S4): Configured storage title\n\n- configured decision\n"
+    );
+}
+
+#[test]
+fn test_cli_hook_prepare_commit_msg_rejects_multiline_story_title() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    enable_commit_messages(root, "conventional");
+    let stories = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories).unwrap();
+    fs::write(
+        stories.join("E12S4.md"),
+        r#"---
+id: E12S4
+title: |
+  First title line
+  Second title line
+status: in-progress
+version: 1
+owners:
+  - simon
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+"#,
+    )
+    .unwrap();
+    claim_story(root, "E12S4");
+    let message = root.join(".git/COMMIT_EDITMSG");
+    fs::write(&message, "# template\n").unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assertion = cmd
+        .current_dir(root)
+        .args(["hook", "prepare-commit-msg", ".git/COMMIT_EDITMSG"])
+        .assert()
+        .code(1);
+    assert!(String::from_utf8_lossy(&assertion.get_output().stderr)
+        .contains("leased_story_title_multiline"));
+    assert_eq!(fs::read_to_string(message).unwrap(), "# template\n");
+}
+
+#[test]
+fn test_cli_hook_prepare_commit_msg_indents_multiline_scratchpad_entries() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    enable_commit_messages(root, "simple");
+    create_story(root, "E12S4", "Multiline scratchpad title");
+    claim_story(root, "E12S4");
+    let scratch = root.join("docs/state/scratch");
+    fs::create_dir_all(&scratch).unwrap();
+    fs::write(
+        scratch.join("E12S4.jsonl"),
+        "{\"seq\":1,\"at\":\"2026-01-01T00:00:00Z\",\"author\":{\"type\":\"human\",\"id\":\"simon\"},\"kind\":\"decision\",\"text\":\"first line\\nsecond line\\nthird line\"}\n",
+    )
+    .unwrap();
+    let message = root.join(".git/COMMIT_EDITMSG");
+    fs::write(&message, "").unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["hook", "prepare-commit-msg", ".git/COMMIT_EDITMSG"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(message).unwrap(),
+        "E12S4: Multiline scratchpad title\n\n- first line\n  second line\n  third line\n"
+    );
+}
+
+#[test]
 fn test_cli_hook_pre_push_stdin_forwarded_to_legacy() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
@@ -492,5 +810,3 @@ fn test_cli_hook_pre_commit_fails_on_hygiene_violation() {
         stderr
     );
 }
-
-

@@ -593,6 +593,13 @@ fn validate_commit_messages_section(val: &toml::Value, filename: &str) -> Result
                 filename,
             ));
         }
+        let format = v.as_str().expect("string checked above");
+        if !matches!(format, "simple" | "conventional") {
+            return Err(QdevError::usage_error(format!(
+                "Invalid commit_messages.format '{}' in '{}'; expected 'simple' or 'conventional'",
+                format, filename
+            )));
+        }
     }
     Ok(())
 }

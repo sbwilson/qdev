@@ -89,7 +89,7 @@ development_status:
   3-8-git-hook-shims-qdev-hook: review
   3-9-hygiene-linter-lint-and-report: review
   3-10-impact-analysis: review
-  3-11-opt-in-commit-messages: backlog
+  3-11-opt-in-commit-messages: review
   3-12-soup-audit-sbom: backlog
   3-13-epic-sprint-reviews-sprint-close: backlog
   epic-3-retrospective: optional

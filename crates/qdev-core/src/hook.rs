@@ -12,8 +12,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::errors::QdevError;
+use crate::lease::find_active_lease_with_storage;
 use crate::preflight::{run_preflight, PreflightOptions, PreflightStatus};
+use crate::schema::extract_frontmatter;
+use crate::schema::EntityKind;
+use crate::scratch::read_scratch_entries;
 use crate::store::Store;
+use crate::write::{resolve_entity_file, write_file_atomic};
 
 /// The canonical expected git hook names managed by qdev.
 pub const EXPECTED_HOOKS: &[&str] = &["pre-commit", "pre-push", "prepare-commit-msg"];
@@ -560,8 +565,6 @@ pub fn run_prepare_commit_msg(
     args: &[String],
 ) -> Result<Option<i32>, QdevError> {
     if config.commit_messages.enabled {
-        // Story 3.11 will implement full draft generation.
-        // If target file is provided and empty, draft placeholder message.
         if let Some(target_file) = args.first() {
             let target_path = PathBuf::from(target_file);
             let p = if target_path.is_absolute() {
@@ -570,20 +573,174 @@ pub fn run_prepare_commit_msg(
                 workspace_root.join(target_path)
             };
             if p.exists() {
-                let existing = fs::read_to_string(&p).unwrap_or_default();
-                let non_comment_lines: Vec<&str> = existing
+                let existing = fs::read_to_string(&p).map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "commit_message_read_failed",
+                        format!(
+                            "Failed to read commit message file '{}': {}",
+                            p.display(),
+                            e
+                        ),
+                    )
+                })?;
+                let comment_char = git_comment_char(workspace_root)?;
+                let has_message_content = existing
                     .lines()
-                    .filter(|l| !l.trim().starts_with('#'))
-                    .filter(|l| !l.trim().is_empty())
-                    .collect();
-                if non_comment_lines.is_empty() {
-                    // Draft message if empty
-                    let _ = fs::write(&p, format!("chore: update\n\n{}", existing));
+                    .filter(|l| !l.trim_start().starts_with(comment_char))
+                    .any(|l| !l.trim().is_empty());
+                if !has_message_content {
+                    let draft = build_commit_message_draft(workspace_root, config)?;
+                    let current = fs::read_to_string(&p).map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "commit_message_read_failed",
+                            format!("Failed to reread commit message file '{}': {}", p.display(), e),
+                        )
+                    })?;
+                    if current != existing {
+                        return Err(QdevError::conflict(
+                            "commit_message_changed",
+                            format!("Commit message file '{}' changed while qdev prepared its draft", p.display()),
+                        ));
+                    }
+                    let mut content = if existing.is_empty() {
+                        draft
+                    } else {
+                        format!("{}\n\n{}", draft, existing)
+                    };
+                    if !content.ends_with('\n') {
+                        content.push('\n');
+                    }
+                    write_file_atomic(&p, &content)?;
                 }
             }
         }
     }
 
     let hooks_dir = resolve_hooks_dir(workspace_root)?;
-    run_legacy_hook(workspace_root, &hooks_dir, "prepare-commit-msg", args, false)
+    run_legacy_hook(
+        workspace_root,
+        &hooks_dir,
+        "prepare-commit-msg",
+        args,
+        false,
+    )
+}
+
+fn git_comment_char(workspace_root: &Path) -> Result<char, QdevError> {
+    let output = Command::new("git")
+        .args(["config", "--get", "core.commentChar"])
+        .current_dir(workspace_root)
+        .output()
+        .map_err(|e| QdevError::infrastructure_failure("git_unavailable", format!("Failed to read Git comment character: {}", e)))?;
+    if !output.status.success() {
+        return Ok('#');
+    }
+    let configured = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if configured.is_empty() || configured == "auto" {
+        return Ok('#');
+    }
+    configured.chars().next().ok_or_else(|| {
+        QdevError::usage_error("Git core.commentChar must contain a comment character")
+    })
+}
+
+fn build_commit_message_draft(workspace_root: &Path, config: &Config) -> Result<String, QdevError> {
+    let format = config.commit_messages.format.as_str();
+    if !matches!(format, "simple" | "conventional") {
+        return Err(QdevError::usage_error(format!(
+            "Invalid commit_messages.format '{}'; expected 'simple' or 'conventional'",
+            format
+        )));
+    }
+
+    let lease = find_active_lease_with_storage(workspace_root, Some(&config.storage))?;
+    let (_, story_id, story_path) = resolve_entity_file(
+        workspace_root,
+        Some(EntityKind::Story),
+        &lease.story_id,
+        Some(&config.storage),
+    )?;
+    let story = fs::read_to_string(&story_path).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "leased_story_read_failed",
+            format!(
+                "Failed to read leased story '{}': {}",
+                story_path.display(),
+                e
+            ),
+        )
+    })?;
+    let frontmatter = extract_frontmatter(&story).map_err(|e| {
+        QdevError::logical_failure(
+            "leased_story_frontmatter_invalid",
+            format!(
+                "Failed to parse leased story '{}': {}",
+                story_path.display(),
+                e
+            ),
+        )
+    })?;
+    let title = frontmatter
+        .get("title")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            QdevError::logical_failure(
+                "leased_story_title_missing",
+                format!(
+                    "Leased story '{}' has no readable title",
+                    story_path.display()
+                ),
+            )
+        })?;
+    if title.contains('\r') || title.contains('\n') {
+        return Err(QdevError::logical_failure(
+            "leased_story_title_multiline",
+            format!("Leased story '{}' has a multiline title", story_path.display()),
+        ));
+    }
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(QdevError::logical_failure(
+            "leased_story_title_missing",
+            format!("Leased story '{}' has no readable title", story_path.display()),
+        ));
+    }
+
+    let header = match format {
+        "simple" => format!("{}: {}", story_id, title),
+        "conventional" => format!("feat({}): {}", story_id, title),
+        _ => unreachable!("format validated above"),
+    };
+    let entries = read_scratch_entries(workspace_root, Some(&config.storage), &story_id)?;
+    let qualifying: Vec<_> = entries
+        .into_iter()
+        .filter(|entry| entry.kind == "decision" || entry.kind == "tradeoff")
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    if qualifying.is_empty() {
+        return Ok(header);
+    }
+
+    let body = qualifying
+        .iter()
+        .map(|entry| render_scratchpad_bullet(&entry.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(format!("{}\n\n{}", header, body))
+}
+
+fn render_scratchpad_bullet(text: &str) -> String {
+    let mut lines = text.lines();
+    let first = lines.next().unwrap_or_default();
+    let mut rendered = format!("- {}", first);
+    for line in lines {
+        rendered.push_str("\n  ");
+        rendered.push_str(line);
+    }
+    rendered
 }

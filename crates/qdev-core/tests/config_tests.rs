@@ -1024,3 +1024,42 @@ fn test_storage_paths_are_normalized_by_the_loader() {
     assert_eq!(cfg.config.storage.specs_dir, "planning/specs");
     assert_eq!(cfg.config.storage.cache_dir, "var/cache");
 }
+
+#[test]
+fn test_commit_message_formats_accept_defaults_and_supported_values() {
+    for section in [
+        "",
+        "[commit_messages]\n",
+        "[commit_messages]\nformat = \"simple\"\n",
+        "[commit_messages]\nformat = \"conventional\"\n",
+    ] {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::write(root.join("qdev.toml"), section).unwrap();
+
+        let config = load_config(root).expect("supported commit-message configuration must load");
+        assert!(!config.config.commit_messages.enabled);
+        if section.contains("simple") {
+            assert_eq!(config.config.commit_messages.format, "simple");
+        } else {
+            assert_eq!(config.config.commit_messages.format, "conventional");
+        }
+    }
+}
+
+#[test]
+fn test_commit_message_format_rejects_unsupported_value() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    fs::write(
+        root.join("qdev.toml"),
+        "[commit_messages]\nenabled = true\nformat = \"gitmoji\"\n",
+    )
+    .unwrap();
+
+    let err = load_config(root).expect_err("unsupported commit-message format must be rejected");
+    assert_eq!(err.exit_code(), ExitCode::UsageError);
+    assert!(err.message().contains("commit_messages.format"));
+    assert!(err.message().contains("simple"));
+    assert!(err.message().contains("conventional"));
+}
