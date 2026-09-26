@@ -455,4 +455,42 @@ fn test_cli_hook_pre_push_stdin_forwarded_to_legacy() {
     assert_eq!(captured, test_input);
 }
 
+#[test]
+fn test_cli_hook_pre_commit_fails_on_hygiene_violation() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    // Create a new branch
+    git(root, &["checkout", "-b", "feature/bad-hygiene"]);
+
+    // Create a staged Rust file with hygiene violation (story banner)
+    let dirty_file = root.join("src/dirty.rs");
+    fs::create_dir_all(dirty_file.parent().unwrap()).unwrap();
+    fs::write(
+        &dirty_file,
+        "// ⭐ STORY 2.10 - bad comment\nfn run() {}\n",
+    )
+    .unwrap();
+
+    git(root, &["add", "src/dirty.rs"]);
+
+    // Run `qdev hook pre-commit`
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["hook", "pre-commit"])
+        .assert()
+        .code(1);
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stderr.contains("hygiene_failure") || stdout.contains("hygiene_failure"),
+        "stderr/stdout must mention hygiene_failure: stdout='{}', stderr='{}'",
+        stdout,
+        stderr
+    );
+}
+
 

@@ -342,7 +342,26 @@ impl PreTransitionHook for TransitionGateHook {
             }
         }
 
-        // 3. External gates configured with on_transition = ["review"]
+        // 3. Built-in qdev-hygiene
+        if !review_gate_ids.iter().any(|id| id == crate::gate::BUILTIN_GATE_HYGIENE) {
+            let hygiene_outcome = crate::gate::execute_hygiene_gate(
+                &ctx.workspace_root,
+                &self.config,
+                &gate_options,
+            )?;
+
+            if hygiene_outcome.status == crate::gate::GateStatus::Fail {
+                let payload = serde_json::to_value(hygiene_outcome.to_payload()).unwrap_or_default();
+                return Err(QdevError::logical_failure("gate_failed", hygiene_outcome.summary)
+                    .with_details(payload));
+            } else if hygiene_outcome.status == crate::gate::GateStatus::Infra {
+                let payload = serde_json::to_value(hygiene_outcome.to_payload()).unwrap_or_default();
+                return Err(QdevError::infrastructure_failure("gate_infra_failure", hygiene_outcome.summary)
+                    .with_details(payload));
+            }
+        }
+
+        // 4. External gates configured with on_transition = ["review"]
         if !review_gate_ids.is_empty() {
             let execution_order = crate::gate::resolve_gate_execution_order(
                 &self.config.gates,

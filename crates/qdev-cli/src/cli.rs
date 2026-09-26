@@ -145,6 +145,10 @@ pub struct HygieneCheckArgs {
     #[arg(long)]
     pub diff: bool,
 
+    /// Automatically fix hygiene findings (deferred in v1)
+    #[arg(long)]
+    pub fix: bool,
+
     /// Target paths to inspect
     #[arg(value_name = "PATHS")]
     pub paths: Vec<String>,

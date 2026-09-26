@@ -1,3 +1,4 @@
+pub mod hygiene;
 pub mod chore;
 pub mod config;
 pub mod dag;
@@ -26,6 +27,12 @@ pub mod transition;
 pub mod validate;
 pub mod write;
 
+pub use hygiene::{
+    check_hygiene, lint_comments, tokenize_comments, CommentKind, CommentLine, CommentToken,
+    HygieneCheckOptions, HygieneCheckOutcome, HygieneFinding, HygieneLinter, SupportedLanguage,
+    RULE_FORBID_PATTERNS, RULE_MAX_INLINE_COMMENT_LINES, RULE_REVIEW_ROUND, RULE_STORY_BANNER,
+};
+
 pub use preflight::{
     check_branch_freshness, check_validation_health, check_working_tree_scope,
     format_preflight_text, is_metadata_exempt, resolve_story_target_modules, run_preflight,
@@ -33,15 +40,16 @@ pub use preflight::{
 };
 
 pub use gate::{
-    evaluate_ratchet, execute_deps_gate, execute_gate, execute_gate_set, execute_scope_gate,
-    format_duration, format_metric_number, get_gate_list, parse_with_adapter, read_baseline,
-    resolve_baseline_path, resolve_commit_sha, resolve_collision_free_evidence_path,
-    resolve_gate_execution_order, scan_rust_imports, scan_swift_imports, validate_adapter_name,
-    validate_gate_dependencies, write_baseline, write_evidence_bundle, EvidenceBundle,
-    GateBaselinePayload, GateFailure, GateListItem, GateListPayload, GateResultDocument,
-    GateRunOptions, GateRunOutcome, GateRunPayload, GateRunSetOutcome, GateRunSetPayload,
-    GateStatus, HeadTailBuffer, RatchetBaseline, RatchetDirection, RatchetEvaluation,
-    BUILTIN_GATE_DEPS, BUILTIN_GATE_SCOPE, VALID_ADAPTERS,
+    evaluate_ratchet, execute_deps_gate, execute_gate, execute_gate_set, execute_hygiene_gate,
+    execute_scope_gate, format_duration, format_metric_number, get_gate_list, parse_with_adapter,
+    read_baseline, resolve_baseline_path, resolve_commit_sha,
+    resolve_collision_free_evidence_path, resolve_gate_execution_order, scan_rust_imports,
+    scan_swift_imports, validate_adapter_name, validate_gate_dependencies, write_baseline,
+    write_evidence_bundle, EvidenceBundle, GateBaselinePayload, GateFailure, GateListItem,
+    GateListPayload, GateResultDocument, GateRunOptions, GateRunOutcome, GateRunPayload,
+    GateRunSetOutcome, GateRunSetPayload, GateStatus, HeadTailBuffer, RatchetBaseline,
+    RatchetDirection, RatchetEvaluation, BUILTIN_GATE_DEPS, BUILTIN_GATE_HYGIENE,
+    BUILTIN_GATE_SCOPE, VALID_ADAPTERS,
 };
 
 pub use chore::{

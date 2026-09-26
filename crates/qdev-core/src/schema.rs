@@ -168,6 +168,7 @@ pub enum PayloadKind {
     GateBaseline,
     Preflight,
     HookInstall,
+    Hygiene,
 }
 
 impl PayloadKind {
@@ -193,6 +194,7 @@ impl PayloadKind {
             PayloadKind::GateBaseline => include_str!("../schemas/payload-gate-baseline.json"),
             PayloadKind::Preflight => include_str!("../schemas/payload-preflight.json"),
             PayloadKind::HookInstall => include_str!("../schemas/payload-hook-install.json"),
+            PayloadKind::Hygiene => include_str!("../schemas/payload-hygiene.json"),
         }
     }
 
@@ -229,11 +231,12 @@ impl PayloadKind {
             PayloadKind::GateBaseline => "gate_baseline",
             PayloadKind::Preflight => "preflight",
             PayloadKind::HookInstall => "hook_install",
+            PayloadKind::Hygiene => "hygiene",
         }
     }
 
     /// Returns an array of all currently-supported payload kinds.
-    pub const fn all() -> &'static [PayloadKind; 19] {
+    pub const fn all() -> &'static [PayloadKind; 20] {
         &[
             PayloadKind::Story,
             PayloadKind::Error,
@@ -254,6 +257,7 @@ impl PayloadKind {
             PayloadKind::GateBaseline,
             PayloadKind::Preflight,
             PayloadKind::HookInstall,
+            PayloadKind::Hygiene,
         ]
     }
 
@@ -295,6 +299,7 @@ impl PayloadKind {
             "hook_install" | "hookinstall" | "hooks_install" | "install_hooks" => {
                 Ok(PayloadKind::HookInstall)
             }
+            "hygiene" | "hygiene_check" => Ok(PayloadKind::Hygiene),
             _ => Err(QdevError::usage_error(format!(
                 "Unknown payload name '{}'. Valid payload names: {}",
                 s,

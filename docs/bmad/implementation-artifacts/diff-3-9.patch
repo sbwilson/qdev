@@ -1,0 +1,3076 @@
+diff --git a/crates/qdev-cli/src/cli.rs b/crates/qdev-cli/src/cli.rs
+index e1c3879..c1b5449 100644
+--- a/crates/qdev-cli/src/cli.rs
++++ b/crates/qdev-cli/src/cli.rs
+@@ -145,6 +145,10 @@ pub struct HygieneCheckArgs {
+     #[arg(long)]
+     pub diff: bool,
+ 
++    /// Automatically fix hygiene findings (deferred in v1)
++    #[arg(long)]
++    pub fix: bool,
++
+     /// Target paths to inspect
+     #[arg(value_name = "PATHS")]
+     pub paths: Vec<String>,
+diff --git a/crates/qdev-cli/src/handlers/hygiene.rs b/crates/qdev-cli/src/handlers/hygiene.rs
+index b2a23fd..40e6fc7 100644
+--- a/crates/qdev-cli/src/handlers/hygiene.rs
++++ b/crates/qdev-cli/src/handlers/hygiene.rs
+@@ -1,43 +1,76 @@
+ //! CLI handler for `qdev hygiene`.
+ //!
+-//! Provides a stub implementation for Story 3.8 until full comment linting
+-//! is introduced in Story 3.9.
++//! Provides comment hygiene linting, JSON/text reporting, and diff support.
+ 
+ use std::path::Path;
+ 
+-use qdev_core::{ExitCode, JsonEnvelope};
+-use serde::{Deserialize, Serialize};
++use qdev_core::{
++    check_hygiene, find_workspace_root, ExitCode, HygieneCheckOptions, JsonEnvelope, QdevError,
++};
+ 
+ use crate::cli;
+ use crate::output::OutputEmitter;
+ use crate::Cli;
+ 
+-#[derive(Debug, Clone, Serialize, Deserialize)]
+-pub struct HygienePayload {
+-    pub status: String,
+-    pub findings: Vec<String>,
+-}
+-
+ pub fn handle_hygiene(
+     hygiene_args: &cli::HygieneArgs,
+-    _annotated_config: &qdev_core::AnnotatedConfig,
++    annotated_config: &qdev_core::AnnotatedConfig,
+     cli: &Cli,
+     output: &OutputEmitter,
+-    _current_dir: &Path,
++    current_dir: &Path,
+ ) -> ExitCode {
+     match hygiene_args.command {
+-        cli::HygieneCommands::Check(ref _check_args) => {
++        cli::HygieneCommands::Check(ref check_args) => {
++            // --fix exits 2 (ExitCode::UsageError) with a message that auto-fix is deferred
++            if check_args.fix {
++                let err = QdevError::usage_error("Automatic fixing with --fix is deferred to v2");
++                let _ = output.emit_error(&err);
++                return ExitCode::UsageError;
++            }
++
++            let workspace_root = find_workspace_root(current_dir);
++
++            let options = HygieneCheckOptions {
++                diff: check_args.diff,
++                paths: check_args.paths.clone(),
++            };
++
++            let outcome = match check_hygiene(&workspace_root, &annotated_config.config, &options) {
++                Ok(o) => o,
++                Err(e) => {
++                    let _ = output.emit_error(&e);
++                    return e.exit_code();
++                }
++            };
++
+             if cli.json {
+-                let payload = HygienePayload {
+-                    status: "pass".to_string(),
+-                    findings: Vec::new(),
+-                };
+-                let envelope = JsonEnvelope::new(payload);
++                let envelope = JsonEnvelope::new(outcome.clone());
+                 let _ = output.emit_envelope(&envelope);
+             } else {
+-                let _ = output.emit_text("Hygiene check: 0 findings\n");
++                if outcome.findings.is_empty() {
++                    let _ = output.emit_text("Hygiene check: 0 findings");
++                } else {
++                    let mut text = String::new();
++                    for finding in &outcome.findings {
++                        text.push_str(&format!(
++                            "{}: [{}] {}\n",
++                            finding.location, finding.rule_id, finding.excerpt
++                        ));
++                    }
++                    let count_str = match outcome.findings.len() {
++                        1 => "1 finding".to_string(),
++                        n => format!("{} findings", n),
++                    };
++                    text.push_str(&format!("\nHygiene check: {}", count_str));
++                    let _ = output.emit_text(text.trim_end_matches('\n'));
++                }
++            }
++
++            if outcome.findings.is_empty() {
++                ExitCode::Success
++            } else {
++                ExitCode::LogicalFailure
+             }
+-            ExitCode::Success
+         }
+     }
+ }
+diff --git a/crates/qdev-cli/tests/hook_cli_tests.rs b/crates/qdev-cli/tests/hook_cli_tests.rs
+index a3f428e..63e99e6 100644
+--- a/crates/qdev-cli/tests/hook_cli_tests.rs
++++ b/crates/qdev-cli/tests/hook_cli_tests.rs
+@@ -455,4 +455,42 @@ fn test_cli_hook_pre_push_stdin_forwarded_to_legacy() {
+     assert_eq!(captured, test_input);
+ }
+ 
++#[test]
++fn test_cli_hook_pre_commit_fails_on_hygiene_violation() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Create a new branch
++    git(root, &["checkout", "-b", "feature/bad-hygiene"]);
++
++    // Create a staged Rust file with hygiene violation (story banner)
++    let dirty_file = root.join("src/dirty.rs");
++    fs::create_dir_all(dirty_file.parent().unwrap()).unwrap();
++    fs::write(
++        &dirty_file,
++        "// ⭐ STORY 2.10 - bad comment\nfn run() {}\n",
++    )
++    .unwrap();
++
++    git(root, &["add", "src/dirty.rs"]);
++
++    // Run `qdev hook pre-commit`
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["hook", "pre-commit"])
++        .assert()
++        .code(1);
++
++    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
++    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
++    assert!(
++        stderr.contains("hygiene_failure") || stdout.contains("hygiene_failure"),
++        "stderr/stdout must mention hygiene_failure: stdout='{}', stderr='{}'",
++        stdout,
++        stderr
++    );
++}
++
+ 
+diff --git a/crates/qdev-core/src/gate/mod.rs b/crates/qdev-core/src/gate/mod.rs
+index e052caf..5a8c0bc 100644
+--- a/crates/qdev-core/src/gate/mod.rs
++++ b/crates/qdev-core/src/gate/mod.rs
+@@ -18,9 +18,10 @@ pub use adapter::{parse_with_adapter, validate_adapter_name, VALID_ADAPTERS};
+ pub use result::GateResultDocument;
+ pub use ring_buffer::HeadTailBuffer;
+ pub use runner::{
+-    execute_deps_gate, execute_gate, execute_gate_set, execute_scope_gate, get_gate_list,
+-    resolve_commit_sha, resolve_gate_execution_order, scan_rust_imports, scan_swift_imports,
+-    validate_gate_dependencies, GateRunOptions, BUILTIN_GATE_DEPS, BUILTIN_GATE_SCOPE,
++    execute_deps_gate, execute_gate, execute_gate_set, execute_hygiene_gate, execute_scope_gate,
++    get_gate_list, resolve_commit_sha, resolve_gate_execution_order, scan_rust_imports,
++    scan_swift_imports, validate_gate_dependencies, GateRunOptions, BUILTIN_GATE_DEPS,
++    BUILTIN_GATE_HYGIENE, BUILTIN_GATE_SCOPE,
+ };
+ 
+ /// Gate execution status taxonomy conforming to AD-5 and compliance & safety specification.
+diff --git a/crates/qdev-core/src/gate/runner.rs b/crates/qdev-core/src/gate/runner.rs
+index d06da06..b726660 100644
+--- a/crates/qdev-core/src/gate/runner.rs
++++ b/crates/qdev-core/src/gate/runner.rs
+@@ -22,6 +22,14 @@ use crate::write::resolve_entity_file;
+ 
+ pub const BUILTIN_GATE_SCOPE: &str = "qdev-scope";
+ pub const BUILTIN_GATE_DEPS: &str = "qdev-deps";
++pub const BUILTIN_GATE_HYGIENE: &str = "qdev-hygiene";
++
++pub fn is_builtin_gate(gate_id: &str) -> bool {
++    matches!(
++        gate_id,
++        BUILTIN_GATE_SCOPE | BUILTIN_GATE_DEPS | BUILTIN_GATE_HYGIENE
++    )
++}
+ 
+ /// Execution options for running a gate.
+ #[derive(Debug, Clone, Default)]
+@@ -350,6 +358,9 @@ pub fn execute_gate(
+     if gate_id == BUILTIN_GATE_DEPS {
+         return execute_deps_gate(workspace_root, config, options);
+     }
++    if gate_id == BUILTIN_GATE_HYGIENE {
++        return execute_hygiene_gate(workspace_root, config, options);
++    }
+ 
+     let gate_config = config
+         .gates
+@@ -1156,7 +1167,7 @@ pub fn validate_gate_dependencies(gates: &[GateConfig]) -> Result<(), QdevError>
+     // Check for dangling or unknown dependencies
+     for gate in gates {
+         for dep in &gate.depends_on {
+-            if !known_ids.contains(dep.as_str()) {
++            if !known_ids.contains(dep.as_str()) && !is_builtin_gate(dep) {
+                 return Err(QdevError::usage_error(format!(
+                     "gate '{}' depends on unknown gate '{}'",
+                     gate.id, dep
+@@ -1192,8 +1203,30 @@ pub fn resolve_gate_execution_order(
+ ) -> Result<Vec<String>, QdevError> {
+     validate_gate_dependencies(gates)?;
+ 
+-    let gate_map: std::collections::HashMap<&str, &GateConfig> =
++    let mut default_builtins = Vec::new();
++    for builtin in &[BUILTIN_GATE_SCOPE, BUILTIN_GATE_DEPS, BUILTIN_GATE_HYGIENE] {
++        if !gates.iter().any(|g| g.id == *builtin) {
++            default_builtins.push(GateConfig {
++                id: (*builtin).to_string(),
++                command: None,
++                timeout_ms: None,
++                depends_on: Vec::new(),
++                output_adapter: None,
++                on_transition: vec!["review".to_string()],
++                verifies: Vec::new(),
++                kind: Some("builtin".to_string()),
++                metric: None,
++                direction: None,
++                skip: None,
++            });
++        }
++    }
++
++    let mut gate_map: std::collections::HashMap<&str, &GateConfig> =
+         gates.iter().map(|g| (g.id.as_str(), g)).collect();
++    for b in &default_builtins {
++        gate_map.insert(b.id.as_str(), b);
++    }
+ 
+     // 1. Determine the subset of gates to execute
+     let selected_ids: std::collections::HashSet<String> = match target_gate_ids {
+@@ -1201,7 +1234,7 @@ pub fn resolve_gate_execution_order(
+             let mut visited = std::collections::HashSet::new();
+             let mut queue = std::collections::VecDeque::new();
+             for target in targets {
+-                if !gate_map.contains_key(target.as_str()) {
++                if !gate_map.contains_key(target.as_str()) && !is_builtin_gate(target) {
+                     return Err(QdevError::usage_error(format!(
+                         "gate '{}' not found in configuration",
+                         target
+@@ -1249,11 +1282,14 @@ pub fn resolve_gate_execution_order(
+     }
+ 
+     // Declaration order index for tie breaking
+-    let order_index: std::collections::HashMap<&str, usize> = gates
++    let mut order_index: std::collections::HashMap<&str, usize> = gates
+         .iter()
+         .enumerate()
+         .map(|(idx, g)| (g.id.as_str(), idx))
+         .collect();
++    for (idx, b) in default_builtins.iter().enumerate() {
++        order_index.insert(b.id.as_str(), gates.len() + idx);
++    }
+ 
+     // 3. Kahn's algorithm
+     let mut remaining: std::collections::HashSet<&str> =
+@@ -1314,9 +1350,32 @@ pub fn execute_gate_set(
+         .collect();
+ 
+     for gate_id in gate_ids {
+-        let gate_config = gate_configs.get(gate_id.as_str()).ok_or_else(|| {
+-            QdevError::usage_error(format!("gate '{}' not found in configuration", gate_id))
+-        })?;
++        let fallback_gate;
++        let gate_config = match gate_configs.get(gate_id.as_str()) {
++            Some(&cfg) => cfg,
++            None if is_builtin_gate(gate_id) => {
++                fallback_gate = GateConfig {
++                    id: gate_id.clone(),
++                    command: None,
++                    timeout_ms: None,
++                    depends_on: Vec::new(),
++                    output_adapter: None,
++                    on_transition: vec!["review".to_string()],
++                    verifies: Vec::new(),
++                    kind: Some("builtin".to_string()),
++                    metric: None,
++                    direction: None,
++                    skip: None,
++                };
++                &fallback_gate
++            }
++            None => {
++                return Err(QdevError::usage_error(format!(
++                    "gate '{}' not found in configuration",
++                    gate_id
++                )));
++            }
++        };
+ 
+         // Check if any direct dependency failed (Fail, Infra, or non-local Skip)
+         let mut failed_dep = None;
+@@ -1462,7 +1521,9 @@ pub fn get_gate_list(
+     }
+ 
+     let mut items = Vec::new();
++    let mut listed_ids = std::collections::HashSet::new();
+     for gate_config in &config.gates {
++        listed_ids.insert(gate_config.id.clone());
+         let last_status = gate_latest
+             .get(&gate_config.id)
+             .map(|(_, status)| status.clone());
+@@ -2355,3 +2416,168 @@ pub fn execute_deps_gate(
+     })
+ }
+ 
++/// Executes the built-in `qdev-hygiene` verification gate.
++pub fn execute_hygiene_gate(
++    workspace_root: &Path,
++    config: &Config,
++    options: &GateRunOptions,
++) -> Result<GateRunOutcome, QdevError> {
++    let start_time = Instant::now();
++    let commit_sha = resolve_commit_sha(workspace_root);
++    let story_id = resolve_story_id(workspace_root, config, options);
++
++    let configured_gate = config.gates.iter().find(|g| g.id == BUILTIN_GATE_HYGIENE);
++    if configured_gate.and_then(|g| g.skip) == Some(true) {
++        let gate_cfg = configured_gate.cloned().unwrap_or_else(|| GateConfig {
++            id: BUILTIN_GATE_HYGIENE.to_string(),
++            command: None,
++            timeout_ms: None,
++            depends_on: Vec::new(),
++            output_adapter: None,
++            on_transition: vec!["review".to_string()],
++            verifies: Vec::new(),
++            kind: Some("builtin".to_string()),
++            metric: None,
++            direction: None,
++            skip: Some(true),
++        });
++        let evidence_path = record_gate_evidence(
++            workspace_root,
++            config,
++            &gate_cfg,
++            story_id.as_deref(),
++            commit_sha.as_deref(),
++            "pass",
++            0,
++            0,
++            None,
++            "skipped_locally",
++            None,
++            None,
++            true,
++        )?;
++        return Ok(GateRunOutcome {
++            gate_id: BUILTIN_GATE_HYGIENE.to_string(),
++            status: GateStatus::Skip,
++            exit_code: 0,
++            duration_ms: 0,
++            summary: "skipped_locally".to_string(),
++            skipped_locally: true,
++            commit_sha,
++            story_id,
++            stdout: None,
++            stderr: None,
++            agent_instruction: None,
++            failures: Vec::new(),
++            metric: None,
++            constraint_ids: Vec::new(),
++            evidence_path: Some(evidence_path),
++        });
++    }
++
++    let is_git = Command::new("git")
++        .args(["rev-parse", "--is-inside-work-tree"])
++        .current_dir(workspace_root)
++        .output()
++        .map(|o| o.status.success())
++        .unwrap_or(false);
++
++    let hygiene_options = crate::hygiene::HygieneCheckOptions {
++        diff: is_git,
++        paths: Vec::new(),
++    };
++    let hygiene_outcome = crate::hygiene::check_hygiene(workspace_root, config, &hygiene_options)?;
++
++    let duration_ms = start_time.elapsed().as_millis() as u64;
++
++    let failures: Vec<GateFailure> = hygiene_outcome
++        .findings
++        .iter()
++        .map(|f| GateFailure {
++            location: f.location.clone(),
++            message: format!("[{}] {}", f.rule_id, f.excerpt),
++        })
++        .collect();
++
++    let (status, exit_code, summary, agent_instruction) = if failures.is_empty() {
++        (
++            GateStatus::Pass,
++            0,
++            "hygiene check passed: 0 findings".to_string(),
++            None,
++        )
++    } else {
++        (
++            GateStatus::Fail,
++            1,
++            format!("hygiene check failed with {} finding(s)", failures.len()),
++            Some("fix_cited_failures".to_string()),
++        )
++    };
++
++    let hygiene_gate_config = configured_gate.cloned().unwrap_or_else(|| GateConfig {
++        id: BUILTIN_GATE_HYGIENE.to_string(),
++        command: None,
++        timeout_ms: None,
++        depends_on: Vec::new(),
++        output_adapter: None,
++        on_transition: vec!["review".to_string()],
++        verifies: Vec::new(),
++        kind: Some("builtin".to_string()),
++        metric: None,
++        direction: None,
++        skip: None,
++    });
++
++    let ev_status = match status {
++        GateStatus::Pass => "pass",
++        GateStatus::Fail => "fail",
++        GateStatus::Infra => "infra",
++        GateStatus::Skip => "pass",
++    };
++
++    let output_text = if failures.is_empty() {
++        summary.clone()
++    } else {
++        let failure_lines: Vec<String> = failures
++            .iter()
++            .map(|f| format!("{}: {}", f.location, f.message))
++            .collect();
++        format!("{}\n{}", summary, failure_lines.join("\n"))
++    };
++
++    let evidence_path = record_gate_evidence(
++        workspace_root,
++        config,
++        &hygiene_gate_config,
++        story_id.as_deref(),
++        commit_sha.as_deref(),
++        ev_status,
++        exit_code,
++        duration_ms,
++        None,
++        &summary,
++        Some(&output_text),
++        None,
++        false,
++    )?;
++
++    Ok(GateRunOutcome {
++        gate_id: BUILTIN_GATE_HYGIENE.to_string(),
++        status,
++        exit_code,
++        duration_ms,
++        summary,
++        skipped_locally: false,
++        commit_sha,
++        story_id,
++        stdout: None,
++        stderr: None,
++        agent_instruction,
++        failures,
++        metric: None,
++        constraint_ids: Vec::new(),
++        evidence_path: Some(evidence_path),
++    })
++}
++
+diff --git a/crates/qdev-core/src/lib.rs b/crates/qdev-core/src/lib.rs
+index 86d0a71..40790e6 100644
+--- a/crates/qdev-core/src/lib.rs
++++ b/crates/qdev-core/src/lib.rs
+@@ -1,3 +1,4 @@
++pub mod hygiene;
+ pub mod chore;
+ pub mod config;
+ pub mod dag;
+@@ -26,6 +27,12 @@ pub mod transition;
+ pub mod validate;
+ pub mod write;
+ 
++pub use hygiene::{
++    check_hygiene, lint_comments, tokenize_comments, CommentKind, CommentLine, CommentToken,
++    HygieneCheckOptions, HygieneCheckOutcome, HygieneFinding, HygieneLinter, SupportedLanguage,
++    RULE_FORBID_PATTERNS, RULE_MAX_INLINE_COMMENT_LINES, RULE_REVIEW_ROUND, RULE_STORY_BANNER,
++};
++
+ pub use preflight::{
+     check_branch_freshness, check_validation_health, check_working_tree_scope,
+     format_preflight_text, is_metadata_exempt, resolve_story_target_modules, run_preflight,
+@@ -33,15 +40,16 @@ pub use preflight::{
+ };
+ 
+ pub use gate::{
+-    evaluate_ratchet, execute_deps_gate, execute_gate, execute_gate_set, execute_scope_gate,
+-    format_duration, format_metric_number, get_gate_list, parse_with_adapter, read_baseline,
+-    resolve_baseline_path, resolve_commit_sha, resolve_collision_free_evidence_path,
+-    resolve_gate_execution_order, scan_rust_imports, scan_swift_imports, validate_adapter_name,
+-    validate_gate_dependencies, write_baseline, write_evidence_bundle, EvidenceBundle,
+-    GateBaselinePayload, GateFailure, GateListItem, GateListPayload, GateResultDocument,
+-    GateRunOptions, GateRunOutcome, GateRunPayload, GateRunSetOutcome, GateRunSetPayload,
+-    GateStatus, HeadTailBuffer, RatchetBaseline, RatchetDirection, RatchetEvaluation,
+-    BUILTIN_GATE_DEPS, BUILTIN_GATE_SCOPE, VALID_ADAPTERS,
++    evaluate_ratchet, execute_deps_gate, execute_gate, execute_gate_set, execute_hygiene_gate,
++    execute_scope_gate, format_duration, format_metric_number, get_gate_list, parse_with_adapter,
++    read_baseline, resolve_baseline_path, resolve_commit_sha,
++    resolve_collision_free_evidence_path, resolve_gate_execution_order, scan_rust_imports,
++    scan_swift_imports, validate_adapter_name, validate_gate_dependencies, write_baseline,
++    write_evidence_bundle, EvidenceBundle, GateBaselinePayload, GateFailure, GateListItem,
++    GateListPayload, GateResultDocument, GateRunOptions, GateRunOutcome, GateRunPayload,
++    GateRunSetOutcome, GateRunSetPayload, GateStatus, HeadTailBuffer, RatchetBaseline,
++    RatchetDirection, RatchetEvaluation, BUILTIN_GATE_DEPS, BUILTIN_GATE_HYGIENE,
++    BUILTIN_GATE_SCOPE, VALID_ADAPTERS,
+ };
+ 
+ pub use chore::{
+diff --git a/crates/qdev-core/src/schema.rs b/crates/qdev-core/src/schema.rs
+index a539b88..5e26f08 100644
+--- a/crates/qdev-core/src/schema.rs
++++ b/crates/qdev-core/src/schema.rs
+@@ -168,6 +168,7 @@ pub enum PayloadKind {
+     GateBaseline,
+     Preflight,
+     HookInstall,
++    Hygiene,
+ }
+ 
+ impl PayloadKind {
+@@ -193,6 +194,7 @@ impl PayloadKind {
+             PayloadKind::GateBaseline => include_str!("../schemas/payload-gate-baseline.json"),
+             PayloadKind::Preflight => include_str!("../schemas/payload-preflight.json"),
+             PayloadKind::HookInstall => include_str!("../schemas/payload-hook-install.json"),
++            PayloadKind::Hygiene => include_str!("../schemas/payload-hygiene.json"),
+         }
+     }
+ 
+@@ -229,11 +231,12 @@ impl PayloadKind {
+             PayloadKind::GateBaseline => "gate_baseline",
+             PayloadKind::Preflight => "preflight",
+             PayloadKind::HookInstall => "hook_install",
++            PayloadKind::Hygiene => "hygiene",
+         }
+     }
+ 
+     /// Returns an array of all currently-supported payload kinds.
+-    pub const fn all() -> &'static [PayloadKind; 19] {
++    pub const fn all() -> &'static [PayloadKind; 20] {
+         &[
+             PayloadKind::Story,
+             PayloadKind::Error,
+@@ -254,6 +257,7 @@ impl PayloadKind {
+             PayloadKind::GateBaseline,
+             PayloadKind::Preflight,
+             PayloadKind::HookInstall,
++            PayloadKind::Hygiene,
+         ]
+     }
+ 
+@@ -295,6 +299,7 @@ impl PayloadKind {
+             "hook_install" | "hookinstall" | "hooks_install" | "install_hooks" => {
+                 Ok(PayloadKind::HookInstall)
+             }
++            "hygiene" | "hygiene_check" => Ok(PayloadKind::Hygiene),
+             _ => Err(QdevError::usage_error(format!(
+                 "Unknown payload name '{}'. Valid payload names: {}",
+                 s,
+diff --git a/crates/qdev-core/src/transition.rs b/crates/qdev-core/src/transition.rs
+index 521af7b..cb405c1 100644
+--- a/crates/qdev-core/src/transition.rs
++++ b/crates/qdev-core/src/transition.rs
+@@ -342,7 +342,26 @@ impl PreTransitionHook for TransitionGateHook {
+             }
+         }
+ 
+-        // 3. External gates configured with on_transition = ["review"]
++        // 3. Built-in qdev-hygiene
++        if !review_gate_ids.iter().any(|id| id == crate::gate::BUILTIN_GATE_HYGIENE) {
++            let hygiene_outcome = crate::gate::execute_hygiene_gate(
++                &ctx.workspace_root,
++                &self.config,
++                &gate_options,
++            )?;
++
++            if hygiene_outcome.status == crate::gate::GateStatus::Fail {
++                let payload = serde_json::to_value(hygiene_outcome.to_payload()).unwrap_or_default();
++                return Err(QdevError::logical_failure("gate_failed", hygiene_outcome.summary)
++                    .with_details(payload));
++            } else if hygiene_outcome.status == crate::gate::GateStatus::Infra {
++                let payload = serde_json::to_value(hygiene_outcome.to_payload()).unwrap_or_default();
++                return Err(QdevError::infrastructure_failure("gate_infra_failure", hygiene_outcome.summary)
++                    .with_details(payload));
++            }
++        }
++
++        // 4. External gates configured with on_transition = ["review"]
+         if !review_gate_ids.is_empty() {
+             let execution_order = crate::gate::resolve_gate_execution_order(
+                 &self.config.gates,
+diff --git a/docs/bmad/implementation-artifacts/sprint-status.yaml b/docs/bmad/implementation-artifacts/sprint-status.yaml
+index c7263e4..93c92ec 100644
+--- a/docs/bmad/implementation-artifacts/sprint-status.yaml
++++ b/docs/bmad/implementation-artifacts/sprint-status.yaml
+@@ -16,7 +16,7 @@
+ # story_location: "{project-root}/docs/bmad/implementation-artifacts"
+ 
+ generated: 09-06-2026 08:48
+-last_updated: 09-25-2026 22:23
++last_updated: 09-26-2026 11:01
+ project: qdev
+ project_key: NOKEY
+ tracking_system: file-system
+@@ -87,7 +87,7 @@ development_status:
+   3-6-transition-bound-gates: review
+   3-7-git-preflight-guard: review
+   3-8-git-hook-shims-qdev-hook: review
+-  3-9-hygiene-linter-lint-and-report: backlog
++  3-9-hygiene-linter-lint-and-report: review
+   3-10-impact-analysis: backlog
+   3-11-opt-in-commit-messages: backlog
+   3-12-soup-audit-sbom: backlog
+diff --git a/crates/qdev-cli/tests/hygiene_cli_tests.rs b/crates/qdev-cli/tests/hygiene_cli_tests.rs
+new file mode 100644
+index 0000000..cc9db80
+--- /dev/null
++++ b/crates/qdev-cli/tests/hygiene_cli_tests.rs
+@@ -0,0 +1,471 @@
++use std::fs;
++use std::path::Path;
++use std::process::Command as StdCommand;
++
++use assert_cmd::Command;
++use serde_json::Value;
++use tempfile::TempDir;
++
++fn git(root: &Path, args: &[&str]) -> String {
++    let output = StdCommand::new("git")
++        .args(args)
++        .current_dir(root)
++        .output()
++        .unwrap_or_else(|e| panic!("failed to run `git {}`: {}", args.join(" "), e));
++    assert!(
++        output.status.success(),
++        "`git {}` failed: {}",
++        args.join(" "),
++        String::from_utf8_lossy(&output.stderr)
++    );
++    String::from_utf8_lossy(&output.stdout).trim().to_string()
++}
++
++fn setup_workspace(root: &Path) {
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "init",
++            "--non-interactive",
++            "--name",
++            "HygieneTestProject",
++            "--developer",
++            "simon",
++            "--team",
++            "core-platform",
++        ])
++        .assert()
++        .success();
++
++    git(root, &["init", "-b", "main"]);
++    git(root, &["config", "user.email", "simon@example.com"]);
++    git(root, &["config", "user.name", "Simon"]);
++    git(root, &["config", "commit.gpgsign", "false"]);
++
++    // Initial commit so HEAD exists
++    git(root, &["add", "."]);
++    git(root, &["commit", "-m", "initial commit"]);
++}
++
++#[test]
++fn test_cli_clean_source_file_text_and_json() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let clean_file = root.join("src/clean.rs");
++    fs::create_dir_all(clean_file.parent().unwrap()).unwrap();
++    fs::write(
++        &clean_file,
++        r#"// Legitimate single-line comment
++fn main() {}
++"#,
++    )
++    .unwrap();
++
++    // Text mode
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["hygiene", "check", "src/clean.rs"])
++        .assert()
++        .code(0);
++    let output_str = String::from_utf8_lossy(&assert.get_output().stdout);
++    assert!(output_str.contains("Hygiene check: 0 findings"));
++
++    // JSON mode
++    let mut cmd_json = Command::cargo_bin("qdev").unwrap();
++    let assert_json = cmd_json
++        .current_dir(root)
++        .args(["hygiene", "check", "--json", "src/clean.rs"])
++        .assert()
++        .code(0);
++    let json_val: Value = serde_json::from_slice(&assert_json.get_output().stdout).unwrap();
++    assert_eq!(json_val["schema_version"], "1");
++    assert_eq!(json_val["status"], "pass");
++    assert_eq!(json_val["summary"], "Hygiene check: 0 findings");
++    assert!(json_val["findings"].as_array().unwrap().is_empty());
++}
++
++#[test]
++fn test_cli_memoir_banner_comment_finding() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let banner_file = root.join("src/banner.rs");
++    fs::create_dir_all(banner_file.parent().unwrap()).unwrap();
++    fs::write(
++        &banner_file,
++        "// ⭐ **STORY 2.10 — FIRST import**\nfn run() {}\n",
++    )
++    .unwrap();
++
++    // Text mode: exits 1, reports finding at line 1
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["hygiene", "check", "src/banner.rs"])
++        .assert()
++        .code(1);
++    let text = String::from_utf8_lossy(&assert.get_output().stdout);
++    assert!(text.contains("src/banner.rs:1: [story_banner]"));
++    assert!(text.contains("// ⭐ **STORY 2.10 — FIRST import**"));
++    assert!(text.contains("Hygiene check: 1 finding"));
++
++    // JSON mode: exits 1, structured findings
++    let mut cmd_json = Command::cargo_bin("qdev").unwrap();
++    let assert_json = cmd_json
++        .current_dir(root)
++        .args(["hygiene", "check", "--json", "src/banner.rs"])
++        .assert()
++        .code(1);
++    let json_val: Value = serde_json::from_slice(&assert_json.get_output().stdout).unwrap();
++    assert_eq!(json_val["schema_version"], "1");
++    assert_eq!(json_val["status"], "fail");
++    assert_eq!(json_val["summary"], "Hygiene check: 1 finding");
++    let findings = json_val["findings"].as_array().unwrap();
++    assert_eq!(findings.len(), 1);
++    assert_eq!(findings[0]["file"], "src/banner.rs");
++    assert_eq!(findings[0]["line"], 1);
++    assert_eq!(findings[0]["rule_id"], "story_banner");
++    assert_eq!(findings[0]["excerpt"], "// ⭐ **STORY 2.10 — FIRST import**");
++}
++
++#[test]
++fn test_cli_review_round_finding() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let review_file = root.join("src/review.rs");
++    fs::create_dir_all(review_file.parent().unwrap()).unwrap();
++    fs::write(
++        &review_file,
++        "// Review round 2 findings: fixed bug\nfn fixed() {}\n",
++    )
++    .unwrap();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["hygiene", "check", "src/review.rs"])
++        .assert()
++        .code(1);
++    let text = String::from_utf8_lossy(&assert.get_output().stdout);
++    assert!(text.contains("src/review.rs:1: [review_round]"));
++    assert!(text.contains("// Review round 2 findings: fixed bug"));
++}
++
++#[test]
++fn test_cli_comment_block_over_max_lines() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let long_file = root.join("src/long.rs");
++    fs::create_dir_all(long_file.parent().unwrap()).unwrap();
++    fs::write(
++        &long_file,
++        r#"// line 1
++// line 2
++// line 3
++// line 4
++// line 5
++// line 6
++// line 7
++fn func() {}
++"#,
++    )
++    .unwrap();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["hygiene", "check", "src/long.rs"])
++        .assert()
++        .code(1);
++    let text = String::from_utf8_lossy(&assert.get_output().stdout);
++    assert!(text.contains("src/long.rs:1: [max_inline_comment_lines]"));
++    assert!(text.contains("// line 1"));
++}
++
++#[test]
++fn test_cli_forbid_patterns() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Add forbid_patterns to qdev.toml
++    let toml_path = root.join("qdev.toml");
++    let mut toml = fs::read_to_string(&toml_path).unwrap();
++    toml.push_str("\n[hygiene]\nforbid_patterns = [\"DISALLOWED_KEYWORD\"]\n");
++    fs::write(&toml_path, toml).unwrap();
++
++    let file_with_forbid = root.join("src/forbid.rs");
++    fs::create_dir_all(file_with_forbid.parent().unwrap()).unwrap();
++    fs::write(
++        &file_with_forbid,
++        "// Notice: DISALLOWED_KEYWORD used here\nfn test() {}\n",
++    )
++    .unwrap();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["hygiene", "check", "src/forbid.rs"])
++        .assert()
++        .code(1);
++    let text = String::from_utf8_lossy(&assert.get_output().stdout);
++    assert!(text.contains("src/forbid.rs:1: [forbid_patterns]"));
++}
++
++#[test]
++fn test_cli_valid_compact_citation_exemption() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let citation_file = root.join("src/citation.rs");
++    fs::create_dir_all(citation_file.parent().unwrap()).unwrap();
++    fs::write(
++        &citation_file,
++        "// [E12S10] Rust-driven mount (see AD-43)\nfn mount() {}\n",
++    )
++    .unwrap();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args(["hygiene", "check", "src/citation.rs"])
++        .assert()
++        .code(0);
++}
++
++#[test]
++fn test_cli_fix_flag_exits_2_and_does_not_modify_files() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let file_path = root.join("src/bad.rs");
++    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
++    let original_content = "// ⭐ **STORY 2.10 — FIRST import**\nfn run() {}\n";
++    fs::write(&file_path, original_content).unwrap();
++
++    // In text mode: exit 2
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["hygiene", "check", "--fix"])
++        .assert()
++        .code(2);
++    let err_msg = String::from_utf8_lossy(&assert.get_output().stderr);
++    assert!(err_msg.contains("deferred"));
++
++    // Verify file content was NOT modified
++    let content_after = fs::read_to_string(&file_path).unwrap();
++    assert_eq!(content_after, original_content);
++
++    // In JSON mode: exit 2 with error envelope
++    let mut cmd_json = Command::cargo_bin("qdev").unwrap();
++    let assert_json = cmd_json
++        .current_dir(root)
++        .args(["hygiene", "check", "--fix", "--json"])
++        .assert()
++        .code(2);
++    let json_val: Value = serde_json::from_slice(&assert_json.get_output().stdout).unwrap();
++    assert_eq!(json_val["schema_version"], "1");
++    assert_eq!(json_val["error"]["code"], "usage_error");
++    assert!(json_val["error"]["message"]
++        .as_str()
++        .unwrap()
++        .contains("deferred"));
++}
++
++#[test]
++fn test_cli_diff_filter() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Commit a clean file
++    let clean_file = root.join("src/clean.rs");
++    fs::create_dir_all(clean_file.parent().unwrap()).unwrap();
++    fs::write(&clean_file, "// clean\nfn clean() {}\n").unwrap();
++    git(root, &["add", "."]);
++    git(root, &["commit", "-m", "add clean file"]);
++
++    // Create a modified file with a banner comment (unstaged diff)
++    let dirty_file = root.join("src/dirty.rs");
++    fs::write(
++        &dirty_file,
++        "// ⭐ **STORY 2.10 — FIRST import**\nfn dirty() {}\n",
++    )
++    .unwrap();
++
++    // Check with --diff detects dirty file
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args(["hygiene", "check", "--diff"])
++        .assert()
++        .code(1);
++
++    // Remove the dirty file
++    fs::remove_file(&dirty_file).unwrap();
++
++    // Clean diff now exits 0
++    let mut cmd_clean = Command::cargo_bin("qdev").unwrap();
++    cmd_clean
++        .current_dir(root)
++        .args(["hygiene", "check", "--diff"])
++        .assert()
++        .code(0);
++}
++
++#[test]
++fn test_cli_hygiene_disabled() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Set [hygiene] enabled = false
++    let toml_path = root.join("qdev.toml");
++    let mut toml = fs::read_to_string(&toml_path).unwrap();
++    toml.push_str("\n[hygiene]\nenabled = false\n");
++    fs::write(&toml_path, toml).unwrap();
++
++    // File with violations
++    let file_path = root.join("src/violation.rs");
++    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
++    fs::write(
++        &file_path,
++        "// ⭐ **STORY 2.10 — FIRST import**\nfn run() {}\n",
++    )
++    .unwrap();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args(["hygiene", "check"])
++        .assert()
++        .code(0);
++}
++
++#[test]
++fn test_cli_schema_payload_hygiene() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["schema", "payload", "hygiene"])
++        .assert()
++        .code(0);
++    let output = String::from_utf8_lossy(&assert.get_output().stdout);
++    let schema: Value = serde_json::from_str(&output).unwrap();
++    assert_eq!(schema["title"], "Hygiene Payload Schema");
++}
++
++#[test]
++fn test_cli_builtin_gate_hygiene() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Run clean gate
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args(["gate", "run", "qdev-hygiene"])
++        .assert()
++        .code(0);
++
++    // Introduce dirty file with story banner
++    let dirty_file = root.join("src/dirty.rs");
++    fs::create_dir_all(dirty_file.parent().unwrap()).unwrap();
++    fs::write(
++        &dirty_file,
++        "// ⭐ **STORY 2.10 — FIRST import**\nfn dirty() {}\n",
++    )
++    .unwrap();
++
++    // Run gate -> fails with exit 1
++    let mut cmd_fail = Command::cargo_bin("qdev").unwrap();
++    cmd_fail
++        .current_dir(root)
++        .args(["gate", "run", "qdev-hygiene"])
++        .assert()
++        .code(1);
++}
++
++#[test]
++fn test_cli_bare_workspace_traversal_multi_language() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Create a Swift file with an epic banner
++    let swift_file = root.join("Sources/App/main.swift");
++    fs::create_dir_all(swift_file.parent().unwrap()).unwrap();
++    fs::write(
++        &swift_file,
++        "// ⭐ EPIC 3 - core setup\nfunc run() {}\n",
++    )
++    .unwrap();
++
++    // Create a Python file with a review round
++    let py_file = root.join("scripts/tool.py");
++    fs::create_dir_all(py_file.parent().unwrap()).unwrap();
++    fs::write(
++        &py_file,
++        "# Review round 2 findings: fix\nprint('running')\n",
++    )
++    .unwrap();
++
++    // Bare `qdev hygiene check` with no path arguments
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["hygiene", "check"])
++        .assert()
++        .code(1);
++
++    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
++    assert!(stdout.contains("main.swift"), "stdout must contain main.swift: {}", stdout);
++    assert!(stdout.contains("tool.py"), "stdout must contain tool.py: {}", stdout);
++    assert!(stdout.contains("Hygiene check: 2 findings"), "stdout must report 2 findings: {}", stdout);
++}
++
++#[test]
++fn test_cli_diff_with_explicit_paths() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    git(root, &["checkout", "-b", "feature/diff-path-test"]);
++
++    // Create two dirty files
++    let file_in_dir = root.join("src/sub/dirty1.rs");
++    fs::create_dir_all(file_in_dir.parent().unwrap()).unwrap();
++    fs::write(&file_in_dir, "// ⭐ STORY 1.0\nfn d1() {}\n").unwrap();
++
++    let file_other = root.join("src/other/dirty2.rs");
++    fs::create_dir_all(file_other.parent().unwrap()).unwrap();
++    fs::write(&file_other, "// ⭐ STORY 2.0\nfn d2() {}\n").unwrap();
++
++    git(root, &["add", "."]);
++
++    // Running `--diff src/sub` should only inspect files in `src/sub`
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["hygiene", "check", "--diff", "src/sub"])
++        .assert()
++        .code(1);
++
++    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
++    assert!(stdout.contains("dirty1.rs"));
++    assert!(!stdout.contains("dirty2.rs"));
++    assert!(stdout.contains("Hygiene check: 1 finding"));
++}
++
+diff --git a/crates/qdev-core/schemas/payload-hygiene.json b/crates/qdev-core/schemas/payload-hygiene.json
+new file mode 100644
+index 0000000..09f67a7
+--- /dev/null
++++ b/crates/qdev-core/schemas/payload-hygiene.json
+@@ -0,0 +1,56 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "Hygiene Payload Schema",
++  "description": "Output shape of `qdev hygiene check --json`. Reports comment hygiene status, summary, and structured findings. Schema changes follow semver on schema_version; additive fields do not bump the major.",
++  "type": "object",
++  "required": [
++    "schema_version",
++    "status",
++    "summary",
++    "findings"
++  ],
++  "properties": {
++    "schema_version": {
++      "type": "string"
++    },
++    "status": {
++      "type": "string",
++      "enum": ["pass", "fail"]
++    },
++    "summary": {
++      "type": "string"
++    },
++    "findings": {
++      "type": "array",
++      "items": {
++        "type": "object",
++        "required": [
++          "file",
++          "line",
++          "location",
++          "rule_id",
++          "excerpt"
++        ],
++        "properties": {
++          "file": {
++            "type": "string"
++          },
++          "line": {
++            "type": "integer"
++          },
++          "location": {
++            "type": "string"
++          },
++          "rule_id": {
++            "type": "string"
++          },
++          "excerpt": {
++            "type": "string"
++          }
++        },
++        "additionalProperties": false
++      }
++    }
++  },
++  "additionalProperties": false
++}
+diff --git a/crates/qdev-core/src/hygiene/linter.rs b/crates/qdev-core/src/hygiene/linter.rs
+new file mode 100644
+index 0000000..021e40c
+--- /dev/null
++++ b/crates/qdev-core/src/hygiene/linter.rs
+@@ -0,0 +1,226 @@
++//! Hygiene comment linter rules engine.
++//!
++//! Enforces:
++//! - `max_inline_comment_lines`: non-doc inline comment blocks exceeding the limit.
++//! - `forbid_patterns`: matches against configured forbidden regexes.
++//! - `story_banner`: story banners (e.g. `STORY \d+`, `STORY E\d+S\d+`, `⭐ STORY`).
++//! - `review_round`: review-round narratives or wave markers (`Review round \d+`, `Wave \d+`, `Pass \d+`).
++//!
++//! Compact citations matching `citation_pattern` are whitelisted and never flagged or counted.
++
++use regex::Regex;
++
++use crate::config::{HygieneConfig, DEFAULT_CITATION_PATTERN};
++use crate::errors::QdevError;
++use super::tokenizer::CommentToken;
++
++pub const RULE_MAX_INLINE_COMMENT_LINES: &str = "max_inline_comment_lines";
++pub const RULE_FORBID_PATTERNS: &str = "forbid_patterns";
++pub const RULE_STORY_BANNER: &str = "story_banner";
++pub const RULE_REVIEW_ROUND: &str = "review_round";
++
++#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
++pub struct HygieneFinding {
++    pub file: String,
++    pub line: usize,
++    pub location: String,
++    pub rule_id: String,
++    pub excerpt: String,
++}
++
++/// Linter engine for inspecting extracted comment tokens in a file.
++pub struct HygieneLinter {
++    citation_regex: Regex,
++    story_banner_regex: Regex,
++    review_round_regex: Regex,
++    forbid_regexes: Vec<(String, Regex)>,
++    max_inline_comment_lines: u32,
++}
++
++impl HygieneLinter {
++    pub fn new(config: &HygieneConfig) -> Result<Self, QdevError> {
++        let citation_pat = config
++            .citation_pattern
++            .as_deref()
++            .unwrap_or(DEFAULT_CITATION_PATTERN);
++
++        let citation_regex = Regex::new(citation_pat).map_err(|e| {
++            QdevError::usage_error(format!("Invalid regex in hygiene.citation_pattern '{}': {}", citation_pat, e))
++        })?;
++
++        // Story/epic banner pattern: ⭐ story/epic, STORY \d+, EPIC \d+, STORY E\d+S\d+, etc.
++        let story_banner_regex = Regex::new(
++            r"(?i)(⭐[^\n]*(?:\bstory\b|\bepic\b)|(?:\bstory\b|\bepic\b)[\s:*\-_#]+(?:e\d+s\d+|\d+(?:\.\d+)*))",
++        )
++        .expect("valid story_banner regex");
++
++        // Review round / wave / pass markers requiring review or findings context
++        let review_round_regex = Regex::new(
++            r"(?i)\b(review\s+round\s+\d+|round\s+\d+\s+(?:review|findings)|review\s+pass\s+\d+|round\s+\d+|wave\s+\d+)\b",
++        )
++        .expect("valid review_round regex");
++
++        let mut forbid_regexes = Vec::new();
++        for pat in &config.forbid_patterns {
++            let re = Regex::new(pat).map_err(|e| {
++                QdevError::usage_error(format!("Invalid regex in hygiene.forbid_patterns '{}': {}", pat, e))
++            })?;
++            forbid_regexes.push((pat.clone(), re));
++        }
++
++        Ok(Self {
++            citation_regex,
++            story_banner_regex,
++            review_round_regex,
++            forbid_regexes,
++            max_inline_comment_lines: config.max_inline_comment_lines,
++        })
++    }
++
++    /// Lints comments extracted from a single file, producing findings.
++    pub fn lint(&self, file_path: &str, tokens: &[CommentToken]) -> Vec<HygieneFinding> {
++        let mut findings = Vec::new();
++
++        // 1. Check narrative markers and forbid_patterns on all comment lines
++        for token in tokens {
++            for comment_line in &token.lines {
++                let trimmed = comment_line.text.trim();
++                if trimmed.is_empty() {
++                    continue;
++                }
++
++                // If line contains a compact citation, it is exempt from narrative & forbid checks
++                if self.citation_regex.is_match(&comment_line.text) {
++                    continue;
++                }
++
++                // Check story banner
++                if self.story_banner_regex.is_match(&comment_line.text) {
++                    findings.push(HygieneFinding {
++                        file: file_path.to_string(),
++                        line: comment_line.line_number,
++                        location: format!("{}:{}", file_path, comment_line.line_number),
++                        rule_id: RULE_STORY_BANNER.to_string(),
++                        excerpt: trimmed.to_string(),
++                    });
++                }
++
++                // Check review round
++                if self.review_round_regex.is_match(&comment_line.text) {
++                    findings.push(HygieneFinding {
++                        file: file_path.to_string(),
++                        line: comment_line.line_number,
++                        location: format!("{}:{}", file_path, comment_line.line_number),
++                        rule_id: RULE_REVIEW_ROUND.to_string(),
++                        excerpt: trimmed.to_string(),
++                    });
++                }
++
++                // Check forbid patterns
++                for (_pat, re) in &self.forbid_regexes {
++                    if re.is_match(&comment_line.text) {
++                        findings.push(HygieneFinding {
++                            file: file_path.to_string(),
++                            line: comment_line.line_number,
++                            location: format!("{}:{}", file_path, comment_line.line_number),
++                            rule_id: RULE_FORBID_PATTERNS.to_string(),
++                            excerpt: trimmed.to_string(),
++                        });
++                        break; // One forbid_patterns finding per line
++                    }
++                }
++            }
++        }
++
++        // 2. Check max_inline_comment_lines on contiguous non-doc comment blocks
++        // Only group standalone or multiline comment tokens (ignore single-line trailing annotations on code statements)
++        let non_doc_tokens: Vec<&CommentToken> = tokens
++            .iter()
++            .filter(|t| !t.kind.is_doc() && (!t.is_trailing || t.start_line != t.end_line))
++            .collect();
++
++        if !non_doc_tokens.is_empty() {
++            let mut current_block: Vec<&CommentToken> = Vec::new();
++
++            for &token in &non_doc_tokens {
++                if current_block.is_empty() {
++                    current_block.push(token);
++                } else {
++                    let prev_token = current_block.last().unwrap();
++                    // Adjacent if starting at or before prev_end_line + 1
++                    if token.start_line <= prev_token.end_line + 1 {
++                        current_block.push(token);
++                    } else {
++                        // Evaluate completed block
++                        self.evaluate_block(file_path, &current_block, &mut findings);
++                        current_block.clear();
++                        current_block.push(token);
++                    }
++                }
++            }
++
++            if !current_block.is_empty() {
++                self.evaluate_block(file_path, &current_block, &mut findings);
++            }
++        }
++
++        findings
++    }
++
++    fn evaluate_block(
++        &self,
++        file_path: &str,
++        block: &[&CommentToken],
++        findings: &mut Vec<HygieneFinding>,
++    ) {
++        if block.is_empty() {
++            return;
++        }
++
++        let block_start_line = block.first().unwrap().start_line;
++        let mut non_citation_line_count = 0;
++        let mut first_line_excerpt = String::new();
++
++        for token in block {
++            for line in &token.lines {
++                let trimmed = line.text.trim();
++                if first_line_excerpt.is_empty() && !trimmed.is_empty() {
++                    first_line_excerpt = trimmed.to_string();
++                }
++
++                // Lines containing citations do not count toward max_inline_comment_lines
++                if !self.citation_regex.is_match(&line.text) {
++                    non_citation_line_count += 1;
++                }
++            }
++        }
++
++        if non_citation_line_count > self.max_inline_comment_lines as usize {
++            if first_line_excerpt.is_empty() {
++                first_line_excerpt = block
++                    .first()
++                    .and_then(|t| t.lines.first())
++                    .map(|l| l.text.trim().to_string())
++                    .unwrap_or_default();
++            }
++
++            findings.push(HygieneFinding {
++                file: file_path.to_string(),
++                line: block_start_line,
++                location: format!("{}:{}", file_path, block_start_line),
++                rule_id: RULE_MAX_INLINE_COMMENT_LINES.to_string(),
++                excerpt: first_line_excerpt,
++            });
++        }
++    }
++}
++
++/// Convenience function to lint comments with given configuration.
++pub fn lint_comments(
++    file_path: &str,
++    tokens: &[CommentToken],
++    config: &HygieneConfig,
++) -> Result<Vec<HygieneFinding>, QdevError> {
++    let linter = HygieneLinter::new(config)?;
++    Ok(linter.lint(file_path, tokens))
++}
+diff --git a/crates/qdev-core/src/hygiene/mod.rs b/crates/qdev-core/src/hygiene/mod.rs
+new file mode 100644
+index 0000000..c3047bf
+--- /dev/null
++++ b/crates/qdev-core/src/hygiene/mod.rs
+@@ -0,0 +1,329 @@
++//! Hygiene module root, types, and check_hygiene orchestrator.
++//!
++//! Provides language-aware comment linting and reporting for Rust, Swift, and Python.
++
++pub mod linter;
++pub mod tokenizer;
++
++use std::fs;
++use std::path::{Path, PathBuf};
++use serde::{Deserialize, Serialize};
++
++use crate::config::Config;
++use crate::errors::QdevError;
++
++pub use linter::{
++    lint_comments, HygieneFinding, HygieneLinter, RULE_FORBID_PATTERNS,
++    RULE_MAX_INLINE_COMMENT_LINES, RULE_REVIEW_ROUND, RULE_STORY_BANNER,
++};
++pub use tokenizer::{
++    tokenize_comments, CommentKind, CommentLine, CommentToken, SupportedLanguage,
++};
++
++/// Structured output of a hygiene check.
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
++pub struct HygieneCheckOutcome {
++    pub status: String,
++    pub summary: String,
++    pub findings: Vec<HygieneFinding>,
++}
++
++/// Execution options for hygiene check.
++#[derive(Debug, Clone, Default)]
++pub struct HygieneCheckOptions {
++    pub diff: bool,
++    pub paths: Vec<String>,
++}
++
++/// Runs comment hygiene inspection across target files or git diff changes.
++pub fn check_hygiene(
++    workspace_root: &Path,
++    config: &Config,
++    options: &HygieneCheckOptions,
++) -> Result<HygieneCheckOutcome, QdevError> {
++    // If hygiene is disabled, exit 0 with 0 findings immediately
++    if !config.hygiene.enabled {
++        return Ok(HygieneCheckOutcome {
++            status: "pass".to_string(),
++            summary: "Hygiene check: 0 findings".to_string(),
++            findings: Vec::new(),
++        });
++    }
++
++    let linter = HygieneLinter::new(&config.hygiene)?;
++
++    // Resolve target candidate files
++    let target_files = if options.diff {
++        let diff_files = resolve_diff_files(workspace_root, &config.git.integration_branch)?;
++        if !options.paths.is_empty() {
++            let filter_paths = resolve_explicit_paths(workspace_root, &options.paths)?;
++            diff_files
++                .into_iter()
++                .filter(|df| {
++                    filter_paths
++                        .iter()
++                        .any(|fp| df == fp || df.starts_with(fp))
++                })
++                .collect()
++        } else {
++            diff_files
++        }
++    } else if !options.paths.is_empty() {
++        resolve_explicit_paths(workspace_root, &options.paths)?
++    } else {
++        collect_workspace_source_files(workspace_root)?
++    };
++
++    let mut all_findings = Vec::new();
++
++    for file_path in target_files {
++        if !file_path.is_file() {
++            continue;
++        }
++
++        // Check if file language is enabled in config
++        let Some(lang) = SupportedLanguage::from_path(&file_path) else {
++            continue;
++        };
++
++        let is_lang_enabled = config
++            .hygiene
++            .languages
++            .iter()
++            .any(|l| SupportedLanguage::from_name(l) == Some(lang));
++
++        if !is_lang_enabled {
++            continue;
++        }
++
++        let content = match fs::read_to_string(&file_path) {
++            Ok(c) => c,
++            Err(_) => continue, // Skip unreadable/binary files
++        };
++
++        let rel_path = file_path
++            .strip_prefix(workspace_root)
++            .unwrap_or(&file_path)
++            .to_string_lossy()
++            .replace('\\', "/");
++
++        let tokens = tokenize_comments(&content, lang);
++        let findings = linter.lint(&rel_path, &tokens);
++        all_findings.extend(findings);
++    }
++
++    // Sort findings deterministically: file, line, rule_id
++    all_findings.sort_by(|a, b| {
++        (&a.file, a.line, &a.rule_id).cmp(&(&b.file, b.line, &b.rule_id))
++    });
++
++    let status = if all_findings.is_empty() {
++        "pass"
++    } else {
++        "fail"
++    };
++
++    let count_str = match all_findings.len() {
++        0 => "0 findings".to_string(),
++        1 => "1 finding".to_string(),
++        n => format!("{} findings", n),
++    };
++    let summary = format!("Hygiene check: {}", count_str);
++
++    Ok(HygieneCheckOutcome {
++        status: status.to_string(),
++        summary,
++        findings: all_findings,
++    })
++}
++
++fn resolve_diff_files(
++    workspace_root: &Path,
++    integration_branch: &str,
++) -> Result<Vec<PathBuf>, QdevError> {
++    let is_git = std::process::Command::new("git")
++        .args(["rev-parse", "--is-inside-work-tree"])
++        .current_dir(workspace_root)
++        .output()
++        .map(|o| o.status.success())
++        .unwrap_or(false);
++
++    if !is_git {
++        return Err(QdevError::infrastructure_failure(
++            "not_in_git_worktree",
++            "Cannot run hygiene check --diff: not inside a git work tree",
++        ));
++    }
++
++    let mut changed = std::collections::HashSet::new();
++
++    // 1. Try merge-base with integration_branch
++    let mb_output = std::process::Command::new("git")
++        .args(["merge-base", "HEAD", integration_branch])
++        .current_dir(workspace_root)
++        .output();
++
++    let mut diff_target = None;
++    if let Ok(ref out) = mb_output {
++        if out.status.success() {
++            let mb = String::from_utf8_lossy(&out.stdout).trim().to_string();
++            if !mb.is_empty() {
++                diff_target = Some(mb);
++            }
++        }
++    }
++
++    // Fallback: integration_branch ref directly
++    if diff_target.is_none() {
++        let verify = std::process::Command::new("git")
++            .args(["rev-parse", "--verify", "--quiet", integration_branch])
++            .current_dir(workspace_root)
++            .output();
++        if let Ok(ref out) = verify {
++            if out.status.success() {
++                diff_target = Some(integration_branch.to_string());
++            }
++        }
++    }
++
++    if let Some(target) = diff_target {
++        let diff_out = std::process::Command::new("git")
++            .args(["-c", "core.quotePath=false", "diff", "--name-only", "--relative", &target])
++            .current_dir(workspace_root)
++            .output()
++            .map_err(|e| {
++                QdevError::infrastructure_failure(
++                    "git_diff_failed",
++                    format!("Failed to execute git diff: {}", e),
++                )
++            })?;
++
++        if !diff_out.status.success() {
++            return Err(QdevError::infrastructure_failure(
++                "git_diff_failed",
++                format!(
++                    "git diff failed: {}",
++                    String::from_utf8_lossy(&diff_out.stderr).trim()
++                ),
++            ));
++        }
++
++        for line in String::from_utf8_lossy(&diff_out.stdout).lines() {
++            let trimmed = line.trim();
++            if !trimmed.is_empty() {
++                changed.insert(trimmed.to_string());
++            }
++        }
++    }
++
++    // Include uncommitted changes (staged and unstaged + untracked)
++    let status_out = std::process::Command::new("git")
++        .args(["-c", "core.quotePath=false", "status", "--porcelain=v1", "-uall"])
++        .current_dir(workspace_root)
++        .output()
++        .map_err(|e| {
++            QdevError::infrastructure_failure(
++                "git_status_failed",
++                format!("Failed to execute git status: {}", e),
++            )
++        })?;
++
++    if !status_out.status.success() {
++        return Err(QdevError::infrastructure_failure(
++            "git_status_failed",
++            format!(
++                "git status failed: {}",
++                String::from_utf8_lossy(&status_out.stderr).trim()
++            ),
++        ));
++    }
++
++    for line in String::from_utf8_lossy(&status_out.stdout).lines() {
++        if line.len() >= 3 {
++            let path = line[3..].trim();
++            let path = if let Some(idx) = path.find(" -> ") {
++                &path[idx + 4..]
++            } else {
++                path
++            };
++            if !path.is_empty() {
++                changed.insert(path.to_string());
++            }
++        }
++    }
++
++    let result: Vec<PathBuf> = changed
++        .into_iter()
++        .map(|p| workspace_root.join(p))
++        .collect();
++
++    Ok(result)
++}
++
++fn resolve_explicit_paths(
++    workspace_root: &Path,
++    paths: &[String],
++) -> Result<Vec<PathBuf>, QdevError> {
++    let mut files = Vec::new();
++
++    for p in paths {
++        let path = if Path::new(p).is_absolute() {
++            PathBuf::from(p)
++        } else {
++            workspace_root.join(p)
++        };
++
++        if !path.exists() {
++            return Err(QdevError::usage_error(format!("Path not found: {}", p)));
++        }
++
++        if path.is_file() {
++            files.push(path);
++        } else if path.is_dir() {
++            collect_dir_files(&path, &mut files)?;
++        }
++    }
++
++    Ok(files)
++}
++
++fn collect_dir_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), QdevError> {
++    let entries = match fs::read_dir(dir) {
++        Ok(e) => e,
++        Err(_) => return Ok(()),
++    };
++
++    for entry in entries.flatten() {
++        let file_type = match entry.file_type() {
++            Ok(ft) => ft,
++            Err(_) => continue,
++        };
++
++        // Skip directory symlinks to prevent cycles
++        if file_type.is_symlink() {
++            continue;
++        }
++
++        let path = entry.path();
++        let name = entry.file_name();
++        let name_str = name.to_string_lossy();
++
++        if name_str.starts_with('.') || name_str == "target" || name_str == "node_modules" {
++            continue;
++        }
++
++        if file_type.is_dir() {
++            collect_dir_files(&path, out)?;
++        } else if file_type.is_file() && SupportedLanguage::from_path(&path).is_some() {
++            out.push(path);
++        }
++    }
++
++    Ok(())
++}
++
++fn collect_workspace_source_files(workspace_root: &Path) -> Result<Vec<PathBuf>, QdevError> {
++    let mut files = Vec::new();
++    collect_dir_files(workspace_root, &mut files)?;
++    Ok(files)
++}
+diff --git a/crates/qdev-core/src/hygiene/tokenizer.rs b/crates/qdev-core/src/hygiene/tokenizer.rs
+new file mode 100644
+index 0000000..a434a17
+--- /dev/null
++++ b/crates/qdev-core/src/hygiene/tokenizer.rs
+@@ -0,0 +1,763 @@
++//! Language-aware lexical comment tokenizers for Rust, Swift, and Python.
++//!
++//! Correctly parses line comments, block comments (with nesting), and doc comments,
++//! while shielding comments inside standard, multiline, raw strings and character literals.
++
++use std::path::Path;
++use serde::{Deserialize, Serialize};
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++pub enum CommentKind {
++    Line,
++    Block,
++    DocLine,
++    DocBlock,
++}
++
++impl CommentKind {
++    pub fn is_doc(&self) -> bool {
++        matches!(self, CommentKind::DocLine | CommentKind::DocBlock)
++    }
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct CommentLine {
++    pub line_number: usize,
++    pub text: String,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct CommentToken {
++    pub kind: CommentKind,
++    pub start_line: usize,
++    pub end_line: usize,
++    pub lines: Vec<CommentLine>,
++    pub is_trailing: bool,
++}
++
++fn is_trailing_on_line(chars: &[char], start_idx: usize) -> bool {
++    let mut j = start_idx;
++    while j > 0 {
++        j -= 1;
++        if chars[j] == '\n' {
++            return false;
++        }
++        if !chars[j].is_whitespace() {
++            return true;
++        }
++    }
++    false
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum SupportedLanguage {
++    Rust,
++    Swift,
++    Python,
++}
++
++impl SupportedLanguage {
++    pub fn from_path(path: &Path) -> Option<Self> {
++        let ext = path.extension()?.to_str()?.to_lowercase();
++        match ext.as_str() {
++            "rs" => Some(SupportedLanguage::Rust),
++            "swift" => Some(SupportedLanguage::Swift),
++            "py" => Some(SupportedLanguage::Python),
++            _ => None,
++        }
++    }
++
++    pub fn from_name(name: &str) -> Option<Self> {
++        match name.to_lowercase().as_str() {
++            "rust" | "rs" => Some(SupportedLanguage::Rust),
++            "swift" => Some(SupportedLanguage::Swift),
++            "python" | "py" => Some(SupportedLanguage::Python),
++            _ => None,
++        }
++    }
++}
++
++/// Tokenizes all comments in a source string according to the language's lexical rules.
++pub fn tokenize_comments(source: &str, lang: SupportedLanguage) -> Vec<CommentToken> {
++    match lang {
++        SupportedLanguage::Rust => tokenize_rust(source),
++        SupportedLanguage::Swift => tokenize_swift(source),
++        SupportedLanguage::Python => tokenize_python(source),
++    }
++}
++
++fn split_comment_lines(text: &str, start_line: usize) -> Vec<CommentLine> {
++    text.split('\n')
++        .enumerate()
++        .map(|(offset, l)| {
++            let stripped = l.strip_suffix('\r').unwrap_or(l);
++            CommentLine {
++                line_number: start_line + offset,
++                text: stripped.to_string(),
++            }
++        })
++        .collect()
++}
++
++/// Lexical tokenizer for Rust (.rs).
++fn tokenize_rust(source: &str) -> Vec<CommentToken> {
++    let mut tokens = Vec::new();
++    let chars: Vec<char> = source.chars().collect();
++    let n = chars.len();
++    let mut i = 0;
++    let mut current_line = 1;
++
++    while i < n {
++        // Line comment: //
++        if chars[i] == '/' && i + 1 < n && chars[i + 1] == '/' {
++            let start_line = current_line;
++            let start_idx = i;
++            let kind = if i + 2 < n && chars[i + 2] == '/' {
++                if i + 3 < n && chars[i + 3] == '/' {
++                    CommentKind::Line // 4 or more slashes treated as normal line comment
++                } else {
++                    CommentKind::DocLine // ///
++                }
++            } else if i + 2 < n && chars[i + 2] == '!' {
++                CommentKind::DocLine // //!
++            } else {
++                CommentKind::Line
++            };
++
++            // Scan to end of line
++            while i < n && chars[i] != '\n' {
++                i += 1;
++            }
++            let raw_text: String = chars[start_idx..i].iter().collect();
++            let stripped = raw_text.strip_suffix('\r').unwrap_or(&raw_text);
++            let is_trailing = is_trailing_on_line(&chars, start_idx);
++            tokens.push(CommentToken {
++                kind,
++                start_line,
++                end_line: start_line,
++                lines: vec![CommentLine {
++                    line_number: start_line,
++                    text: stripped.to_string(),
++                }],
++                is_trailing,
++            });
++            continue;
++        }
++
++        // Block comment: /*
++        if chars[i] == '/' && i + 1 < n && chars[i + 1] == '*' {
++            let start_line = current_line;
++            let start_idx = i;
++
++            let is_doc = if i + 2 < n && chars[i + 2] == '*' {
++                // /** is doc unless followed by * or / (e.g. /*** or /**/)
++                !(i + 3 < n && (chars[i + 3] == '*' || chars[i + 3] == '/'))
++            } else if i + 2 < n && chars[i + 2] == '!' {
++                true // /*!
++            } else {
++                false
++            };
++            let kind = if is_doc {
++                CommentKind::DocBlock
++            } else {
++                CommentKind::Block
++            };
++
++            let mut depth = 1;
++            i += 2;
++            while i < n && depth > 0 {
++                if chars[i] == '\n' {
++                    current_line += 1;
++                    i += 1;
++                } else if chars[i] == '/' && i + 1 < n && chars[i + 1] == '*' {
++                    depth += 1;
++                    i += 2;
++                } else if chars[i] == '*' && i + 1 < n && chars[i + 1] == '/' {
++                    depth -= 1;
++                    i += 2;
++                } else {
++                    i += 1;
++                }
++            }
++            let end_line = current_line;
++            let raw_text: String = chars[start_idx..i].iter().collect();
++            let lines = split_comment_lines(&raw_text, start_line);
++            let is_trailing = is_trailing_on_line(&chars, start_idx);
++            tokens.push(CommentToken {
++                kind,
++                start_line,
++                end_line,
++                lines,
++                is_trailing,
++            });
++            continue;
++        }
++
++        // Quoted string literal: "..."
++        if chars[i] == '"' {
++            i += 1;
++            while i < n {
++                if chars[i] == '\\' {
++                    i += 1;
++                    if i < n {
++                        if chars[i] == '\n' {
++                            current_line += 1;
++                        }
++                        i += 1;
++                    }
++                } else if chars[i] == '"' {
++                    i += 1;
++                    break;
++                } else {
++                    if chars[i] == '\n' {
++                        current_line += 1;
++                    }
++                    i += 1;
++                }
++            }
++            continue;
++        }
++
++        // Raw string literal: r"...", r#"..."#, r##"..."##
++        if chars[i] == 'r' {
++            let mut hash_count = 0;
++            let mut k = i + 1;
++            while k < n && chars[k] == '#' {
++                hash_count += 1;
++                k += 1;
++            }
++            if k < n && chars[k] == '"' {
++                i = k + 1; // start inside raw string
++                while i < n {
++                    if chars[i] == '\n' {
++                        current_line += 1;
++                        i += 1;
++                    } else if chars[i] == '"' {
++                        let mut matches_hashes = true;
++                        for h in 0..hash_count {
++                            if i + 1 + h >= n || chars[i + 1 + h] != '#' {
++                                matches_hashes = false;
++                                break;
++                            }
++                        }
++                        if matches_hashes {
++                            i += 1 + hash_count;
++                            break;
++                        } else {
++                            i += 1;
++                        }
++                    } else {
++                        i += 1;
++                    }
++                }
++                continue;
++            }
++            i += 1;
++            continue;
++        }
++
++        // Character literal: '...' (careful with lifetimes like 'a)
++        if chars[i] == '\'' {
++            // Check if char literal
++            let is_char = if i + 1 < n && chars[i + 1] == '\\' {
++                // Escaped char literal: '\'', '\\', '\n', '\x7F', '\u{1234}'
++                // If escaped char is '\'', closing quote is at i + 3
++                let start_j = if i + 2 < n && chars[i + 2] == '\'' {
++                    i + 3
++                } else {
++                    i + 2
++                };
++                let mut found_close = false;
++                let mut j = start_j;
++                while j < n && chars[j] != '\n' && j - i <= 10 {
++                    if chars[j] == '\'' {
++                        found_close = true;
++                        i = j + 1;
++                        break;
++                    }
++                    j += 1;
++                }
++                found_close
++            } else if i + 2 < n && chars[i + 2] == '\'' && chars[i + 1] != '\n' && chars[i + 1] != '\\' {
++                // Simple single char literal: 'x', '/', '*'
++                i += 3;
++                true
++            } else {
++                false
++            };
++
++            if is_char {
++                continue;
++            }
++
++            // Otherwise lifetime or syntax quote, advance 1
++            i += 1;
++            continue;
++        }
++
++        if chars[i] == '\n' {
++            current_line += 1;
++        }
++        i += 1;
++    }
++
++    tokens
++}
++
++fn scan_swift_interpolation(chars: &[char], n: usize, i: &mut usize, current_line: &mut usize) {
++    // *i is at '\\', chars[*i + 1] is '('
++    *i += 2;
++    let mut paren_depth = 1;
++    while *i < n && paren_depth > 0 {
++        match chars[*i] {
++            '\n' => {
++                *current_line += 1;
++                *i += 1;
++            }
++            '\\' => {
++                *i += 1;
++                if *i < n {
++                    if chars[*i] == '\n' {
++                        *current_line += 1;
++                    }
++                    *i += 1;
++                }
++            }
++            '"' => {
++                // Nested string literal inside interpolation
++                if *i + 2 < n && chars[*i + 1] == '"' && chars[*i + 2] == '"' {
++                    *i += 3;
++                    while *i < n {
++                        if chars[*i] == '\\' {
++                            *i += 1;
++                            if *i < n {
++                                if chars[*i] == '\n' {
++                                    *current_line += 1;
++                                }
++                                *i += 1;
++                            }
++                        } else if chars[*i] == '"' && *i + 2 < n && chars[*i + 1] == '"' && chars[*i + 2] == '"' {
++                            *i += 3;
++                            break;
++                        } else {
++                            if chars[*i] == '\n' {
++                                *current_line += 1;
++                            }
++                            *i += 1;
++                        }
++                    }
++                } else {
++                    *i += 1;
++                    while *i < n {
++                        if chars[*i] == '\\' {
++                            *i += 1;
++                            if *i < n {
++                                if chars[*i] == '\n' {
++                                    *current_line += 1;
++                                }
++                                *i += 1;
++                            }
++                        } else if chars[*i] == '"' {
++                            *i += 1;
++                            break;
++                        } else {
++                            if chars[*i] == '\n' {
++                                *current_line += 1;
++                            }
++                            *i += 1;
++                        }
++                    }
++                }
++            }
++            '(' => {
++                paren_depth += 1;
++                *i += 1;
++            }
++            ')' => {
++                paren_depth -= 1;
++                *i += 1;
++            }
++            _ => {
++                *i += 1;
++            }
++        }
++    }
++}
++
++/// Lexical tokenizer for Swift (.swift).
++fn tokenize_swift(source: &str) -> Vec<CommentToken> {
++    let mut tokens = Vec::new();
++    let chars: Vec<char> = source.chars().collect();
++    let n = chars.len();
++    let mut i = 0;
++    let mut current_line = 1;
++
++    while i < n {
++        // Line comment: //
++        if chars[i] == '/' && i + 1 < n && chars[i + 1] == '/' {
++            let start_line = current_line;
++            let start_idx = i;
++            let kind = if i + 2 < n && chars[i + 2] == '/' && !(i + 3 < n && chars[i + 3] == '/') {
++                CommentKind::DocLine // ///
++            } else {
++                CommentKind::Line
++            };
++
++            while i < n && chars[i] != '\n' {
++                i += 1;
++            }
++            let raw_text: String = chars[start_idx..i].iter().collect();
++            let stripped = raw_text.strip_suffix('\r').unwrap_or(&raw_text);
++            let is_trailing = is_trailing_on_line(&chars, start_idx);
++            tokens.push(CommentToken {
++                kind,
++                start_line,
++                end_line: start_line,
++                lines: vec![CommentLine {
++                    line_number: start_line,
++                    text: stripped.to_string(),
++                }],
++                is_trailing,
++            });
++            continue;
++        }
++
++        // Block comment: /*
++        if chars[i] == '/' && i + 1 < n && chars[i + 1] == '*' {
++            let start_line = current_line;
++            let start_idx = i;
++            let is_doc = i + 2 < n && chars[i + 2] == '*' && !(i + 3 < n && (chars[i + 3] == '*' || chars[i + 3] == '/'));
++            let kind = if is_doc {
++                CommentKind::DocBlock
++            } else {
++                CommentKind::Block
++            };
++
++            let mut depth = 1;
++            i += 2;
++            while i < n && depth > 0 {
++                if chars[i] == '\n' {
++                    current_line += 1;
++                    i += 1;
++                } else if chars[i] == '/' && i + 1 < n && chars[i + 1] == '*' {
++                    depth += 1;
++                    i += 2;
++                } else if chars[i] == '*' && i + 1 < n && chars[i + 1] == '/' {
++                    depth -= 1;
++                    i += 2;
++                } else {
++                    i += 1;
++                }
++            }
++            let end_line = current_line;
++            let raw_text: String = chars[start_idx..i].iter().collect();
++            let lines = split_comment_lines(&raw_text, start_line);
++            let is_trailing = is_trailing_on_line(&chars, start_idx);
++            tokens.push(CommentToken {
++                kind,
++                start_line,
++                end_line,
++                lines,
++                is_trailing,
++            });
++            continue;
++        }
++
++        // Swift Raw String literals: #"..."#, ##"..."##, #"""..."""#
++        if chars[i] == '#' {
++            let mut hash_count = 0;
++            let mut k = i;
++            while k < n && chars[k] == '#' {
++                hash_count += 1;
++                k += 1;
++            }
++            if k < n && chars[k] == '"' {
++                // Check if multiline raw string #"""
++                let is_multiline = k + 2 < n && chars[k + 1] == '"' && chars[k + 2] == '"';
++                if is_multiline {
++                    i = k + 3;
++                    while i < n {
++                        if chars[i] == '\n' {
++                            current_line += 1;
++                            i += 1;
++                        } else if chars[i] == '"' && i + 2 < n && chars[i + 1] == '"' && chars[i + 2] == '"' {
++                            let mut matches_hashes = true;
++                            for h in 0..hash_count {
++                                if i + 3 + h >= n || chars[i + 3 + h] != '#' {
++                                    matches_hashes = false;
++                                    break;
++                                }
++                            }
++                            if matches_hashes {
++                                i += 3 + hash_count;
++                                break;
++                            } else {
++                                i += 1;
++                            }
++                        } else {
++                            i += 1;
++                        }
++                    }
++                    continue;
++                } else {
++                    i = k + 1;
++                    while i < n {
++                        if chars[i] == '\n' {
++                            current_line += 1;
++                            i += 1;
++                        } else if chars[i] == '"' {
++                            let mut matches_hashes = true;
++                            for h in 0..hash_count {
++                                if i + 1 + h >= n || chars[i + 1 + h] != '#' {
++                                    matches_hashes = false;
++                                    break;
++                                }
++                            }
++                            if matches_hashes {
++                                i += 1 + hash_count;
++                                break;
++                            } else {
++                                i += 1;
++                            }
++                        } else {
++                            i += 1;
++                        }
++                    }
++                    continue;
++                }
++            }
++            i += 1;
++            continue;
++        }
++
++        // Swift Multiline String literal: """
++        if chars[i] == '"' && i + 2 < n && chars[i + 1] == '"' && chars[i + 2] == '"' {
++            i += 3;
++            while i < n {
++                if chars[i] == '\\' && i + 1 < n && chars[i + 1] == '(' {
++                    scan_swift_interpolation(&chars, n, &mut i, &mut current_line);
++                } else if chars[i] == '\\' {
++                    i += 1;
++                    if i < n {
++                        if chars[i] == '\n' {
++                            current_line += 1;
++                        }
++                        i += 1;
++                    }
++                } else if chars[i] == '"' && i + 2 < n && chars[i + 1] == '"' && chars[i + 2] == '"' {
++                    i += 3;
++                    break;
++                } else {
++                    if chars[i] == '\n' {
++                        current_line += 1;
++                    }
++                    i += 1;
++                }
++            }
++            continue;
++        }
++
++        // Swift standard String literal: "..."
++        if chars[i] == '"' {
++            i += 1;
++            while i < n {
++                if chars[i] == '\\' && i + 1 < n && chars[i + 1] == '(' {
++                    scan_swift_interpolation(&chars, n, &mut i, &mut current_line);
++                } else if chars[i] == '\\' {
++                    i += 1;
++                    if i < n {
++                        if chars[i] == '\n' {
++                            current_line += 1;
++                        }
++                        i += 1;
++                    }
++                } else if chars[i] == '"' {
++                    i += 1;
++                    break;
++                } else {
++                    if chars[i] == '\n' {
++                        current_line += 1;
++                    }
++                    i += 1;
++                }
++            }
++            continue;
++        }
++
++        if chars[i] == '\n' {
++            current_line += 1;
++        }
++        i += 1;
++    }
++
++    tokens
++}
++
++/// Lexical tokenizer for Python (.py).
++fn tokenize_python(source: &str) -> Vec<CommentToken> {
++    let mut tokens = Vec::new();
++    let chars: Vec<char> = source.chars().collect();
++    let n = chars.len();
++    let mut i = 0;
++    let mut current_line = 1;
++
++    while i < n {
++        // Triple-double-quoted string: """...""" (treated as doc comment per spec)
++        if chars[i] == '"' && i + 2 < n && chars[i + 1] == '"' && chars[i + 2] == '"' {
++            let start_line = current_line;
++            let start_idx = i;
++            i += 3;
++            while i < n {
++                if chars[i] == '\\' {
++                    i += 1;
++                    if i < n {
++                        if chars[i] == '\n' {
++                            current_line += 1;
++                        }
++                        i += 1;
++                    }
++                } else if chars[i] == '"' && i + 2 < n && chars[i + 1] == '"' && chars[i + 2] == '"' {
++                    i += 3;
++                    break;
++                } else {
++                    if chars[i] == '\n' {
++                        current_line += 1;
++                    }
++                    i += 1;
++                }
++            }
++            let end_line = current_line;
++            let raw_text: String = chars[start_idx..i].iter().collect();
++            let lines = split_comment_lines(&raw_text, start_line);
++            let is_trailing = is_trailing_on_line(&chars, start_idx);
++            tokens.push(CommentToken {
++                kind: CommentKind::DocBlock,
++                start_line,
++                end_line,
++                lines,
++                is_trailing,
++            });
++            continue;
++        }
++
++        // Triple-single-quoted string: '''...''' (treated as doc comment per spec)
++        if chars[i] == '\'' && i + 2 < n && chars[i + 1] == '\'' && chars[i + 2] == '\'' {
++            let start_line = current_line;
++            let start_idx = i;
++            i += 3;
++            while i < n {
++                if chars[i] == '\\' {
++                    i += 1;
++                    if i < n {
++                        if chars[i] == '\n' {
++                            current_line += 1;
++                        }
++                        i += 1;
++                    }
++                } else if chars[i] == '\'' && i + 2 < n && chars[i + 1] == '\'' && chars[i + 2] == '\'' {
++                    i += 3;
++                    break;
++                } else {
++                    if chars[i] == '\n' {
++                        current_line += 1;
++                    }
++                    i += 1;
++                }
++            }
++            let end_line = current_line;
++            let raw_text: String = chars[start_idx..i].iter().collect();
++            let lines = split_comment_lines(&raw_text, start_line);
++            let is_trailing = is_trailing_on_line(&chars, start_idx);
++            tokens.push(CommentToken {
++                kind: CommentKind::DocBlock,
++                start_line,
++                end_line,
++                lines,
++                is_trailing,
++            });
++            continue;
++        }
++
++        // Standard double-quoted string: "..."
++        if chars[i] == '"' {
++            i += 1;
++            while i < n {
++                if chars[i] == '\\' {
++                    i += 1;
++                    if i < n {
++                        if chars[i] == '\n' {
++                            current_line += 1;
++                        }
++                        i += 1;
++                    }
++                } else if chars[i] == '"' {
++                    i += 1;
++                    break;
++                } else if chars[i] == '\n' {
++                    current_line += 1;
++                    i += 1;
++                    break;
++                } else {
++                    i += 1;
++                }
++            }
++            continue;
++        }
++
++        // Standard single-quoted string: '...'
++        if chars[i] == '\'' {
++            i += 1;
++            while i < n {
++                if chars[i] == '\\' {
++                    i += 1;
++                    if i < n {
++                        if chars[i] == '\n' {
++                            current_line += 1;
++                        }
++                        i += 1;
++                    }
++                } else if chars[i] == '\'' {
++                    i += 1;
++                    break;
++                } else if chars[i] == '\n' {
++                    current_line += 1;
++                    i += 1;
++                    break;
++                } else {
++                    i += 1;
++                }
++            }
++            continue;
++        }
++
++        // Line comment: #
++        if chars[i] == '#' {
++            let start_line = current_line;
++            let start_idx = i;
++            while i < n && chars[i] != '\n' {
++                i += 1;
++            }
++            let raw_text: String = chars[start_idx..i].iter().collect();
++            let stripped = raw_text.strip_suffix('\r').unwrap_or(&raw_text);
++            let is_trailing = is_trailing_on_line(&chars, start_idx);
++            tokens.push(CommentToken {
++                kind: CommentKind::Line,
++                start_line,
++                end_line: start_line,
++                lines: vec![CommentLine {
++                    line_number: start_line,
++                    text: stripped.to_string(),
++                }],
++                is_trailing,
++            });
++            continue;
++        }
++
++        if chars[i] == '\n' {
++            current_line += 1;
++        }
++        i += 1;
++    }
++
++    tokens
++}
+diff --git a/crates/qdev-core/tests/hygiene_tests.rs b/crates/qdev-core/tests/hygiene_tests.rs
+new file mode 100644
+index 0000000..d80bf48
+--- /dev/null
++++ b/crates/qdev-core/tests/hygiene_tests.rs
+@@ -0,0 +1,404 @@
++use std::path::Path;
++use qdev_core::config::{Config, HygieneConfig};
++use qdev_core::hygiene::{
++    check_hygiene, lint_comments, tokenize_comments, CommentKind, HygieneCheckOptions,
++    SupportedLanguage, RULE_FORBID_PATTERNS, RULE_MAX_INLINE_COMMENT_LINES, RULE_REVIEW_ROUND,
++    RULE_STORY_BANNER,
++};
++
++#[test]
++fn test_rust_tokenizer_line_and_doc_comments() {
++    let source = r#"
++// regular line comment
++/// outer doc comment
++//! inner doc comment
++//// four slashes is regular line comment
++fn main() {}
++"#;
++    let tokens = tokenize_comments(source, SupportedLanguage::Rust);
++    assert_eq!(tokens.len(), 4);
++
++    assert_eq!(tokens[0].kind, CommentKind::Line);
++    assert_eq!(tokens[0].start_line, 2);
++    assert_eq!(tokens[0].lines[0].text, "// regular line comment");
++
++    assert_eq!(tokens[1].kind, CommentKind::DocLine);
++    assert_eq!(tokens[1].start_line, 3);
++    assert_eq!(tokens[1].lines[0].text, "/// outer doc comment");
++
++    assert_eq!(tokens[2].kind, CommentKind::DocLine);
++    assert_eq!(tokens[2].start_line, 4);
++    assert_eq!(tokens[2].lines[0].text, "//! inner doc comment");
++
++    assert_eq!(tokens[3].kind, CommentKind::Line);
++    assert_eq!(tokens[3].start_line, 5);
++}
++
++#[test]
++fn test_rust_tokenizer_nested_block_comments() {
++    let source = r#"
++/* outer comment
++   /* inner comment */
++   still outer comment */
++fn main() {}
++"#;
++    let tokens = tokenize_comments(source, SupportedLanguage::Rust);
++    assert_eq!(tokens.len(), 1);
++    assert_eq!(tokens[0].kind, CommentKind::Block);
++    assert_eq!(tokens[0].start_line, 2);
++    assert_eq!(tokens[0].end_line, 4);
++    assert_eq!(tokens[0].lines.len(), 3);
++}
++
++#[test]
++fn test_rust_tokenizer_doc_block_comments() {
++    let source = r#"
++/** doc block comment */
++/*! inner doc block comment */
++/* regular block comment */
++/**/
++"#;
++    let tokens = tokenize_comments(source, SupportedLanguage::Rust);
++    assert_eq!(tokens.len(), 4);
++    assert_eq!(tokens[0].kind, CommentKind::DocBlock);
++    assert_eq!(tokens[1].kind, CommentKind::DocBlock);
++    assert_eq!(tokens[2].kind, CommentKind::Block);
++    assert_eq!(tokens[3].kind, CommentKind::Block);
++}
++
++#[test]
++fn test_rust_tokenizer_string_literal_shielding() {
++    let source = r###"
++fn main() {
++    let s = "Hello // not a comment /* neither */";
++    let esc = "He said: \"// still not comment\"";
++    let raw = r#"Raw // not a comment /* neither */"#;
++    let raw_hashes = r##"Multiline raw
++// not a comment
++/* neither */"##;
++    let c = '/';
++    let star = '*';
++}
++"###;
++    let tokens = tokenize_comments(source, SupportedLanguage::Rust);
++    assert_eq!(tokens.len(), 0, "No comments should be extracted from strings or char literals");
++}
++
++#[test]
++fn test_rust_tokenizer_lifetimes() {
++    let source = r#"
++fn foo<'a>(x: &'a str) -> &'a str {
++    // legitimate comment
++    x
++}
++"#;
++    let tokens = tokenize_comments(source, SupportedLanguage::Rust);
++    assert_eq!(tokens.len(), 1);
++    assert_eq!(tokens[0].lines[0].text, "// legitimate comment");
++}
++
++#[test]
++fn test_swift_tokenizer_comments_and_strings() {
++    let source = r###"
++// Swift line comment
++/// Swift doc line
++/* Swift block /* nested */ comment */
++/** Swift doc block */
++let s = "Hello // not a comment"
++let multiline = """
++// not a comment inside multiline
++"""
++let raw = #"Raw // not a comment"#
++"###;
++    let tokens = tokenize_comments(source, SupportedLanguage::Swift);
++    assert_eq!(tokens.len(), 4);
++    assert_eq!(tokens[0].kind, CommentKind::Line);
++    assert_eq!(tokens[1].kind, CommentKind::DocLine);
++    assert_eq!(tokens[2].kind, CommentKind::Block);
++    assert_eq!(tokens[3].kind, CommentKind::DocBlock);
++}
++
++#[test]
++fn test_python_tokenizer_comments_and_docstrings() {
++    let source = r###"
++# Python line comment
++"""Triple double quote docstring
++line 2
++"""
++'''Triple single quote docstring
++line 2
++'''
++s1 = "Hello # not comment"
++s2 = 'World # not comment'
++"###;
++    let tokens = tokenize_comments(source, SupportedLanguage::Python);
++    assert_eq!(tokens.len(), 3);
++    assert_eq!(tokens[0].kind, CommentKind::Line);
++    assert_eq!(tokens[1].kind, CommentKind::DocBlock);
++    assert_eq!(tokens[2].kind, CommentKind::DocBlock);
++}
++
++#[test]
++fn test_linter_story_banner_detection() {
++    let config = HygieneConfig::default();
++    let source = r#"
++// ⭐ **STORY 2.10 — FIRST import**
++// STORY 123: Initial implementation
++// STORY E12S4: Buffer layout
++// ⭐ STORY
++// A comment telling a story about performance
++"#;
++    let tokens = tokenize_comments(source, SupportedLanguage::Rust);
++    let findings = lint_comments("src/main.rs", &tokens, &config).unwrap();
++
++    assert_eq!(findings.len(), 4);
++    for finding in &findings {
++        assert_eq!(finding.rule_id, RULE_STORY_BANNER);
++    }
++    assert_eq!(findings[0].line, 2);
++    assert_eq!(findings[1].line, 3);
++    assert_eq!(findings[2].line, 4);
++    assert_eq!(findings[3].line, 5);
++}
++
++#[test]
++fn test_linter_review_round_detection() {
++    let config = HygieneConfig::default();
++    let source = r#"
++// Review round 2 findings: fixed bug
++// Wave 1: initial scaffolding
++// Review pass 3: verification
++// Normal comment discussing review process
++// Low-pass 1 filter and render pass 1 should not trigger
++"#;
++    let tokens = tokenize_comments(source, SupportedLanguage::Rust);
++    let findings = lint_comments("src/main.rs", &tokens, &config).unwrap();
++
++    assert_eq!(findings.len(), 3);
++    for finding in &findings {
++        assert_eq!(finding.rule_id, RULE_REVIEW_ROUND);
++    }
++    assert_eq!(findings[0].line, 2);
++    assert_eq!(findings[1].line, 3);
++    assert_eq!(findings[2].line, 4);
++}
++
++#[test]
++fn test_linter_forbid_patterns() {
++    let config = HygieneConfig {
++        forbid_patterns: vec!["TEMPORARY_HACK".to_string(), "NO_COMMIT".to_string()],
++        ..Default::default()
++    };
++
++    let source = r#"
++// Line 1: normal
++// Line 2: TEMPORARY_HACK: needs fix
++// Line 3: NO_COMMIT before release
++// Line 4: clean
++"#;
++    let tokens = tokenize_comments(source, SupportedLanguage::Rust);
++    let findings = lint_comments("src/lib.rs", &tokens, &config).unwrap();
++
++    assert_eq!(findings.len(), 2);
++    assert_eq!(findings[0].rule_id, RULE_FORBID_PATTERNS);
++    assert_eq!(findings[0].line, 3);
++    assert_eq!(findings[1].rule_id, RULE_FORBID_PATTERNS);
++    assert_eq!(findings[1].line, 4);
++}
++
++#[test]
++fn test_linter_max_inline_comment_lines() {
++    let config = HygieneConfig {
++        max_inline_comment_lines: 6,
++        ..Default::default()
++    };
++
++    // 6 lines -> clean
++    let clean_source = r#"
++// line 1
++// line 2
++// line 3
++// line 4
++// line 5
++// line 6
++"#;
++    let clean_tokens = tokenize_comments(clean_source, SupportedLanguage::Rust);
++    let clean_findings = lint_comments("src/clean.rs", &clean_tokens, &config).unwrap();
++    assert_eq!(clean_findings.len(), 0);
++
++    // 7 lines -> violation at block start line
++    let violation_source = r#"
++// line 1
++// line 2
++// line 3
++// line 4
++// line 5
++// line 6
++// line 7
++"#;
++    let violation_tokens = tokenize_comments(violation_source, SupportedLanguage::Rust);
++    let violation_findings = lint_comments("src/violation.rs", &violation_tokens, &config).unwrap();
++    assert_eq!(violation_findings.len(), 1);
++    assert_eq!(violation_findings[0].rule_id, RULE_MAX_INLINE_COMMENT_LINES);
++    assert_eq!(violation_findings[0].line, 2);
++    assert_eq!(violation_findings[0].excerpt, "// line 1");
++}
++
++#[test]
++fn test_linter_doc_comments_never_flagged_under_max_lines() {
++    let config = HygieneConfig {
++        max_inline_comment_lines: 6,
++        ..Default::default()
++    };
++
++    let doc_source = r#"
++/// doc line 1
++/// doc line 2
++/// doc line 3
++/// doc line 4
++/// doc line 5
++/// doc line 6
++/// doc line 7
++/// doc line 8
++fn documented() {}
++"#;
++    let tokens = tokenize_comments(doc_source, SupportedLanguage::Rust);
++    let findings = lint_comments("src/doc.rs", &tokens, &config).unwrap();
++    assert_eq!(findings.len(), 0, "Doc comments must never be flagged under max_inline_comment_lines");
++}
++
++#[test]
++fn test_linter_citation_exemption() {
++    let config = HygieneConfig {
++        max_inline_comment_lines: 6,
++        ..Default::default()
++    };
++
++    // Comments with compact citations are exempt from story banner and forbid checks
++    let source = r#"
++// [E12S10] Rust-driven mount (see AD-43)
++// [DEC-2b91] Extended attributes table
++// [HAZ-14] Safety PIP latch
++// [DW-7f3a] Temporary zero-copy bypass
++// [E12S4/NG-2] Frame buffers untouched
++// [E12S4] STORY 2.10 implementation
++"#;
++    let tokens = tokenize_comments(source, SupportedLanguage::Rust);
++    let findings = lint_comments("src/citations.rs", &tokens, &config).unwrap();
++    assert_eq!(findings.len(), 0, "Compact citations must be completely exempt");
++
++    // Lines with citations do not count toward max_inline_comment_lines
++    let block_with_citation = r#"
++// line 1
++// line 2
++// line 3
++// [E12S4] line with citation does not count
++// line 4
++// line 5
++// line 6
++"#;
++    let tokens2 = tokenize_comments(block_with_citation, SupportedLanguage::Rust);
++    let findings2 = lint_comments("src/block.rs", &tokens2, &config).unwrap();
++    assert_eq!(findings2.len(), 0, "Block with 6 regular lines and 1 citation line must pass");
++
++    // 7 regular lines + 1 citation line -> 7 non-citation lines > 6 -> violation
++    let block_over_limit = r#"
++// line 1
++// line 2
++// line 3
++// line 4
++// [E12S4] line with citation does not count
++// line 5
++// line 6
++// line 7
++"#;
++    let tokens3 = tokenize_comments(block_over_limit, SupportedLanguage::Rust);
++    let findings3 = lint_comments("src/block.rs", &tokens3, &config).unwrap();
++    assert_eq!(findings3.len(), 1);
++    assert_eq!(findings3[0].rule_id, RULE_MAX_INLINE_COMMENT_LINES);
++}
++
++#[test]
++fn test_check_hygiene_disabled() {
++    let config = Config {
++        hygiene: HygieneConfig {
++            enabled: false,
++            ..Default::default()
++        },
++        ..Default::default()
++    };
++
++    let options = HygieneCheckOptions::default();
++    let outcome = check_hygiene(Path::new("."), &config, &options).unwrap();
++    assert_eq!(outcome.status, "pass");
++    assert_eq!(outcome.findings.len(), 0);
++}
++
++#[test]
++fn test_rust_tokenizer_escaped_quote_char() {
++    let source = "let c = '\\''; // comment after escaped quote\nlet x = 1;\n";
++    let tokens = tokenize_comments(source, SupportedLanguage::Rust);
++    assert_eq!(tokens.len(), 1);
++    assert_eq!(tokens[0].lines[0].text, "// comment after escaped quote");
++    assert_eq!(tokens[0].start_line, 1);
++}
++
++#[test]
++fn test_swift_tokenizer_interpolation_with_quotes() {
++    let source = "let msg = \"Hello \\(name == \"world\" ? 1 : 2)\"; // comment after interpolation\n";
++    let tokens = tokenize_comments(source, SupportedLanguage::Swift);
++    assert_eq!(tokens.len(), 1);
++    assert_eq!(tokens[0].lines[0].text, "// comment after interpolation");
++}
++
++#[test]
++fn test_trailing_comments_not_grouped_into_max_inline_lines() {
++    let config = HygieneConfig {
++        max_inline_comment_lines: 6,
++        ..Default::default()
++    };
++    let source = r#"
++let a = 1; // comment 1
++let b = 2; // comment 2
++let c = 3; // comment 3
++let d = 4; // comment 4
++let e = 5; // comment 5
++let f = 6; // comment 6
++let g = 7; // comment 7
++"#;
++    let tokens = tokenize_comments(source, SupportedLanguage::Rust);
++    let findings = lint_comments("src/statements.rs", &tokens, &config).unwrap();
++    assert_eq!(findings.len(), 0, "Trailing statement comments must not be grouped into inline block");
++}
++
++#[test]
++fn test_check_hygiene_bare_workspace_traversal_multi_language() {
++    let temp = tempfile::TempDir::new().unwrap();
++    let root = temp.path();
++
++    let rust_file = root.join("src/lib.rs");
++    std::fs::create_dir_all(rust_file.parent().unwrap()).unwrap();
++    std::fs::write(&rust_file, "// Clean rust code\npub fn hello() {}\n").unwrap();
++
++    let swift_file = root.join("Sources/App.swift");
++    std::fs::create_dir_all(swift_file.parent().unwrap()).unwrap();
++    std::fs::write(&swift_file, "// ⭐ EPIC 3 - core setup\nfunc run() {}\n").unwrap();
++
++    let py_file = root.join("scripts/build.py");
++    std::fs::create_dir_all(py_file.parent().unwrap()).unwrap();
++    std::fs::write(&py_file, "# Review round 1 findings: fix script\nprint('ok')\n").unwrap();
++
++    let config = Config {
++        hygiene: HygieneConfig {
++            enabled: true,
++            languages: vec!["rs".to_string(), "swift".to_string(), "py".to_string()],
++            ..Default::default()
++        },
++        ..Default::default()
++    };
++
++    let outcome = check_hygiene(root, &config, &HygieneCheckOptions::default()).unwrap();
++    assert_eq!(outcome.findings.len(), 2);
++    assert!(outcome.findings.iter().any(|f| f.file.ends_with("App.swift") && f.rule_id == RULE_STORY_BANNER));
++    assert!(outcome.findings.iter().any(|f| f.file.ends_with("build.py") && f.rule_id == RULE_REVIEW_ROUND));
++}
+diff --git a/docs/bmad/implementation-artifacts/spec-3-9-hygiene-linter-lint-and-report.md b/docs/bmad/implementation-artifacts/spec-3-9-hygiene-linter-lint-and-report.md
+new file mode 100644
+index 0000000..0d2a8b2
+--- /dev/null
++++ b/docs/bmad/implementation-artifacts/spec-3-9-hygiene-linter-lint-and-report.md
+@@ -0,0 +1,142 @@
++---
++title: 'Story 3.9: Hygiene Linter (Lint and Report)'
++type: 'feature'
++created: '2026-09-26'
++status: 'in-review'
++baseline_commit: 'b7df4744c401af0ae255987eaf807acddd379ef6'
++route: 'dispatch'
++review_loop_iteration: 0
++context:
++  - 'docs/compliance-and-safety.md'
++  - 'docs/cli-reference.md'
++  - 'docs/bmad/implementation-artifacts/epic-3-context.md'
++---
++
++<frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
++
++## Intent
++
++**Problem:** LLMs and human developers frequently inject narrative memoirs, review rounds, and story banner comments into source code, cluttering files and obscuring business logic.
++**Approach:** Implement a language-aware lexical comment tokenizer for Rust, Swift, and Python to extract line, block, and doc comments without false positives from string literals; lint comments against `max_inline_comment_lines`, `forbid_patterns`, and narrative markers (story banners, review rounds, waves); exempt compact entity citations matching `citation_pattern`; report findings with `file:line`, rule ID, and excerpt; and enforce lint-and-report only (`--fix` exits 2 with a message that automatic fixing is deferred).
++
++## Boundaries & Constraints
++
++**Always:**
++- Extract comments using a language-aware lexical tokenizer for Rust (`.rs`), Swift (`.swift`), and Python (`.py`), correctly parsing line comments (`//`, `#`), block comments (`/* ... */` with nesting in Rust and Swift), and doc comments (`///`, `//!`, `/** ... */` in Rust/Swift; docstrings `"""` / `'''` in Python).
++- Ignore comment syntax characters (`//`, `/*`, `#`, `"""`) when they occur inside string literals (standard, escaped, multiline, raw strings `r#"..."#`, `#"..."#`).
++- Exempt compact citations matching `citation_pattern` (or `DEFAULT_CITATION_PATTERN`) so that valid citations (`[E12S4]`, `[AD-43]`, `[DEC-2b91]`, `[HAZ-14]`, `[DW-7f3a]`, `[E12S4/NG-2]`) are never flagged as findings or counted against inline comment block limits.
++- Flag non-doc inline comment blocks exceeding `max_inline_comment_lines` (default 6) with rule ID `max_inline_comment_lines`.
++- Flag comments matching any pattern in `config.hygiene.forbid_patterns` with rule ID `forbid_patterns`.
++- Flag story banners (e.g. `STORY \d+`, `STORY E\d+S\d+`, `⭐ STORY`) with rule ID `story_banner` and review-round narratives or wave markers (e.g. `Review round \d+`, `Wave \d+`, `Pass \d+`) with rule ID `review_round`.
++- Exit with code 1 (`ExitCode::LogicalFailure`) when any hygiene finding is detected.
++- Exit with code 0 (`ExitCode::Success`) when zero findings are detected or when hygiene is disabled.
++- Exit with code 2 (`ExitCode::UsageError`) when `--fix` is passed, outputting a clear message that automatic fixing is deferred, without modifying any source file.
++- Support `--diff` to restrict linting to files changed in the git diff against the integration branch (falling back to staged/working tree changes).
++- Support explicit target paths (`PATHS...`) to lint specific files or directories.
++- Support `--json` emitting an envelope validating against `schemas/payload-hygiene.json` with `status`, `summary`, and structured `findings` (`file`, `line`, `location`, `rule_id`, `excerpt`).
++
++**Never:**
++- Never use raw regex over unparsed source code to extract comments.
++- Never modify or mutate any source file (v1 is strictly lint-and-report).
++- Never flag compact entity citations matching `citation_pattern`.
++- Never flag legitimate public API doc comments under `max_inline_comment_lines` (which applies to inline comments).
++
++## I/O & Edge-Case Matrix
++
++| Scenario | Input / State | Expected Output / Behavior | Error Handling |
++|----------|--------------|---------------------------|----------------|
++| Clean source file | `qdev hygiene check path/to/clean.rs` | Exit 0; `Hygiene check: 0 findings` (or JSON `status: "pass"`) | N/A |
++| Memoir banner comment | Comment `// ⭐ **STORY 2.10 — FIRST import**` | Exit 1; finding at `file:line` with rule ID `story_banner` and excerpt | ExitCode::LogicalFailure |
++| Review round narrative | Comment `// Review round 2 findings: fixed bug` | Exit 1; finding at `file:line` with rule ID `review_round` and excerpt | ExitCode::LogicalFailure |
++| Comment block over max lines | 7 contiguous lines of `// ...` with `max_inline_comment_lines = 6` | Exit 1; finding at block start line with rule ID `max_inline_comment_lines` | ExitCode::LogicalFailure |
++| Configured forbid pattern | Comment matching `forbid_patterns` regex | Exit 1; finding at line with rule ID `forbid_patterns` and excerpt | ExitCode::LogicalFailure |
++| Valid compact citation | Comment `// [E12S10] Rust-driven mount (see AD-43)` | Exit 0; citation exempted, no finding produced | N/A |
++| Nested block comments | Rust/Swift `/* outer /* inner */ still comment */` | Extracted correctly as one continuous block comment with depth tracking | N/A |
++| Comment markers in string literals | `let s = "Hello // not a comment /* neither */";` | Zero comments extracted from inside the string; no false findings | N/A |
++| Raw string literals | `let r = r#"Raw string // not comment"#;` | Zero comments extracted from raw string; no false findings | N/A |
++| Python triple quotes | Python docstring `""" ... """` | Extracted as doc comment; string inside `" # not comment "` ignored | N/A |
++| `--fix` invoked | `qdev hygiene check --fix` | Exit 2; message that auto-fix is deferred; zero files modified | ExitCode::UsageError |
++| `--diff` filter | `qdev hygiene check --diff` | Lints only files modified in git diff; clean diff exits 0 | If git fails, infrastructure error |
++| Hygiene disabled | `[hygiene] enabled = false` in `qdev.toml` | Exit 0; 0 findings reported | N/A |
++
++</frozen-after-approval>
++
++## Code Map
++
++- `crates/qdev-core/src/hygiene/mod.rs` -- Hygiene module entry point, types (`HygieneFinding`, `HygieneCheckOutcome`), and `check_hygiene` orchestrator.
++- `crates/qdev-core/src/hygiene/tokenizer.rs` -- Language-aware lexical comment tokenizers for Rust (`.rs`), Swift (`.swift`), and Python (`.py`), tracking line numbers, comment kinds, and string literal boundaries with nesting depth support.
++- `crates/qdev-core/src/hygiene/linter.rs` -- Comment rule enforcement engine (`max_inline_comment_lines`, `forbid_patterns`, `story_banner`, `review_round`) with compact citation whitelist matching `citation_pattern`.
++- `crates/qdev-core/schemas/payload-hygiene.json` -- JSON Schema for `qdev hygiene check --json` output envelope.
++- `crates/qdev-core/src/schema.rs` -- Register `PayloadKind::Hygiene` with `payload-hygiene.json`.
++- `crates/qdev-core/src/gate/runner.rs` -- Register `BUILTIN_GATE_HYGIENE` (`qdev-hygiene`) and wire hygiene runner into gate execution.
++- `crates/qdev-core/src/lib.rs` -- Export `hygiene` module and types.
++- `crates/qdev-cli/src/cli.rs` -- Add `--fix` flag to `HygieneCheckArgs`.
++- `crates/qdev-cli/src/handlers/hygiene.rs` -- Full CLI handler for `qdev hygiene check [--diff] [--fix] [--json] [PATHS...]`.
++- `crates/qdev-core/tests/hygiene_tests.rs` -- Comprehensive unit and property tests for comment tokenization, nesting, string literal shielding, citation exemption, and rule evaluation.
++- `crates/qdev-cli/tests/hygiene_cli_tests.rs` -- CLI integration tests for `qdev hygiene check` with `--diff`, `--fix`, paths, `--json`, and exit codes.
++
++## Tasks & Acceptance
++
++**Execution:**
++- [x] `crates/qdev-core/src/hygiene/tokenizer.rs` -- Implement lexical tokenizers for Rust, Swift, and Python handling line, block (with nesting), and doc comments while ignoring strings.
++- [x] `crates/qdev-core/src/hygiene/linter.rs` -- Implement rule evaluation for `max_inline_comment_lines`, `forbid_patterns`, `story_banner`, and `review_round` with citation whitelist.
++- [x] `crates/qdev-core/src/hygiene/mod.rs` -- Implement hygiene check runner inspecting file sets or diff paths against config.
++- [x] `crates/qdev-core/schemas/payload-hygiene.json` -- Add JSON Schema for hygiene payload.
++- [x] `crates/qdev-core/src/schema.rs` -- Register `PayloadKind::Hygiene`.
++- [x] `crates/qdev-core/src/gate/runner.rs` -- Add `BUILTIN_GATE_HYGIENE` ("qdev-hygiene") built-in gate support.
++- [x] `crates/qdev-core/src/lib.rs` -- Export hygiene module.
++- [x] `crates/qdev-cli/src/cli.rs` -- Add `--fix` flag to `HygieneCheckArgs`.
++- [x] `crates/qdev-cli/src/handlers/hygiene.rs` -- Implement `handle_hygiene` supporting text and JSON output, `--diff`, `--fix` exit 2, and exit code 1 on findings.
++- [x] `crates/qdev-core/tests/hygiene_tests.rs` -- Unit tests for tokenizers across Rust, Swift, Python, rule checks, and citations.
++- [x] `crates/qdev-cli/tests/hygiene_cli_tests.rs` -- CLI integration tests for `qdev hygiene check`.
++
++**Acceptance Criteria:**
++- Given `[hygiene]` configuration and source in the configured languages, when I run `qdev hygiene check --diff`, then comments are extracted with a language-aware tokenizer for Rust, Swift, and Python (line, block, and doc comments), not by regex over raw source.
++- Findings are produced for blocks over `max_inline_comment_lines`, matches of `forbid_patterns`, and story banners or review-round narratives, each with `file:line`, rule id, and excerpt; exit 1 on any finding.
++- Compact citations matching `citation_pattern` are never flagged.
++- No file is modified; `--fix` exits 2 with a message that automatic fixing is deferred.
++
++## Implementation Notes
++
++## Spec Change Log
++
++## Review Triage Log
++
++| Finding | Reviewer | Verdict | Evidence / Rationale | Disposition |
++|---|---|---|---|---|
++| Pre-commit hook does not verify comment hygiene blocks commits | verification-gap | `medium` | Pre-verified gap: existing hook tests verify secrets and validation but no test asserts hygiene failures block pre-commit | patch |
++| Bare `qdev hygiene check` workspace traversal unverified | verification-gap | `medium` | Pre-verified gap: tests use explicit paths or --diff; bare directory collection is untested | patch |
++| Multi-language scanning for Swift and Python in check_hygiene unverified | verification-gap | `medium` | Pre-verified gap: unit tests tested tokenizer in isolation; end-to-end check_hygiene on .swift and .py unverified | patch |
++| `crates/qdev-core/src/transition.rs` omits `execute_hygiene_gate` on review transition | verification-gap / blind-hunter | `medium` | Built-in gates qdev-scope and qdev-deps are invoked in transition.rs, but qdev-hygiene was omitted | patch |
++| Rust char literal `'\''` escaped quote parsing desynchronizes tokenizer | blind-hunter | `medium` | In `tokenize_rust`, scanning for closing quote matched `chars[i+2]` which is the escaped `'` itself | patch |
++| Overly broad `pass \d+` regex in `review_round` flags domain terms | blind-hunter | `medium` | `pass \d+` matched `render pass 1` and `low-pass 1 filter`; should be scoped to review/findings context | patch |
++| Trailing comments on consecutive code lines grouped as comment block | edge-case-hunter | `medium` | Separate single-line comments annotating consecutive statements falsely triggered max_inline_comment_lines | patch |
++| `--diff` combined with explicit paths ignores path filter | edge-case-hunter / blind-hunter | `medium` | `check_hygiene` took all diff files without filtering to specified paths when both provided | patch |
++| Gate dependency validation flags `qdev-hygiene` as unknown gate | edge-case-hunter | `low` | `validate_gate_dependencies` ran before built-in injection and failed if configured gate depended on qdev-hygiene | patch |
++| Redundant trailing newline in text output | blind-hunter | `low` | `handle_hygiene` appended newline to string passed to `emit_text` which uses `writeln!` | patch |
++| `execute_hygiene_gate` hardcodes `diff: true` | blind-hunter | `low` | In non-git workspaces, hardcoded diff caused error; check git worktree before enabling diff | patch |
++| `collect_dir_files` lacks symlink cycle guard and standard ignore directories | blind-hunter | `low` | Following symlinks risks circular loops; skip directory symlinks and ignore venv/build | patch |
++| Configured language aliases (e.g. `rs`, `py`) not recognized | edge-case-hunter | `low` | Users may configure `languages = ["rs", "py"]`; map aliases to SupportedLanguage | patch |
++| Swift string interpolation containing quotes terminates string early | blind-hunter | `low` | Quotes inside `\("id")` terminated string literal state; track interpolation parentheses depth | patch |
++| Built-in gates omitted from `get_gate_list` | blind-hunter | `low` | `qdev gate list` did not include default built-in gates unless explicitly declared in qdev.toml | patch |
++| `resolve_diff_files` fallback when merge-base is unavailable | blind-hunter | `false` | Fallback to uncommitted git status and staged changes matches existing codebase conventions in validate.rs | reject |
++
++
++## Design Notes
++
++### Lexical Tokenizer Architecture
++The comment tokenizers operate as lightweight state machines scanning character streams:
++- **Rust**: Tracks states (Code, LineComment, DocLineComment, BlockComment, QuotedString, RawString, CharLiteral). Tracks block comment nesting depth `/* ... /* ... */ ... */`. Raw strings track matching `#` counts (`r###"..."###`).
++- **Swift**: Tracks states (Code, LineComment, DocLineComment, BlockComment, QuotedString, MultilineString, RawString). Block comments support recursive nesting.
++- **Python**: Tracks states (Code, LineComment, SingleQuotedString, DoubleQuotedString, TripleSingleString, TripleDoubleString). Triple-quoted strings are captured as doc comments.
++
++### Citation Exemption
++Comments containing compact citations conforming to `citation_pattern` (e.g. `[E12S4]`, `[AD-43]`, `[DEC-2b91]`, `[HAZ-14]`, `[DW-7f3a]`, `[E12S4/NG-2]`) are exempt from narrative marker and forbid pattern checks, and lines containing citations do not count toward `max_inline_comment_lines`.
++
++## Verification
++
++**Commands:**
++- `cargo test --test hygiene_tests` -- expected: Unit tests for Rust, Swift, and Python tokenizers and rule checks pass.
++- `cargo test --test hygiene_cli_tests` -- expected: CLI integration tests for `qdev hygiene check` pass.
++- `cargo test` -- expected: Full test suite passes.
++- `cargo clippy --all-targets -- -D warnings` -- expected: Zero warnings.
