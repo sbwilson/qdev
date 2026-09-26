@@ -344,6 +344,18 @@ pub fn patch_frontmatter(
     content: &str,
     options: &FrontmatterPatchOptions,
 ) -> Result<(String, u64), QdevError> {
+    patch_frontmatter_removing_fields(content, options, &[])
+}
+
+/// Applies a frontmatter patch while removing the specified top-level keys.
+///
+/// This is deliberately separate from `FrontmatterPatchOptions` so adding a removal
+/// capability does not break callers that construct that public options struct.
+pub fn patch_frontmatter_removing_fields(
+    content: &str,
+    options: &FrontmatterPatchOptions,
+    fields_to_remove: &[&str],
+) -> Result<(String, u64), QdevError> {
     if let Some(ref author) = options.author {
         author.validate()?;
     }
@@ -579,6 +591,8 @@ pub fn patch_frontmatter(
         }
     }
 
+    let removed_fields: HashSet<&str> = fields_to_remove.iter().copied().collect();
+
     // Reconstruct frontmatter lines
     let mut result_lines = Vec::new();
     let mut line_idx = 0;
@@ -586,6 +600,10 @@ pub fn patch_frontmatter(
 
     while line_idx < fm_lines.len() {
         if let Some(block) = blocks.iter().find(|b| b.start_line == line_idx) {
+            if removed_fields.contains(block.key.as_str()) {
+                line_idx = block.end_line;
+                continue;
+            }
             if let Some(new_lines) = updates.get(&block.key) {
                 result_lines.extend(new_lines.iter().cloned());
                 applied_keys.insert(block.key.clone());

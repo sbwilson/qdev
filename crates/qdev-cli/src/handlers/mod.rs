@@ -13,4 +13,5 @@ pub mod preflight;
 pub mod pulse;
 pub mod scratch;
 pub mod sprint;
+pub mod soup;
 pub mod transition;

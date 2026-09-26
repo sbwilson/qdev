@@ -23,6 +23,7 @@ pub mod schema;
 pub mod scratch;
 pub mod gate;
 pub mod sprint;
+pub mod soup;
 pub mod store;
 pub mod transition;
 pub mod validate;
@@ -46,7 +47,7 @@ pub use preflight::{
 };
 
 pub use gate::{
-    evaluate_ratchet, execute_deps_gate, execute_gate, execute_gate_set, execute_hygiene_gate,
+    evaluate_ratchet, execute_configured_command, execute_deps_gate, execute_gate, execute_gate_set, execute_hygiene_gate,
     execute_scope_gate, format_duration, format_metric_number, get_gate_list, parse_with_adapter,
     read_baseline, resolve_baseline_path, resolve_commit_sha,
     resolve_collision_free_evidence_path, resolve_gate_execution_order, scan_rust_imports,
@@ -57,6 +58,7 @@ pub use gate::{
     RatchetDirection, RatchetEvaluation, BUILTIN_GATE_DEPS, BUILTIN_GATE_HYGIENE,
     BUILTIN_GATE_SCOPE, VALID_ADAPTERS,
 };
+pub use soup::{parse_cargo_audit_json, persist_soup_records, record_sbom_artifact, SoupAuditFinding, SoupSummary};
 
 pub use chore::{
     abort_chore, chore_dir, close_chore, commit_chore, derive_chore_id, find_open_chore,

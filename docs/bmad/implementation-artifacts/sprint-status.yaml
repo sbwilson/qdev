@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-26-2026 15:18
+last_updated: 09-27-2026 09:51
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -90,7 +90,7 @@ development_status:
   3-9-hygiene-linter-lint-and-report: review
   3-10-impact-analysis: review
   3-11-opt-in-commit-messages: review
-  3-12-soup-audit-sbom: backlog
+  3-12-soup-audit-sbom: review
   3-13-epic-sprint-reviews-sprint-close: backlog
   epic-3-retrospective: optional
 

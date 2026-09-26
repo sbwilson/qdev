@@ -409,6 +409,9 @@ fn run(raw_args: &[String]) -> i32 {
         Some(Commands::Gate(ref gate_args)) => {
             handlers::gate::handle_gate(gate_args, &annotated_config, &cli, &output, &root).as_i32()
         }
+        Some(Commands::Soup(ref soup_args)) => {
+            handlers::soup::handle_soup(soup_args, &annotated_config, &cli, &output, &root).as_i32()
+        }
         Some(Commands::Preflight(ref preflight_args)) => {
             handlers::preflight::handle_preflight(preflight_args, &annotated_config, &cli, &output, &root).as_i32()
         }
@@ -540,6 +543,7 @@ fn requires_workspace(command: Option<&Commands>) -> bool {
         | Some(Commands::Chore(_))
         | Some(Commands::Next(_))
         | Some(Commands::Gate(_))
+        | Some(Commands::Soup(_))
         | Some(Commands::Impact(_)) => true,
     }
 }

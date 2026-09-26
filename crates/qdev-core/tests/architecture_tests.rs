@@ -190,6 +190,27 @@ const IDENTITY_RULE_SITES: &[(&str, &str, &str)] = &[
          to write, asked of the path it just built",
     ),
     (
+        "qdev-core/src/soup.rs",
+        "let path = dir.join(&file_name);",
+        "`persist_soup_records` joins the canonical entity filename to the SOUP directory before \
+         atomically writing the source-of-truth record",
+    ),
+    (
+        "qdev-core/src/soup.rs",
+        "if path.exists() {",
+        "`persist_soup_records` checks whether the canonical record it is about to update exists",
+    ),
+    (
+        "qdev-core/src/soup.rs",
+        "if record.path.exists() {",
+        "rollback checks a path prepared by the canonical SOUP write path before removing a new file",
+    ),
+    (
+        "qdev-core/src/soup.rs",
+        "!workspace_root.join(artifact).is_file()",
+        "SBOM artifact validation checks a command-reported output path, not an entity identity",
+    ),
+    (
         "qdev-core/src/chore.rs",
         "(Some(id), Some(path)) if root.join(path).exists()",
         "`chore commit` asks whether the ruling a previous attempt wrote is still on disk. The \

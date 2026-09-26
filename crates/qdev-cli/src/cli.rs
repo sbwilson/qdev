@@ -85,6 +85,8 @@ pub enum Commands {
     Next(NextArgs),
     /// Run verification gates
     Gate(GateArgs),
+    /// Audit third-party dependencies and capture SBOM evidence
+    Soup(SoupArgs),
     /// Enforce working tree scope, branch freshness, and validation health
     Preflight(PreflightArgs),
     /// Install developer tools and integrations (e.g. Git hooks)
@@ -177,6 +179,32 @@ pub struct PreflightArgs {
 pub struct GateArgs {
     #[command(subcommand)]
     pub command: GateCommands,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct SoupArgs {
+    #[command(subcommand)]
+    pub command: SoupCommands,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum SoupCommands {
+    /// Run configured dependency audit and deny checks
+    Audit(SoupAuditArgs),
+    /// Generate and attach an SBOM to a release
+    Sbom(SoupSbomArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct SoupAuditArgs {
+    #[arg(long)]
+    pub release: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct SoupSbomArgs {
+    #[arg(long)]
+    pub release: String,
 }
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]

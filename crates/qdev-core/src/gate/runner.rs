@@ -38,6 +38,38 @@ pub struct GateRunOptions {
     pub timeout_ms: Option<u64>,
 }
 
+/// Runs a command using the normal gate runner, with a stable synthetic gate identifier.
+/// This keeps callers such as SOUP audits on the same subprocess and evidence path as gates.
+pub fn execute_configured_command(
+    workspace_root: &Path,
+    config: &Config,
+    gate_id: &str,
+    command: &str,
+    options: &GateRunOptions,
+) -> Result<GateRunOutcome, QdevError> {
+    if config.gates.iter().any(|gate| gate.id == gate_id) {
+        return Err(QdevError::usage_error(format!(
+            "Configured gate ID '{}' is reserved for an internal command",
+            gate_id
+        )));
+    }
+    let mut synthetic_config = config.clone();
+    synthetic_config.gates.push(GateConfig {
+        id: gate_id.to_string(),
+        command: Some(command.to_string()),
+        timeout_ms: None,
+        depends_on: Vec::new(),
+        output_adapter: None,
+        on_transition: Vec::new(),
+        verifies: Vec::new(),
+        kind: None,
+        metric: None,
+        direction: None,
+        skip: None,
+    });
+    execute_gate(workspace_root, &synthetic_config, gate_id, options)
+}
+
 /// RAII guard ensuring temporary result files are reliably deleted upon return.
 struct TempFileGuard(PathBuf);
 
@@ -2580,4 +2612,3 @@ pub fn execute_hygiene_gate(
         evidence_path: Some(evidence_path),
     })
 }
-
