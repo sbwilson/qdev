@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Impact Payload Schema",
+  "description": "Output shape of `qdev impact --json`. Reports change impact across modules, active stories, reverse dependents, requirements, hazards, ADRs, overlapping gates, and inline citations. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "modules",
+    "stories",
+    "dependents",
+    "requirements",
+    "hazards",
+    "adrs",
+    "gates",
+    "cited_entities"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "target_story": {
+      "type": ["string", "null"]
+    },
+    "target_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "stories": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "status"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": ["string", "null"]
+          },
+          "status": {
+            "type": "string"
+          },
+          "target_modules": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "dependents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "depth"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "depth": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "title": {
+            "type": ["string", "null"]
+          },
+          "status": {
+            "type": ["string", "null"]
+          },
+          "relation": {
+            "type": ["string", "null"]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "hazards": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "adrs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "gates": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "cited_entities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}

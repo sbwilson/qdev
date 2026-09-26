@@ -93,6 +93,8 @@ pub enum Commands {
     Hook(HookArgs),
     /// Inspect source code comment hygiene
     Hygiene(HygieneArgs),
+    /// Analyze change impact across modules, active stories, relations, and gates
+    Impact(ImpactArgs),
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
@@ -151,6 +153,16 @@ pub struct HygieneCheckArgs {
 
     /// Target paths to inspect
     #[arg(value_name = "PATHS")]
+    pub paths: Vec<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ImpactArgs {
+    /// Story ID to evaluate impact for
+    pub story: Option<String>,
+
+    /// Target paths to inspect
+    #[arg(long = "paths", num_args = 1.., action = clap::ArgAction::Append)]
     pub paths: Vec<String>,
 }
 

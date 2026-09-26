@@ -1,4 +1,5 @@
 pub mod hygiene;
+pub mod impact;
 pub mod chore;
 pub mod config;
 pub mod dag;
@@ -26,6 +27,11 @@ pub mod store;
 pub mod transition;
 pub mod validate;
 pub mod write;
+
+pub use impact::{
+    format_impact_text, run_impact, ImpactDependent, ImpactOptions, ImpactOutcome, ImpactPayload,
+    ImpactStory,
+};
 
 pub use hygiene::{
     check_hygiene, lint_comments, tokenize_comments, CommentKind, CommentLine, CommentToken,

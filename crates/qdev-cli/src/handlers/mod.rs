@@ -6,6 +6,7 @@ pub mod dw;
 pub mod gate;
 pub mod hook;
 pub mod hygiene;
+pub mod impact;
 pub mod install;
 pub mod next;
 pub mod preflight;

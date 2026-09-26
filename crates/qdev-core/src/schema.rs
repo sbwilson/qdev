@@ -169,6 +169,7 @@ pub enum PayloadKind {
     Preflight,
     HookInstall,
     Hygiene,
+    Impact,
 }
 
 impl PayloadKind {
@@ -195,6 +196,7 @@ impl PayloadKind {
             PayloadKind::Preflight => include_str!("../schemas/payload-preflight.json"),
             PayloadKind::HookInstall => include_str!("../schemas/payload-hook-install.json"),
             PayloadKind::Hygiene => include_str!("../schemas/payload-hygiene.json"),
+            PayloadKind::Impact => include_str!("../schemas/payload-impact.json"),
         }
     }
 
@@ -232,11 +234,12 @@ impl PayloadKind {
             PayloadKind::Preflight => "preflight",
             PayloadKind::HookInstall => "hook_install",
             PayloadKind::Hygiene => "hygiene",
+            PayloadKind::Impact => "impact",
         }
     }
 
     /// Returns an array of all currently-supported payload kinds.
-    pub const fn all() -> &'static [PayloadKind; 20] {
+    pub const fn all() -> &'static [PayloadKind; 21] {
         &[
             PayloadKind::Story,
             PayloadKind::Error,
@@ -258,6 +261,7 @@ impl PayloadKind {
             PayloadKind::Preflight,
             PayloadKind::HookInstall,
             PayloadKind::Hygiene,
+            PayloadKind::Impact,
         ]
     }
 
@@ -300,6 +304,7 @@ impl PayloadKind {
                 Ok(PayloadKind::HookInstall)
             }
             "hygiene" | "hygiene_check" => Ok(PayloadKind::Hygiene),
+            "impact" | "impacts" | "impact_analysis" => Ok(PayloadKind::Impact),
             _ => Err(QdevError::usage_error(format!(
                 "Unknown payload name '{}'. Valid payload names: {}",
                 s,
