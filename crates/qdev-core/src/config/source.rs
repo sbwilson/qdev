@@ -259,6 +259,16 @@ impl AnnotatedConfig {
             "  languages = {:?} (source: {})\n",
             self.config.hygiene.languages, src
         ));
+        if !self.config.hygiene.secret_patterns.is_empty() {
+            let src = self
+                .sources
+                .get("hygiene.secret_patterns")
+                .unwrap_or(&ConfigSource::Default);
+            out.push_str(&format!(
+                "  secret_patterns = {:?} (source: {})\n",
+                self.config.hygiene.secret_patterns, src
+            ));
+        }
 
         if !self.config.regulatory.require_rationale_for.is_empty()
             || self.config.regulatory.iec62304_class.is_some()

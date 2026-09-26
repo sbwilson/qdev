@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Hook Install Payload Schema",
+  "description": "Output shape of `qdev install hooks --json`. Reports installed git hook shims and any preserved legacy hooks. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "hooks_dir",
+    "installed_hooks",
+    "preserved_legacy"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "hooks_dir": {
+      "type": "string",
+      "description": "Absolute or relative path to the Git hooks directory."
+    },
+    "installed_hooks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Names of hook shims written or updated in the hooks directory."
+    },
+    "preserved_legacy": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Names of preexisting non-qdev hooks renamed to <name>.legacy."
+    }
+  },
+  "additionalProperties": false
+}

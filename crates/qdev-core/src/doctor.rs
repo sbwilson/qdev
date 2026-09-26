@@ -354,8 +354,70 @@ impl DoctorSection for LeasesDoctorSection {
     }
 }
 
+/// Reports Git hook shims status: whether all expected hook shims exist, are executable,
+/// and match expected invocations, or lists missing and outdated hooks.
+pub struct HooksDoctorSection {
+    workspace_root: PathBuf,
+}
+
+impl HooksDoctorSection {
+    pub fn new(workspace_root: PathBuf) -> Self {
+        Self { workspace_root }
+    }
+}
+
+impl DoctorSection for HooksDoctorSection {
+    fn name(&self) -> &'static str {
+        "hooks"
+    }
+
+    fn run(&self, _store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
+        match crate::hook::inspect_hooks(&self.workspace_root) {
+            Ok(status) => {
+                let status_str = if status.all_installed {
+                    "ok"
+                } else {
+                    "mismatch"
+                };
+                Ok(DoctorSectionReport {
+                    name: self.name().to_string(),
+                    fields: vec![
+                        ("status".to_string(), serde_json::Value::from(status_str)),
+                        ("unavailable_reason".to_string(), serde_json::Value::Null),
+                        (
+                            "all_installed".to_string(),
+                            serde_json::Value::from(status.all_installed),
+                        ),
+                        (
+                            "missing_hooks".to_string(),
+                            serde_json::to_value(&status.missing_hooks).unwrap(),
+                        ),
+                        (
+                            "outdated_hooks".to_string(),
+                            serde_json::to_value(&status.outdated_hooks).unwrap(),
+                        ),
+                    ],
+                })
+            }
+            Err(e) => Ok(DoctorSectionReport {
+                name: self.name().to_string(),
+                fields: vec![
+                    ("status".to_string(), serde_json::Value::from("unavailable")),
+                    (
+                        "unavailable_reason".to_string(),
+                        serde_json::Value::from(e.code()),
+                    ),
+                    ("all_installed".to_string(), serde_json::Value::Null),
+                    ("missing_hooks".to_string(), serde_json::Value::Null),
+                    ("outdated_hooks".to_string(), serde_json::Value::Null),
+                ],
+            }),
+        }
+    }
+}
+
 /// Builds the default set of doctor sections, in the order `qdev doctor` reports them: `cache`
-/// first, then `validation`, then `leases`. This stays the single wiring point — later epics append
+/// first, then `validation`, then `leases`, then `hooks`. This stays the single wiring point — later epics append
 /// their own `DoctorSection` impl here (gates, hygiene, ...) and take whatever context they need
 /// from the arguments already threaded through, without widening the trait.
 pub fn default_doctor_sections(
@@ -372,5 +434,6 @@ pub fn default_doctor_sections(
             workspace_root.to_path_buf(),
             config.leases.clone(),
         )),
+        Box::new(HooksDoctorSection::new(workspace_root.to_path_buf())),
     ]
 }

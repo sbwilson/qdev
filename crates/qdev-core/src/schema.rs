@@ -167,6 +167,7 @@ pub enum PayloadKind {
     GateSet,
     GateBaseline,
     Preflight,
+    HookInstall,
 }
 
 impl PayloadKind {
@@ -191,6 +192,7 @@ impl PayloadKind {
             PayloadKind::GateSet => include_str!("../schemas/payload-gate-set.json"),
             PayloadKind::GateBaseline => include_str!("../schemas/payload-gate-baseline.json"),
             PayloadKind::Preflight => include_str!("../schemas/payload-preflight.json"),
+            PayloadKind::HookInstall => include_str!("../schemas/payload-hook-install.json"),
         }
     }
 
@@ -226,11 +228,12 @@ impl PayloadKind {
             PayloadKind::GateSet => "gate_set",
             PayloadKind::GateBaseline => "gate_baseline",
             PayloadKind::Preflight => "preflight",
+            PayloadKind::HookInstall => "hook_install",
         }
     }
 
     /// Returns an array of all currently-supported payload kinds.
-    pub const fn all() -> &'static [PayloadKind; 18] {
+    pub const fn all() -> &'static [PayloadKind; 19] {
         &[
             PayloadKind::Story,
             PayloadKind::Error,
@@ -250,6 +253,7 @@ impl PayloadKind {
             PayloadKind::GateSet,
             PayloadKind::GateBaseline,
             PayloadKind::Preflight,
+            PayloadKind::HookInstall,
         ]
     }
 
@@ -288,6 +292,9 @@ impl PayloadKind {
                 Ok(PayloadKind::GateBaseline)
             }
             "preflight" => Ok(PayloadKind::Preflight),
+            "hook_install" | "hookinstall" | "hooks_install" | "install_hooks" => {
+                Ok(PayloadKind::HookInstall)
+            }
             _ => Err(QdevError::usage_error(format!(
                 "Unknown payload name '{}'. Valid payload names: {}",
                 s,

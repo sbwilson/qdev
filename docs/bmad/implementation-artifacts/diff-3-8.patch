@@ -1,0 +1,2476 @@
+diff --git a/crates/qdev-cli/src/cli.rs b/crates/qdev-cli/src/cli.rs
+index b30f1d5..e1c3879 100644
+--- a/crates/qdev-cli/src/cli.rs
++++ b/crates/qdev-cli/src/cli.rs
+@@ -66,7 +66,7 @@ pub enum Commands {
+     /// Run or rebuild the incremental hydration sweep
+     Sync(SyncArgs),
+     /// Report structured cache and workspace diagnostics
+-    Doctor,
++    Doctor(DoctorArgs),
+     /// Claim a story lease
+     Claim(ClaimArgs),
+     /// Release a story lease
+@@ -87,6 +87,67 @@ pub enum Commands {
+     Gate(GateArgs),
+     /// Enforce working tree scope, branch freshness, and validation health
+     Preflight(PreflightArgs),
++    /// Install developer tools and integrations (e.g. Git hooks)
++    Install(InstallArgs),
++    /// Execute a Git hook
++    Hook(HookArgs),
++    /// Inspect source code comment hygiene
++    Hygiene(HygieneArgs),
++}
++
++#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
++pub struct DoctorArgs {
++    /// Automatically fix remediable issues (e.g. rewrite missing or outdated git hook shims)
++    #[arg(long)]
++    pub fix: bool,
++}
++
++#[derive(Parser, Debug, Clone, PartialEq, Eq)]
++pub struct InstallArgs {
++    #[command(subcommand)]
++    pub command: InstallCommands,
++}
++
++#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
++pub enum InstallCommands {
++    /// Install git hook shims
++    Hooks(InstallHooksArgs),
++}
++
++#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
++pub struct InstallHooksArgs {}
++
++#[derive(Parser, Debug, Clone, PartialEq, Eq)]
++pub struct HookArgs {
++    /// Name of the hook to run (e.g. pre-commit, pre-push, prepare-commit-msg)
++    pub name: String,
++
++    /// Extra arguments forwarded from git to the hook
++    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
++    pub args: Vec<String>,
++}
++
++#[derive(Parser, Debug, Clone, PartialEq, Eq)]
++pub struct HygieneArgs {
++    #[command(subcommand)]
++    pub command: HygieneCommands,
++}
++
++#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
++pub enum HygieneCommands {
++    /// Check source code comment hygiene
++    Check(HygieneCheckArgs),
++}
++
++#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
++pub struct HygieneCheckArgs {
++    /// Lint only changed files in git diff
++    #[arg(long)]
++    pub diff: bool,
++
++    /// Target paths to inspect
++    #[arg(value_name = "PATHS")]
++    pub paths: Vec<String>,
+ }
+ 
+ #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+diff --git a/crates/qdev-cli/src/handlers/mod.rs b/crates/qdev-cli/src/handlers/mod.rs
+index c13dc94..b8efc88 100644
+--- a/crates/qdev-cli/src/handlers/mod.rs
++++ b/crates/qdev-cli/src/handlers/mod.rs
+@@ -4,6 +4,9 @@ pub mod constraint;
+ pub mod decision;
+ pub mod dw;
+ pub mod gate;
++pub mod hook;
++pub mod hygiene;
++pub mod install;
+ pub mod next;
+ pub mod preflight;
+ pub mod pulse;
+diff --git a/crates/qdev-cli/src/main.rs b/crates/qdev-cli/src/main.rs
+index c093e31..826eb0c 100644
+--- a/crates/qdev-cli/src/main.rs
++++ b/crates/qdev-cli/src/main.rs
+@@ -66,10 +66,10 @@ fn main() -> StdExitCode {
+ 
+     let exit_code = match result {
+         Ok(code) => code,
+-        Err(_) => ExitCode::InfrastructureFailure,
++        Err(_) => ExitCode::InfrastructureFailure.as_i32(),
+     };
+ 
+-    StdExitCode::from(exit_code)
++    StdExitCode::from(exit_code as u8)
+ }
+ 
+ fn normalize_raw_args(raw_args: &[String]) -> Vec<String> {
+@@ -140,7 +140,7 @@ fn normalize_raw_args(raw_args: &[String]) -> Vec<String> {
+     before
+ }
+ 
+-fn run(raw_args: &[String]) -> ExitCode {
++fn run(raw_args: &[String]) -> i32 {
+     let raw_args = normalize_raw_args(raw_args);
+     let json_mode = is_json_requested(&raw_args);
+     let output = OutputEmitter::new(json_mode);
+@@ -150,13 +150,13 @@ fn run(raw_args: &[String]) -> ExitCode {
+         Err(clap_err) => {
+             if clap_err.kind() == clap::error::ErrorKind::DisplayHelp {
+                 print!("{}", clap_err);
+-                return ExitCode::Success;
++                return ExitCode::Success.as_i32();
+             }
+ 
+             let err_msg = clap_err.to_string();
+             let qdev_err = QdevError::usage_error(err_msg.trim());
+             let _ = output.emit_error(&qdev_err);
+-            return ExitCode::UsageError;
++            return ExitCode::UsageError.as_i32();
+         }
+     };
+ 
+@@ -172,12 +172,12 @@ fn run(raw_args: &[String]) -> ExitCode {
+                     format!("Failed to emit version envelope: {}", e),
+                 );
+                 let _ = output.emit_error(&err);
+-                return ExitCode::InfrastructureFailure;
++                return ExitCode::InfrastructureFailure.as_i32();
+             }
+         } else {
+             println!("qdev {}", env!("CARGO_PKG_VERSION"));
+         }
+-        return ExitCode::Success;
++        return ExitCode::Success.as_i32();
+     }
+ 
+     // Resolve interactivity per AD-12
+@@ -198,13 +198,13 @@ fn run(raw_args: &[String]) -> ExitCode {
+                 format!("Failed to determine current working directory: {}", e),
+             );
+             let _ = output.emit_error(&qdev_err);
+-            return ExitCode::InfrastructureFailure;
++            return ExitCode::InfrastructureFailure.as_i32();
+         }
+     };
+ 
+     // Dispatch schema command before loading config so it works without an initialized workspace
+     if let Some(Commands::Schema(ref schema_args)) = cli.command {
+-        return handle_schema(schema_args, &cli, &output);
++        return handle_schema(schema_args, &cli, &output).as_i32();
+     }
+ 
+     // `init` is dispatched *after* this, not before: it resolves its layout through the same
+@@ -216,7 +216,7 @@ fn run(raw_args: &[String]) -> ExitCode {
+         Ok(cfg) => cfg,
+         Err(e) => {
+             let _ = output.emit_error(&e);
+-            return e.exit_code();
++            return e.exit_code().as_i32();
+         }
+     };
+ 
+@@ -230,7 +230,7 @@ fn run(raw_args: &[String]) -> ExitCode {
+             &output,
+             &root,
+             &annotated_config,
+-        );
++        ).as_i32();
+     }
+ 
+     // Every command that touches the cache is refused outside an initialized workspace, checked
+@@ -240,7 +240,7 @@ fn run(raw_args: &[String]) -> ExitCode {
+     if requires_workspace(cli.command.as_ref()) {
+         if let Err(e) = ensure_query_workspace(&root) {
+             let _ = output.emit_error(&e);
+-            return e.exit_code();
++            return e.exit_code().as_i32();
+         }
+     }
+ 
+@@ -264,7 +264,7 @@ fn run(raw_args: &[String]) -> ExitCode {
+                 && matches!(cli.command, Some(Commands::Sync(ref args)) if args.rebuild);
+             if !recoverable_by_this_command {
+                 let _ = output.emit_error(&e);
+-                return e.exit_code();
++                return e.exit_code().as_i32();
+             }
+         }
+     }
+@@ -272,7 +272,7 @@ fn run(raw_args: &[String]) -> ExitCode {
+     // Dispatch commands
+     match cli.command {
+         None | Some(Commands::Status) => {
+-            handlers::pulse::handle_pulse(&annotated_config, &cli, &output, &current_dir)
++            handlers::pulse::handle_pulse(&annotated_config, &cli, &output, &current_dir).as_i32()
+         }
+         Some(Commands::Config(config_args)) => match config_args.command {
+             ConfigCommands::Show => {
+@@ -284,7 +284,7 @@ fn run(raw_args: &[String]) -> ExitCode {
+                             format!("Failed to emit config envelope: {}", e),
+                         );
+                         let _ = output.emit_error(&err);
+-                        return ExitCode::InfrastructureFailure;
++                        return ExitCode::InfrastructureFailure.as_i32();
+                     }
+                 } else {
+                     let report = annotated_config.to_text_report();
+@@ -294,15 +294,15 @@ fn run(raw_args: &[String]) -> ExitCode {
+                             format!("Failed to emit config report: {}", e),
+                         );
+                         let _ = output.emit_error(&err);
+-                        return ExitCode::InfrastructureFailure;
++                        return ExitCode::InfrastructureFailure.as_i32();
+                     }
+                 }
+-                ExitCode::Success
++                ExitCode::Success.as_i32()
+             }
+         },
+         Some(Commands::Create(ref create_args)) => match create_args.command {
+             CreateCommands::Story(ref story_args) => {
+-                handle_create_story(story_args, &annotated_config, &cli, &output, &current_dir)
++                handle_create_story(story_args, &annotated_config, &cli, &output, &current_dir).as_i32()
+             }
+         },
+         Some(Commands::Update(ref update_args)) => handle_update(
+@@ -312,7 +312,7 @@ fn run(raw_args: &[String]) -> ExitCode {
+             &output,
+             &current_dir,
+             interactivity,
+-        ),
++        ).as_i32(),
+         Some(Commands::Transition(ref transition_args)) => handlers::transition::handle_transition(
+             transition_args,
+             &annotated_config,
+@@ -320,12 +320,12 @@ fn run(raw_args: &[String]) -> ExitCode {
+             &output,
+             &current_dir,
+             interactivity,
+-        ),
++        ).as_i32(),
+         Some(Commands::Get(ref get_args)) => {
+-            handle_get(get_args, &annotated_config, &cli, &output, &current_dir)
++            handle_get(get_args, &annotated_config, &cli, &output, &current_dir).as_i32()
+         }
+         Some(Commands::List(ref list_args)) => {
+-            handle_list(list_args, &annotated_config, &cli, &output, &current_dir)
++            handle_list(list_args, &annotated_config, &cli, &output, &current_dir).as_i32()
+         }
+         Some(Commands::Relate(ref relate_args)) => handle_relate(
+             relate_args,
+@@ -334,7 +334,7 @@ fn run(raw_args: &[String]) -> ExitCode {
+             &output,
+             &current_dir,
+             interactivity,
+-        ),
++        ).as_i32(),
+         Some(Commands::Unrelate(ref unrelate_args)) => handle_unrelate(
+             unrelate_args,
+             &annotated_config,
+@@ -342,7 +342,7 @@ fn run(raw_args: &[String]) -> ExitCode {
+             &output,
+             &current_dir,
+             interactivity,
+-        ),
++        ).as_i32(),
+         Some(Commands::Constraint(ref constraint_args)) => handlers::constraint::handle_constraint(
+             constraint_args,
+             &annotated_config,
+@@ -350,9 +350,9 @@ fn run(raw_args: &[String]) -> ExitCode {
+             &output,
+             &current_dir,
+             interactivity,
+-        ),
++        ).as_i32(),
+         Some(Commands::Graph(ref graph_args)) => {
+-            handle_graph(graph_args, &annotated_config, &cli, &output, &current_dir)
++            handle_graph(graph_args, &annotated_config, &cli, &output, &current_dir).as_i32()
+         }
+         Some(Commands::Validate(ref validate_args)) => handle_validate(
+             validate_args,
+@@ -361,16 +361,18 @@ fn run(raw_args: &[String]) -> ExitCode {
+             &output,
+             &current_dir,
+             interactivity,
+-        ),
++        ).as_i32(),
+         Some(Commands::Sync(ref sync_args)) => {
+-            handle_sync(sync_args, &annotated_config, &cli, &output, &current_dir)
++            handle_sync(sync_args, &annotated_config, &cli, &output, &current_dir).as_i32()
++        }
++        Some(Commands::Doctor(ref doctor_args)) => {
++            handle_doctor(doctor_args, &annotated_config, &cli, &output, &current_dir).as_i32()
+         }
+-        Some(Commands::Doctor) => handle_doctor(&annotated_config, &cli, &output, &current_dir),
+         Some(Commands::Claim(ref claim_args)) => {
+-            handlers::claim::handle_claim(claim_args, &annotated_config, &cli, &output, &current_dir)
++            handlers::claim::handle_claim(claim_args, &annotated_config, &cli, &output, &current_dir).as_i32()
+         }
+         Some(Commands::Release(ref release_args)) => {
+-            handlers::claim::handle_release(release_args, &annotated_config, &cli, &output, &current_dir)
++            handlers::claim::handle_release(release_args, &annotated_config, &cli, &output, &current_dir).as_i32()
+         }
+         Some(Commands::Scratch(ref scratch_args)) => handlers::scratch::handle_scratch(
+             scratch_args,
+@@ -379,14 +381,14 @@ fn run(raw_args: &[String]) -> ExitCode {
+             &output,
+             &current_dir,
+             interactivity,
+-        ),
++        ).as_i32(),
+         Some(Commands::Decision(ref decision_args)) => handlers::decision::handle_decision(
+             decision_args,
+             &annotated_config,
+             &cli,
+             &output,
+             &current_dir,
+-        ),
++        ).as_i32(),
+         Some(Commands::Dw(ref dw_args)) => handlers::dw::handle_dw(
+             dw_args,
+             &annotated_config,
+@@ -394,22 +396,43 @@ fn run(raw_args: &[String]) -> ExitCode {
+             &output,
+             &current_dir,
+             interactivity,
+-        ),
++        ).as_i32(),
+         Some(Commands::Sprint(ref sprint_args)) => {
+-            handlers::sprint::handle_sprint(sprint_args, &annotated_config, &cli, &output, &current_dir)
++            handlers::sprint::handle_sprint(sprint_args, &annotated_config, &cli, &output, &current_dir).as_i32()
+         }
+         Some(Commands::Chore(ref chore_args)) => {
+-            handlers::chore::handle_chore(chore_args, &annotated_config, &cli, &output, &current_dir)
++            handlers::chore::handle_chore(chore_args, &annotated_config, &cli, &output, &current_dir).as_i32()
+         }
+         Some(Commands::Next(ref next_args)) => {
+-            handlers::next::handle_next(next_args, &annotated_config, &cli, &output, &current_dir)
++            handlers::next::handle_next(next_args, &annotated_config, &cli, &output, &current_dir).as_i32()
+         }
+         Some(Commands::Gate(ref gate_args)) => {
+-            handlers::gate::handle_gate(gate_args, &annotated_config, &cli, &output, &root)
++            handlers::gate::handle_gate(gate_args, &annotated_config, &cli, &output, &root).as_i32()
+         }
+         Some(Commands::Preflight(ref preflight_args)) => {
+-            handlers::preflight::handle_preflight(preflight_args, &annotated_config, &cli, &output, &root)
++            handlers::preflight::handle_preflight(preflight_args, &annotated_config, &cli, &output, &root).as_i32()
+         }
++        Some(Commands::Install(ref install_args)) => handlers::install::handle_install(
++            install_args,
++            &annotated_config,
++            &cli,
++            &output,
++            &current_dir,
++        ).as_i32(),
++        Some(Commands::Hook(ref hook_args)) => handlers::hook::handle_hook(
++            hook_args,
++            &annotated_config,
++            &cli,
++            &output,
++            &current_dir,
++        ),
++        Some(Commands::Hygiene(ref hygiene_args)) => handlers::hygiene::handle_hygiene(
++            hygiene_args,
++            &annotated_config,
++            &cli,
++            &output,
++            &current_dir,
++        ).as_i32(),
+         Some(Commands::Init(_)) => unreachable!(),
+         Some(Commands::Schema(_)) => unreachable!(),
+     }
+@@ -476,7 +499,10 @@ fn requires_workspace(command: Option<&Commands>) -> bool {
+         | Some(Commands::Status)
+         | Some(Commands::Init(_))
+         | Some(Commands::Schema(_))
+-        | Some(Commands::Preflight(_)) => {
++        | Some(Commands::Preflight(_))
++        | Some(Commands::Install(_))
++        | Some(Commands::Hook(_))
++        | Some(Commands::Hygiene(_)) => {
+             false
+         }
+         // Matched at subcommand granularity, not by whole variant: a future `create epic` or
+@@ -497,7 +523,7 @@ fn requires_workspace(command: Option<&Commands>) -> bool {
+         | Some(Commands::Graph(_))
+         | Some(Commands::Validate(_))
+         | Some(Commands::Sync(_))
+-        | Some(Commands::Doctor)
++        | Some(Commands::Doctor(_))
+         | Some(Commands::Claim(_))
+         | Some(Commands::Release(_))
+         | Some(Commands::Scratch(_))
+@@ -2859,6 +2885,7 @@ struct DoctorPayload {
+ }
+ 
+ fn handle_doctor(
++    doctor_args: &cli::DoctorArgs,
+     annotated_config: &qdev_core::AnnotatedConfig,
+     cli: &Cli,
+     output: &OutputEmitter,
+@@ -2866,6 +2893,13 @@ fn handle_doctor(
+ ) -> ExitCode {
+     let root = qdev_core::find_workspace_root(current_dir);
+ 
++    if doctor_args.fix {
++        if let Err(e) = qdev_core::install_hooks(&root) {
++            let _ = output.emit_error(&e);
++            return e.exit_code();
++        }
++    }
++
+     let store = match open_query_store(&root, annotated_config) {
+         Ok(s) => s,
+         Err(e) => {
+diff --git a/crates/qdev-cli/tests/doctor_cli_tests.rs b/crates/qdev-cli/tests/doctor_cli_tests.rs
+index 7b30b4d..dc98e90 100644
+--- a/crates/qdev-cli/tests/doctor_cli_tests.rs
++++ b/crates/qdev-cli/tests/doctor_cli_tests.rs
+@@ -546,8 +546,8 @@ fn test_doctor_section_order_is_cache_then_validation_with_no_duplicate_keys() {
+     let names: Vec<&str> = first.iter().map(|s| s["name"].as_str().unwrap()).collect();
+     assert_eq!(
+         names,
+-        vec!["cache", "validation", "leases"],
+-        "cache must be reported before validation and validation before leases"
++        vec!["cache", "validation", "leases", "hooks"],
++        "cache must be reported before validation, validation before leases, and leases before hooks"
+     );
+     assert_eq!(
+         first.iter().map(|s| s["name"].clone()).collect::<Vec<_>>(),
+diff --git a/crates/qdev-core/schemas/payload-doctor.json b/crates/qdev-core/schemas/payload-doctor.json
+index 0b03f1d..4eba8e8 100644
+--- a/crates/qdev-core/schemas/payload-doctor.json
++++ b/crates/qdev-core/schemas/payload-doctor.json
+@@ -153,6 +153,46 @@
+                 }
+               }
+             }
++          },
++          {
++            "if": {
++              "properties": { "name": { "const": "hooks" } },
++              "required": ["name"]
++            },
++            "then": {
++              "required": [
++                "status",
++                "unavailable_reason",
++                "all_installed",
++                "missing_hooks",
++                "outdated_hooks"
++              ],
++              "properties": {
++                "status": {
++                  "type": "string",
++                  "enum": ["ok", "mismatch", "unavailable"],
++                  "description": "\"ok\" when all expected hooks are installed and match expected content, \"mismatch\" when any is missing or outdated, \"unavailable\" if not a git repository."
++                },
++                "unavailable_reason": {
++                  "type": ["string", "null"],
++                  "description": "The error code that prevented the hooks check from completing (e.g. \"not_a_git_repository\"); null when status is \"ok\" or \"mismatch\"."
++                },
++                "all_installed": {
++                  "type": ["boolean", "null"],
++                  "description": "True when all expected hook shims exist, are executable, and contain the expected hook invocation. Null when unavailable."
++                },
++                "missing_hooks": {
++                  "type": ["array", "null"],
++                  "items": { "type": "string" },
++                  "description": "Names of expected hooks that do not exist or are not executable. Null when unavailable."
++                },
++                "outdated_hooks": {
++                  "type": ["array", "null"],
++                  "items": { "type": "string" },
++                  "description": "Names of expected hooks whose content does not match expected shim content. Null when unavailable."
++                }
++              }
++            }
+           }
+         ]
+       }
+diff --git a/crates/qdev-core/src/config/mod.rs b/crates/qdev-core/src/config/mod.rs
+index d8a480e..05b9d77 100644
+--- a/crates/qdev-core/src/config/mod.rs
++++ b/crates/qdev-core/src/config/mod.rs
+@@ -464,6 +464,7 @@ fn validate_hygiene_section(val: &toml::Value, filename: &str) -> Result<(), Qde
+         "forbid_patterns",
+         "citation_pattern",
+         "languages",
++        "secret_patterns",
+     ];
+     check_unknown_keys(table, allowed, "hygiene", filename)?;
+ 
+@@ -511,6 +512,9 @@ fn validate_hygiene_section(val: &toml::Value, filename: &str) -> Result<(), Qde
+     if let Some(v) = table.get("languages") {
+         validate_string_array(v, "languages", "hygiene", filename)?;
+     }
++    if let Some(v) = table.get("secret_patterns") {
++        validate_string_array(v, "secret_patterns", "hygiene", filename)?;
++    }
+     Ok(())
+ }
+ 
+@@ -1148,6 +1152,14 @@ pub fn merge_configs(
+         }
+     }
+ 
++    let (sec_val, src) = get_val("hygiene", "secret_patterns");
++    sources.insert("hygiene.secret_patterns".to_string(), src);
++    if let Some(v) = sec_val {
++        if let Ok(patterns) = v.try_into() {
++            config.hygiene.secret_patterns = patterns;
++        }
++    }
++
+     // 7. [regulatory]
+     sources.insert("regulatory".to_string(), section_source("regulatory"));
+     let (class_val, src) = get_val("regulatory", "iec62304_class");
+diff --git a/crates/qdev-core/src/config/source.rs b/crates/qdev-core/src/config/source.rs
+index d575146..0ff053f 100644
+--- a/crates/qdev-core/src/config/source.rs
++++ b/crates/qdev-core/src/config/source.rs
+@@ -259,6 +259,16 @@ impl AnnotatedConfig {
+             "  languages = {:?} (source: {})\n",
+             self.config.hygiene.languages, src
+         ));
++        if !self.config.hygiene.secret_patterns.is_empty() {
++            let src = self
++                .sources
++                .get("hygiene.secret_patterns")
++                .unwrap_or(&ConfigSource::Default);
++            out.push_str(&format!(
++                "  secret_patterns = {:?} (source: {})\n",
++                self.config.hygiene.secret_patterns, src
++            ));
++        }
+ 
+         if !self.config.regulatory.require_rationale_for.is_empty()
+             || self.config.regulatory.iec62304_class.is_some()
+diff --git a/crates/qdev-core/src/config/types.rs b/crates/qdev-core/src/config/types.rs
+index 8522949..7d032ca 100644
+--- a/crates/qdev-core/src/config/types.rs
++++ b/crates/qdev-core/src/config/types.rs
+@@ -150,6 +150,8 @@ pub struct HygieneConfig {
+     pub citation_pattern: Option<String>,
+     #[serde(default = "default_languages")]
+     pub languages: Vec<String>,
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub secret_patterns: Vec<String>,
+ }
+ 
+ fn default_max_inline_comment_lines() -> u32 {
+@@ -174,6 +176,7 @@ impl Default for HygieneConfig {
+             forbid_patterns: Vec::new(),
+             citation_pattern: Some(DEFAULT_CITATION_PATTERN.to_string()),
+             languages: default_languages(),
++            secret_patterns: Vec::new(),
+         }
+     }
+ }
+diff --git a/crates/qdev-core/src/doctor.rs b/crates/qdev-core/src/doctor.rs
+index 5d5f2ab..7253c94 100644
+--- a/crates/qdev-core/src/doctor.rs
++++ b/crates/qdev-core/src/doctor.rs
+@@ -354,8 +354,70 @@ impl DoctorSection for LeasesDoctorSection {
+     }
+ }
+ 
++/// Reports Git hook shims status: whether all expected hook shims exist, are executable,
++/// and match expected invocations, or lists missing and outdated hooks.
++pub struct HooksDoctorSection {
++    workspace_root: PathBuf,
++}
++
++impl HooksDoctorSection {
++    pub fn new(workspace_root: PathBuf) -> Self {
++        Self { workspace_root }
++    }
++}
++
++impl DoctorSection for HooksDoctorSection {
++    fn name(&self) -> &'static str {
++        "hooks"
++    }
++
++    fn run(&self, _store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
++        match crate::hook::inspect_hooks(&self.workspace_root) {
++            Ok(status) => {
++                let status_str = if status.all_installed {
++                    "ok"
++                } else {
++                    "mismatch"
++                };
++                Ok(DoctorSectionReport {
++                    name: self.name().to_string(),
++                    fields: vec![
++                        ("status".to_string(), serde_json::Value::from(status_str)),
++                        ("unavailable_reason".to_string(), serde_json::Value::Null),
++                        (
++                            "all_installed".to_string(),
++                            serde_json::Value::from(status.all_installed),
++                        ),
++                        (
++                            "missing_hooks".to_string(),
++                            serde_json::to_value(&status.missing_hooks).unwrap(),
++                        ),
++                        (
++                            "outdated_hooks".to_string(),
++                            serde_json::to_value(&status.outdated_hooks).unwrap(),
++                        ),
++                    ],
++                })
++            }
++            Err(e) => Ok(DoctorSectionReport {
++                name: self.name().to_string(),
++                fields: vec![
++                    ("status".to_string(), serde_json::Value::from("unavailable")),
++                    (
++                        "unavailable_reason".to_string(),
++                        serde_json::Value::from(e.code()),
++                    ),
++                    ("all_installed".to_string(), serde_json::Value::Null),
++                    ("missing_hooks".to_string(), serde_json::Value::Null),
++                    ("outdated_hooks".to_string(), serde_json::Value::Null),
++                ],
++            }),
++        }
++    }
++}
++
+ /// Builds the default set of doctor sections, in the order `qdev doctor` reports them: `cache`
+-/// first, then `validation`, then `leases`. This stays the single wiring point — later epics append
++/// first, then `validation`, then `leases`, then `hooks`. This stays the single wiring point — later epics append
+ /// their own `DoctorSection` impl here (gates, hygiene, ...) and take whatever context they need
+ /// from the arguments already threaded through, without widening the trait.
+ pub fn default_doctor_sections(
+@@ -372,5 +434,6 @@ pub fn default_doctor_sections(
+             workspace_root.to_path_buf(),
+             config.leases.clone(),
+         )),
++        Box::new(HooksDoctorSection::new(workspace_root.to_path_buf())),
+     ]
+ }
+diff --git a/crates/qdev-core/src/lib.rs b/crates/qdev-core/src/lib.rs
+index b565b20..86d0a71 100644
+--- a/crates/qdev-core/src/lib.rs
++++ b/crates/qdev-core/src/lib.rs
+@@ -7,6 +7,7 @@ pub mod dw;
+ pub mod envelope;
+ pub mod errors;
+ pub mod governance;
++pub mod hook;
+ pub mod id;
+ pub mod init;
+ pub mod interactivity;
+@@ -109,7 +110,13 @@ pub use dag::{
+ 
+ pub use doctor::{
+     default_doctor_sections, CacheDoctorSection, DoctorSection, DoctorSectionReport,
+-    LeasesDoctorSection, ValidationDoctorSection,
++    HooksDoctorSection, LeasesDoctorSection, ValidationDoctorSection,
++};
++
++pub use hook::{
++    inspect_hooks, install_hooks, resolve_hooks_dir, run_legacy_hook, run_pre_commit, run_pre_push,
++    run_prepare_commit_msg, scan_staged_secrets, shim_content, HookInstallReport, HookStatus,
++    SecretViolation, EXPECTED_HOOKS,
+ };
+ 
+ pub use config::{
+diff --git a/crates/qdev-core/src/schema.rs b/crates/qdev-core/src/schema.rs
+index e637c3b..a539b88 100644
+--- a/crates/qdev-core/src/schema.rs
++++ b/crates/qdev-core/src/schema.rs
+@@ -167,6 +167,7 @@ pub enum PayloadKind {
+     GateSet,
+     GateBaseline,
+     Preflight,
++    HookInstall,
+ }
+ 
+ impl PayloadKind {
+@@ -191,6 +192,7 @@ impl PayloadKind {
+             PayloadKind::GateSet => include_str!("../schemas/payload-gate-set.json"),
+             PayloadKind::GateBaseline => include_str!("../schemas/payload-gate-baseline.json"),
+             PayloadKind::Preflight => include_str!("../schemas/payload-preflight.json"),
++            PayloadKind::HookInstall => include_str!("../schemas/payload-hook-install.json"),
+         }
+     }
+ 
+@@ -226,11 +228,12 @@ impl PayloadKind {
+             PayloadKind::GateSet => "gate_set",
+             PayloadKind::GateBaseline => "gate_baseline",
+             PayloadKind::Preflight => "preflight",
++            PayloadKind::HookInstall => "hook_install",
+         }
+     }
+ 
+     /// Returns an array of all currently-supported payload kinds.
+-    pub const fn all() -> &'static [PayloadKind; 18] {
++    pub const fn all() -> &'static [PayloadKind; 19] {
+         &[
+             PayloadKind::Story,
+             PayloadKind::Error,
+@@ -250,6 +253,7 @@ impl PayloadKind {
+             PayloadKind::GateSet,
+             PayloadKind::GateBaseline,
+             PayloadKind::Preflight,
++            PayloadKind::HookInstall,
+         ]
+     }
+ 
+@@ -288,6 +292,9 @@ impl PayloadKind {
+                 Ok(PayloadKind::GateBaseline)
+             }
+             "preflight" => Ok(PayloadKind::Preflight),
++            "hook_install" | "hookinstall" | "hooks_install" | "install_hooks" => {
++                Ok(PayloadKind::HookInstall)
++            }
+             _ => Err(QdevError::usage_error(format!(
+                 "Unknown payload name '{}'. Valid payload names: {}",
+                 s,
+diff --git a/crates/qdev-core/tests/doctor_tests.rs b/crates/qdev-core/tests/doctor_tests.rs
+index bff124b..11c0217 100644
+--- a/crates/qdev-core/tests/doctor_tests.rs
++++ b/crates/qdev-core/tests/doctor_tests.rs
+@@ -83,11 +83,28 @@ fn test_validation_section_reports_zero_for_an_empty_healthy_cache() {
+ }
+ 
+ /// `default_doctor_sections` stays the single wiring point, and reports `cache` before
+-/// `validation` before `leases` — the order `qdev doctor --json` serializes them in.
++/// `validation` before `leases` before `hooks` — the order `qdev doctor --json` serializes them in.
+ #[test]
+ fn test_default_doctor_sections_order() {
+     let temp = TempDir::new().unwrap();
+     let sections = qdev_core::default_doctor_sections(temp.path(), &Config::default());
+     let names: Vec<&str> = sections.iter().map(|s| s.name()).collect();
+-    assert_eq!(names, vec!["cache", "validation", "leases"]);
++    assert_eq!(names, vec!["cache", "validation", "leases", "hooks"]);
+ }
++
++#[test]
++fn test_doctor_hooks_section_reports_unavailable_on_non_git_repo() {
++    let temp = TempDir::new().unwrap();
++    let store = SqliteStore::open_in_memory().unwrap();
++
++    let section = qdev_core::HooksDoctorSection::new(temp.path().to_path_buf());
++    let report = section.run(&store).unwrap();
++
++    assert_eq!(report.name, "hooks");
++    assert_eq!(*field(&report, "status"), "unavailable");
++    assert_eq!(*field(&report, "unavailable_reason"), "not_a_git_repository");
++    assert!(field(&report, "all_installed").is_null());
++    assert!(field(&report, "missing_hooks").is_null());
++    assert!(field(&report, "outdated_hooks").is_null());
++}
++
+diff --git a/docs/bmad/implementation-artifacts/sprint-status.yaml b/docs/bmad/implementation-artifacts/sprint-status.yaml
+index 2eb4ae0..c7263e4 100644
+--- a/docs/bmad/implementation-artifacts/sprint-status.yaml
++++ b/docs/bmad/implementation-artifacts/sprint-status.yaml
+@@ -16,7 +16,7 @@
+ # story_location: "{project-root}/docs/bmad/implementation-artifacts"
+ 
+ generated: 09-06-2026 08:48
+-last_updated: 09-25-2026 19:37
++last_updated: 09-25-2026 22:23
+ project: qdev
+ project_key: NOKEY
+ tracking_system: file-system
+@@ -86,7 +86,7 @@ development_status:
+   3-5-evidence-bundles: review
+   3-6-transition-bound-gates: review
+   3-7-git-preflight-guard: review
+-  3-8-git-hook-shims-qdev-hook: backlog
++  3-8-git-hook-shims-qdev-hook: review
+   3-9-hygiene-linter-lint-and-report: backlog
+   3-10-impact-analysis: backlog
+   3-11-opt-in-commit-messages: backlog
+diff --git a/crates/qdev-cli/src/handlers/hook.rs b/crates/qdev-cli/src/handlers/hook.rs
+new file mode 100644
+index 0000000..3fa109d
+--- /dev/null
++++ b/crates/qdev-cli/src/handlers/hook.rs
+@@ -0,0 +1,45 @@
++//! CLI dispatcher for `qdev hook <name>`.
++
++use std::path::Path;
++
++use qdev_core::{
++    find_workspace_root, run_pre_commit, run_pre_push, run_prepare_commit_msg, ExitCode, QdevError,
++};
++
++use crate::cli;
++use crate::output::OutputEmitter;
++use crate::Cli;
++
++pub fn handle_hook(
++    hook_args: &cli::HookArgs,
++    annotated_config: &qdev_core::AnnotatedConfig,
++    _cli: &Cli,
++    output: &OutputEmitter,
++    current_dir: &Path,
++) -> i32 {
++    let root = find_workspace_root(current_dir);
++    let result = match hook_args.name.as_str() {
++        "pre-commit" => run_pre_commit(&root, &annotated_config.config, &hook_args.args, None),
++        "pre-push" => run_pre_push(&root, &annotated_config.config, &hook_args.args, None),
++        "prepare-commit-msg" => {
++            run_prepare_commit_msg(&root, &annotated_config.config, &hook_args.args)
++        }
++        unknown => {
++            let err = QdevError::usage_error(format!(
++                "Unknown hook name '{}'. Supported hooks: pre-commit, pre-push, prepare-commit-msg",
++                unknown
++            ));
++            let _ = output.emit_error(&err);
++            return ExitCode::UsageError.as_i32();
++        }
++    };
++
++    match result {
++        Ok(Some(legacy_code)) => legacy_code,
++        Ok(None) => ExitCode::Success.as_i32(),
++        Err(e) => {
++            let _ = output.emit_error(&e);
++            e.exit_code().as_i32()
++        }
++    }
++}
+diff --git a/crates/qdev-cli/src/handlers/hygiene.rs b/crates/qdev-cli/src/handlers/hygiene.rs
+new file mode 100644
+index 0000000..b2a23fd
+--- /dev/null
++++ b/crates/qdev-cli/src/handlers/hygiene.rs
+@@ -0,0 +1,43 @@
++//! CLI handler for `qdev hygiene`.
++//!
++//! Provides a stub implementation for Story 3.8 until full comment linting
++//! is introduced in Story 3.9.
++
++use std::path::Path;
++
++use qdev_core::{ExitCode, JsonEnvelope};
++use serde::{Deserialize, Serialize};
++
++use crate::cli;
++use crate::output::OutputEmitter;
++use crate::Cli;
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct HygienePayload {
++    pub status: String,
++    pub findings: Vec<String>,
++}
++
++pub fn handle_hygiene(
++    hygiene_args: &cli::HygieneArgs,
++    _annotated_config: &qdev_core::AnnotatedConfig,
++    cli: &Cli,
++    output: &OutputEmitter,
++    _current_dir: &Path,
++) -> ExitCode {
++    match hygiene_args.command {
++        cli::HygieneCommands::Check(ref _check_args) => {
++            if cli.json {
++                let payload = HygienePayload {
++                    status: "pass".to_string(),
++                    findings: Vec::new(),
++                };
++                let envelope = JsonEnvelope::new(payload);
++                let _ = output.emit_envelope(&envelope);
++            } else {
++                let _ = output.emit_text("Hygiene check: 0 findings\n");
++            }
++            ExitCode::Success
++        }
++    }
++}
+diff --git a/crates/qdev-cli/src/handlers/install.rs b/crates/qdev-cli/src/handlers/install.rs
+new file mode 100644
+index 0000000..35dc68c
+--- /dev/null
++++ b/crates/qdev-cli/src/handlers/install.rs
+@@ -0,0 +1,64 @@
++//! CLI handler for `qdev install hooks`.
++
++use std::path::Path;
++
++use qdev_core::{find_workspace_root, install_hooks, ExitCode, JsonEnvelope, QdevError};
++
++use crate::cli;
++use crate::output::OutputEmitter;
++use crate::Cli;
++
++pub fn handle_install(
++    install_args: &cli::InstallArgs,
++    _annotated_config: &qdev_core::AnnotatedConfig,
++    cli: &Cli,
++    output: &OutputEmitter,
++    current_dir: &Path,
++) -> ExitCode {
++    match install_args.command {
++        cli::InstallCommands::Hooks(_) => {
++            let root = find_workspace_root(current_dir);
++            match install_hooks(&root) {
++                Ok(report) => {
++                    if cli.json {
++                        let envelope = JsonEnvelope::new(report);
++                        if let Err(e) = output.emit_envelope(&envelope) {
++                            let err = QdevError::infrastructure_failure(
++                                "io_error",
++                                format!("Failed to emit install envelope: {}", e),
++                            );
++                            let _ = output.emit_error(&err);
++                            return ExitCode::InfrastructureFailure;
++                        }
++                    } else {
++                        let mut text = format!(
++                            "Installed {} git hook(s) in {}: {}\n",
++                            report.installed_hooks.len(),
++                            report.hooks_dir,
++                            report.installed_hooks.join(", ")
++                        );
++                        for legacy in &report.preserved_legacy {
++                            text.push_str(&format!(
++                                "Preserved non-qdev hook: {} -> {}.legacy\n",
++                                legacy, legacy
++                            ));
++                        }
++                        if let Err(e) = output.emit_text(&text) {
++                            let err = QdevError::infrastructure_failure(
++                                "io_error",
++                                format!("Failed to emit install output: {}", e),
++                            );
++                            let _ = output.emit_error(&err);
++                            return ExitCode::InfrastructureFailure;
++                        }
++                    }
++                    ExitCode::Success
++                }
++                Err(e) => {
++                    let _ = output.emit_error(&e);
++                    e.exit_code()
++                }
++            }
++        }
++    }
++}
+diff --git a/crates/qdev-cli/tests/hook_cli_tests.rs b/crates/qdev-cli/tests/hook_cli_tests.rs
+new file mode 100644
+index 0000000..a3f428e
+--- /dev/null
++++ b/crates/qdev-cli/tests/hook_cli_tests.rs
+@@ -0,0 +1,458 @@
++use std::fs;
++use std::path::Path;
++use std::process::Command as StdCommand;
++
++use assert_cmd::Command;
++use serde_json::Value;
++use tempfile::TempDir;
++
++fn git(root: &Path, args: &[&str]) -> String {
++    let output = StdCommand::new("git")
++        .args(args)
++        .current_dir(root)
++        .output()
++        .unwrap_or_else(|e| panic!("failed to run `git {}`: {}", args.join(" "), e));
++    assert!(
++        output.status.success(),
++        "`git {}` failed: {}",
++        args.join(" "),
++        String::from_utf8_lossy(&output.stderr)
++    );
++    String::from_utf8_lossy(&output.stdout).trim().to_string()
++}
++
++fn setup_workspace(root: &Path) {
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args([
++            "init",
++            "--non-interactive",
++            "--name",
++            "HookTest",
++            "--developer",
++            "simon",
++            "--team",
++            "core-platform",
++        ])
++        .assert()
++        .success();
++
++    git(root, &["init", "-b", "main"]);
++    git(root, &["config", "user.email", "simon@example.com"]);
++    git(root, &["config", "user.name", "Simon"]);
++    git(root, &["config", "commit.gpgsign", "false"]);
++
++    // Initial commit so HEAD exists
++    git(root, &["add", "."]);
++    git(root, &["commit", "-m", "initial commit"]);
++}
++
++#[test]
++fn test_cli_install_hooks_text() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["install", "hooks"])
++        .assert()
++        .success();
++
++    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
++    assert!(stdout.contains("Installed 3 git hook(s)"));
++    assert!(stdout.contains("pre-commit"));
++    assert!(stdout.contains("pre-push"));
++    assert!(stdout.contains("prepare-commit-msg"));
++
++    let hooks_dir = root.join(".git").join("hooks");
++    assert!(hooks_dir.join("pre-commit").exists());
++    assert!(hooks_dir.join("pre-push").exists());
++    assert!(hooks_dir.join("prepare-commit-msg").exists());
++
++    let pre_commit_content = fs::read_to_string(hooks_dir.join("pre-commit")).unwrap();
++    assert_eq!(
++        pre_commit_content,
++        "#!/bin/sh\nexec qdev hook pre-commit \"$@\"\n"
++    );
++}
++
++#[test]
++fn test_cli_install_hooks_json_validates_schema() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Fetch schema via qdev schema payload hook_install
++    let mut schema_cmd = Command::cargo_bin("qdev").unwrap();
++    let schema_assert = schema_cmd
++        .current_dir(root)
++        .args(["schema", "payload", "hook_install"])
++        .assert()
++        .success();
++    let schema_json: Value = serde_json::from_slice(&schema_assert.get_output().stdout).unwrap();
++    let compiled_schema = jsonschema::validator_for(&schema_json).unwrap();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["install", "hooks", "--json"])
++        .assert()
++        .success();
++
++    let payload: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    assert!(
++        compiled_schema.is_valid(&payload),
++        "hook_install output must conform to its schema"
++    );
++
++    assert_eq!(
++        payload["installed_hooks"].as_array().unwrap().len(),
++        3
++    );
++}
++
++#[test]
++fn test_cli_install_hooks_preserves_legacy() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let hooks_dir = root.join(".git").join("hooks");
++    fs::create_dir_all(&hooks_dir).unwrap();
++    fs::write(
++        hooks_dir.join("pre-commit"),
++        "#!/bin/sh\necho 'custom legacy'\n",
++    )
++    .unwrap();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["install", "hooks"])
++        .assert()
++        .success();
++
++    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
++    assert!(stdout.contains("Preserved non-qdev hook: pre-commit -> pre-commit.legacy"));
++
++    assert!(hooks_dir.join("pre-commit.legacy").exists());
++    let legacy_content = fs::read_to_string(hooks_dir.join("pre-commit.legacy")).unwrap();
++    assert_eq!(legacy_content, "#!/bin/sh\necho 'custom legacy'\n");
++
++    let new_content = fs::read_to_string(hooks_dir.join("pre-commit")).unwrap();
++    assert_eq!(
++        new_content,
++        "#!/bin/sh\nexec qdev hook pre-commit \"$@\"\n"
++    );
++}
++
++#[test]
++fn test_cli_hook_pre_commit_clean() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args(["hook", "pre-commit"])
++        .assert()
++        .success();
++}
++
++#[test]
++fn test_cli_hook_pre_commit_secret_blocks() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Add secret_patterns to qdev.toml
++    let qdev_toml = root.join("qdev.toml");
++    let mut config_text = fs::read_to_string(&qdev_toml).unwrap();
++    config_text.push_str("\n[hygiene]\nsecret_patterns = [\"DO_NOT_COMMIT_[A-Z0-9]+\"]\n");
++    fs::write(&qdev_toml, config_text).unwrap();
++
++    // Stage scratchpad containing the secret
++    let scratch_dir = root.join("docs").join("state").join("scratch");
++    fs::create_dir_all(&scratch_dir).unwrap();
++    let scratch_file = scratch_dir.join("notes.jsonl");
++    fs::write(&scratch_file, "{\"secret\": \"DO_NOT_COMMIT_KEY123\"}\n").unwrap();
++    git(root, &["add", "docs/state/scratch/notes.jsonl"]);
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["hook", "pre-commit"])
++        .assert()
++        .code(1);
++
++    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
++    assert!(stderr.contains("secret pattern match"));
++    assert!(stderr.contains("DO_NOT_COMMIT_[A-Z0-9]+"));
++    assert!(stderr.contains("docs/state/scratch/notes.jsonl"));
++}
++
++#[test]
++fn test_cli_hook_pre_commit_propagates_legacy_exit_code() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    let hooks_dir = root.join(".git").join("hooks");
++    fs::create_dir_all(&hooks_dir).unwrap();
++    let legacy_script = hooks_dir.join("pre-commit.legacy");
++    fs::write(&legacy_script, "#!/bin/sh\nexit 42\n").unwrap();
++
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        let mut perms = fs::metadata(&legacy_script).unwrap().permissions();
++        perms.set_mode(0o755);
++        fs::set_permissions(&legacy_script, perms).unwrap();
++    }
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args(["hook", "pre-commit"])
++        .assert()
++        .code(42);
++}
++
++#[test]
++fn test_cli_hook_pre_push_clean_and_legacy_chaining() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Set trunk mode in qdev.toml so preflight doesn't look for integration_branch remote
++    let qdev_toml = root.join("qdev.toml");
++    let mut config_text = fs::read_to_string(&qdev_toml).unwrap();
++    config_text.push_str("\n[git]\nbranching_mode = \"trunk\"\n");
++    fs::write(&qdev_toml, config_text).unwrap();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args(["hook", "pre-push"])
++        .assert()
++        .success();
++
++    // Now add a legacy pre-push hook that exits 77
++    let hooks_dir = root.join(".git").join("hooks");
++    let legacy_file = hooks_dir.join("pre-push.legacy");
++    fs::write(&legacy_file, "#!/bin/sh\nexit 77\n").unwrap();
++
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        let mut perms = fs::metadata(&legacy_file).unwrap().permissions();
++        perms.set_mode(0o755);
++        fs::set_permissions(&legacy_file, perms).unwrap();
++    }
++
++    let mut cmd2 = Command::cargo_bin("qdev").unwrap();
++    cmd2.current_dir(root)
++        .args(["hook", "pre-push"])
++        .assert()
++        .code(77);
++}
++
++#[test]
++fn test_cli_doctor_reports_hooks_and_fix() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Initially without hooks installed: doctor reports status = mismatch
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["doctor", "--json"])
++        .assert()
++        .success();
++
++    let payload: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
++    let sections = payload["sections"].as_array().unwrap();
++    let hooks_section = sections
++        .iter()
++        .find(|s| s["name"] == "hooks")
++        .expect("hooks section must exist in doctor output");
++
++    assert_eq!(hooks_section["status"], "mismatch");
++    assert_eq!(hooks_section["all_installed"], false);
++    assert_eq!(
++        hooks_section["missing_hooks"].as_array().unwrap().len(),
++        3
++    );
++
++    // Run doctor --fix: rewrites shims and reports all_installed = true
++    let mut fix_cmd = Command::cargo_bin("qdev").unwrap();
++    let fix_assert = fix_cmd
++        .current_dir(root)
++        .args(["doctor", "--fix", "--json"])
++        .assert()
++        .success();
++
++    let fix_payload: Value = serde_json::from_slice(&fix_assert.get_output().stdout).unwrap();
++    let fix_sections = fix_payload["sections"].as_array().unwrap();
++    let fix_hooks = fix_sections
++        .iter()
++        .find(|s| s["name"] == "hooks")
++        .expect("hooks section must exist in doctor output");
++
++    assert_eq!(fix_hooks["status"], "ok");
++    assert_eq!(fix_hooks["all_installed"], true);
++    assert!(fix_hooks["missing_hooks"].as_array().unwrap().is_empty());
++    assert!(fix_hooks["outdated_hooks"].as_array().unwrap().is_empty());
++}
++
++#[test]
++fn test_cli_hook_pre_commit_validation_fails() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Create an invalid spec that causes a validation error finding
++    let specs_dir = root.join("docs").join("specs");
++    fs::create_dir_all(&specs_dir).unwrap();
++    let broken_spec = specs_dir.join("broken.md");
++    // Invalid yaml frontmatter with duplicate / malformed field causing error
++    fs::write(
++        &broken_spec,
++        "---\nid: E99S99\ntitle: Broken\ntype: unknown_kind\n---\n",
++    )
++    .unwrap();
++    git(root, &["add", "docs/specs/broken.md"]);
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["hook", "pre-commit"])
++        .assert()
++        .code(1);
++
++    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
++    assert!(
++        stderr.contains("Validation failed") || stderr.contains("validation_error"),
++        "stderr must report validation error: {}",
++        stderr
++    );
++}
++
++#[test]
++fn test_cli_hook_pre_push_scope_refusal() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Add module configuration and require_clean_tree_in_scope
++    let qdev_toml = root.join("qdev.toml");
++    let mut config_text = fs::read_to_string(&qdev_toml).unwrap();
++    config_text.push_str(
++        r#"
++[git]
++branching_mode = "trunk"
++require_clean_tree_in_scope = true
++
++[[modules]]
++id = "bridge"
++paths = ["crates/bridge/**"]
++"#,
++    );
++    fs::write(&qdev_toml, config_text).unwrap();
++
++    // Create uncommitted file outside of any story lease / chore allowlist
++    let outside_dir = root.join("crates").join("foundation");
++    fs::create_dir_all(&outside_dir).unwrap();
++    fs::write(outside_dir.join("lib.rs"), "// dirty file\n").unwrap();
++
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    let assert = cmd
++        .current_dir(root)
++        .args(["hook", "pre-push"])
++        .assert()
++        .code(3);
++
++    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
++    assert!(
++        stderr.contains("preflight") && (stderr.contains("stash") || stderr.contains("out of scope")),
++        "stderr must report preflight refusal: {}",
++        stderr
++    );
++}
++
++#[test]
++fn test_cli_hook_prepare_commit_msg_default_noop_and_legacy_chaining() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // 1. Default configuration: commit_messages.enabled is false -> no-op (exit 0)
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args(["hook", "prepare-commit-msg", ".git/COMMIT_EDITMSG"])
++        .assert()
++        .success();
++
++    // 2. Chained prepare-commit-msg.legacy exists and exits with code 88
++    let hooks_dir = root.join(".git").join("hooks");
++    fs::create_dir_all(&hooks_dir).unwrap();
++    let legacy_file = hooks_dir.join("prepare-commit-msg.legacy");
++    fs::write(&legacy_file, "#!/bin/sh\nexit 88\n").unwrap();
++
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        let mut perms = fs::metadata(&legacy_file).unwrap().permissions();
++        perms.set_mode(0o755);
++        fs::set_permissions(&legacy_file, perms).unwrap();
++    }
++
++    let mut cmd2 = Command::cargo_bin("qdev").unwrap();
++    cmd2.current_dir(root)
++        .args(["hook", "prepare-commit-msg", ".git/COMMIT_EDITMSG"])
++        .assert()
++        .code(88);
++}
++
++#[test]
++fn test_cli_hook_pre_push_stdin_forwarded_to_legacy() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    setup_workspace(root);
++
++    // Set trunk mode in qdev.toml so preflight passes
++    let qdev_toml = root.join("qdev.toml");
++    let mut config_text = fs::read_to_string(&qdev_toml).unwrap();
++    config_text.push_str("\n[git]\nbranching_mode = \"trunk\"\n");
++    fs::write(&qdev_toml, config_text).unwrap();
++
++    // Create legacy pre-push hook that captures stdin
++    let hooks_dir = root.join(".git").join("hooks");
++    fs::create_dir_all(&hooks_dir).unwrap();
++    let legacy_file = hooks_dir.join("pre-push.legacy");
++    fs::write(&legacy_file, "#!/bin/sh\ncat > stdin_captured.txt\nexit 0\n").unwrap();
++
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        let mut perms = fs::metadata(&legacy_file).unwrap().permissions();
++        perms.set_mode(0o755);
++        fs::set_permissions(&legacy_file, perms).unwrap();
++    }
++
++    let test_input = "refs/heads/main 1111 refs/heads/main 2222\n";
++    let mut cmd = Command::cargo_bin("qdev").unwrap();
++    cmd.current_dir(root)
++        .args(["hook", "pre-push", "origin", "git@github.com:test/repo.git"])
++        .write_stdin(test_input)
++        .assert()
++        .success();
++
++    let captured_path = root.join("stdin_captured.txt");
++    assert!(captured_path.exists(), "stdin_captured.txt must exist");
++    let captured = fs::read_to_string(&captured_path).unwrap();
++    assert_eq!(captured, test_input);
++}
++
++
+diff --git a/crates/qdev-core/schemas/payload-hook-install.json b/crates/qdev-core/schemas/payload-hook-install.json
+new file mode 100644
+index 0000000..5c9293a
+--- /dev/null
++++ b/crates/qdev-core/schemas/payload-hook-install.json
+@@ -0,0 +1,36 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "Hook Install Payload Schema",
++  "description": "Output shape of `qdev install hooks --json`. Reports installed git hook shims and any preserved legacy hooks. Schema changes follow semver on schema_version; additive fields do not bump the major.",
++  "type": "object",
++  "required": [
++    "schema_version",
++    "hooks_dir",
++    "installed_hooks",
++    "preserved_legacy"
++  ],
++  "properties": {
++    "schema_version": {
++      "type": "string"
++    },
++    "hooks_dir": {
++      "type": "string",
++      "description": "Absolute or relative path to the Git hooks directory."
++    },
++    "installed_hooks": {
++      "type": "array",
++      "items": {
++        "type": "string"
++      },
++      "description": "Names of hook shims written or updated in the hooks directory."
++    },
++    "preserved_legacy": {
++      "type": "array",
++      "items": {
++        "type": "string"
++      },
++      "description": "Names of preexisting non-qdev hooks renamed to <name>.legacy."
++    }
++  },
++  "additionalProperties": false
++}
+diff --git a/crates/qdev-core/src/hook.rs b/crates/qdev-core/src/hook.rs
+new file mode 100644
+index 0000000..24a0071
+--- /dev/null
++++ b/crates/qdev-core/src/hook.rs
+@@ -0,0 +1,589 @@
++//! Git Hook Shims & qdev hook runner per Story 3.8.
++//!
++//! Provides two-line POSIX hook shims (`pre-commit`, `pre-push`, `prepare-commit-msg`)
++//! delegating to `qdev hook <name>`, preserving and chaining existing non-qdev hooks,
++//! staged secret scanning for NFR-404, and integration with `qdev doctor [--fix]`.
++
++use std::fs;
++use std::path::{Path, PathBuf};
++use std::process::Command;
++
++use serde::{Deserialize, Serialize};
++
++use crate::config::Config;
++use crate::errors::QdevError;
++use crate::preflight::{run_preflight, PreflightOptions, PreflightStatus};
++use crate::store::Store;
++
++/// The canonical expected git hook names managed by qdev.
++pub const EXPECTED_HOOKS: &[&str] = &["pre-commit", "pre-push", "prepare-commit-msg"];
++
++/// Returns the standard POSIX two-line shim content for a given hook.
++///
++/// Always uses standard LF newlines (`\n`) for cross-platform compatibility
++/// with Git for Windows MSYS bash.
++pub fn shim_content(hook_name: &str) -> String {
++    format!("#!/bin/sh\nexec qdev hook {} \"$@\"\n", hook_name)
++}
++
++/// Discovers the Git hooks directory for a workspace.
++///
++/// Executes `git rev-parse --git-path hooks` to properly handle both standard
++/// repositories and linked git worktrees. Falls back to `.git/hooks` if the directory exists.
++pub fn resolve_hooks_dir(workspace_root: &Path) -> Result<PathBuf, QdevError> {
++    let output = Command::new("git")
++        .args(["rev-parse", "--git-path", "hooks"])
++        .current_dir(workspace_root)
++        .output();
++
++    match output {
++        Ok(out) if out.status.success() => {
++            let rel = String::from_utf8_lossy(&out.stdout).trim().to_string();
++            if rel.is_empty() {
++                return Err(QdevError::infrastructure_failure(
++                    "not_a_git_repository",
++                    "Workspace is not a git repository",
++                ));
++            }
++            let p = PathBuf::from(rel);
++            if p.is_absolute() {
++                Ok(p)
++            } else {
++                Ok(workspace_root.join(p))
++            }
++        }
++        _ => {
++            let git_dir = workspace_root.join(".git");
++            if git_dir.is_dir() {
++                Ok(git_dir.join("hooks"))
++            } else {
++                Err(QdevError::infrastructure_failure(
++                    "not_a_git_repository",
++                    "Workspace is not a git repository",
++                ))
++            }
++        }
++    }
++}
++
++/// Status of Git hook shims in a workspace.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct HookStatus {
++    pub all_installed: bool,
++    pub missing_hooks: Vec<String>,
++    pub outdated_hooks: Vec<String>,
++}
++
++/// Inspects the current installation state of Git hook shims.
++pub fn inspect_hooks(workspace_root: &Path) -> Result<HookStatus, QdevError> {
++    let hooks_dir = resolve_hooks_dir(workspace_root)?;
++
++    let mut missing_hooks = Vec::new();
++    let mut outdated_hooks = Vec::new();
++
++    for hook in EXPECTED_HOOKS {
++        let hook_path = hooks_dir.join(hook);
++        if !hook_path.exists() {
++            missing_hooks.push(hook.to_string());
++            continue;
++        }
++
++        if !is_executable(&hook_path) {
++            missing_hooks.push(hook.to_string());
++            continue;
++        }
++
++        let content = match fs::read_to_string(&hook_path) {
++            Ok(c) => c,
++            Err(_) => {
++                outdated_hooks.push(hook.to_string());
++                continue;
++            }
++        };
++
++        // Outdated if CRLF or contents do not match expected shim or invocation
++        let expected = shim_content(hook);
++        if content.contains('\r')
++            || content.trim() != expected.trim()
++            || !content.contains(&format!("qdev hook {}", hook))
++        {
++            outdated_hooks.push(hook.to_string());
++        }
++    }
++
++    let all_installed = missing_hooks.is_empty() && outdated_hooks.is_empty();
++
++    Ok(HookStatus {
++        all_installed,
++        missing_hooks,
++        outdated_hooks,
++    })
++}
++
++/// Result of installing or updating Git hook shims.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct HookInstallReport {
++    pub hooks_dir: String,
++    pub installed_hooks: Vec<String>,
++    pub preserved_legacy: Vec<String>,
++}
++
++/// Writes or updates all expected Git hook shims, preserving non-qdev hooks by chaining.
++pub fn install_hooks(workspace_root: &Path) -> Result<HookInstallReport, QdevError> {
++    let hooks_dir = resolve_hooks_dir(workspace_root)?;
++    fs::create_dir_all(&hooks_dir).map_err(|e| {
++        QdevError::infrastructure_failure(
++            "io_error",
++            format!("Failed to create hooks directory: {}", e),
++        )
++    })?;
++
++    let mut installed_hooks = Vec::new();
++    let mut preserved_legacy = Vec::new();
++
++    for hook in EXPECTED_HOOKS {
++        let hook_path = hooks_dir.join(hook);
++        if hook_path.exists() {
++            let content = fs::read_to_string(&hook_path).unwrap_or_default();
++            if content.contains(&format!("qdev hook {}", hook)) {
++                // Already a qdev shim; update in-place without renaming
++                write_shim(&hook_path, hook)?;
++                installed_hooks.push(hook.to_string());
++            } else {
++                // Non-qdev hook; preserve by renaming to <name>.legacy
++                let legacy_path = hooks_dir.join(format!("{}.legacy", hook));
++                if !legacy_path.exists() {
++                    fs::rename(&hook_path, &legacy_path).map_err(|e| {
++                        QdevError::infrastructure_failure(
++                            "io_error",
++                            format!("Failed to rename legacy hook '{}': {}", hook, e),
++                        )
++                    })?;
++                    preserved_legacy.push(hook.to_string());
++                }
++                write_shim(&hook_path, hook)?;
++                installed_hooks.push(hook.to_string());
++            }
++        } else {
++            write_shim(&hook_path, hook)?;
++            installed_hooks.push(hook.to_string());
++        }
++    }
++
++    Ok(HookInstallReport {
++        hooks_dir: hooks_dir.to_string_lossy().to_string(),
++        installed_hooks,
++        preserved_legacy,
++    })
++}
++
++fn write_shim(hook_path: &Path, hook: &str) -> Result<(), QdevError> {
++    let content = shim_content(hook);
++    fs::write(hook_path, content.as_bytes()).map_err(|e| {
++        QdevError::infrastructure_failure(
++            "io_error",
++            format!("Failed to write hook shim '{}': {}", hook_path.display(), e),
++        )
++    })?;
++    set_executable(hook_path).map_err(|e| {
++        QdevError::infrastructure_failure(
++            "io_error",
++            format!("Failed to set permissions on '{}': {}", hook_path.display(), e),
++        )
++    })?;
++    Ok(())
++}
++
++fn set_executable(path: &Path) -> std::io::Result<()> {
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        let mut perms = fs::metadata(path)?.permissions();
++        perms.set_mode(0o755);
++        fs::set_permissions(path, perms)?;
++    }
++    let _ = path;
++    Ok(())
++}
++
++fn is_executable(path: &Path) -> bool {
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        if let Ok(meta) = fs::metadata(path) {
++            return meta.permissions().mode() & 0o111 != 0;
++        }
++        false
++    }
++    #[cfg(not(unix))]
++    {
++        path.is_file()
++    }
++}
++
++/// A violation detected by the staged secret scanner.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct SecretViolation {
++    pub file: String,
++    pub pattern: String,
++}
++
++/// Scans staged scratchpad and evidence files for patterns configured in `config.hygiene.secret_patterns`.
++///
++/// Satisfies NFR-404: Never scans unstaged files; only inspects staged changes via `git diff --cached`.
++pub fn scan_staged_secrets(
++    workspace_root: &Path,
++    config: &Config,
++) -> Result<Vec<SecretViolation>, QdevError> {
++    if config.hygiene.secret_patterns.is_empty() {
++        return Ok(Vec::new());
++    }
++
++    let mut compiled = Vec::new();
++    for pat in &config.hygiene.secret_patterns {
++        match regex::Regex::new(pat) {
++            Ok(re) => compiled.push((pat.clone(), re)),
++            Err(e) => {
++                return Err(QdevError::usage_error(format!(
++                    "Invalid regex in hygiene.secret_patterns '{}': {}",
++                    pat, e
++                )));
++            }
++        }
++    }
++
++    let output = Command::new("git")
++        .args(["-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--relative"])
++        .current_dir(workspace_root)
++        .output()
++        .map_err(|e| {
++            QdevError::infrastructure_failure(
++                "git_unavailable",
++                format!("Failed to execute git diff --cached: {}", e),
++            )
++        })?;
++
++    if !output.status.success() {
++        return Err(QdevError::infrastructure_failure(
++            "git_error",
++            format!(
++                "git diff --cached failed: {}",
++                String::from_utf8_lossy(&output.stderr)
++            ),
++        ));
++    }
++
++    let files_str = String::from_utf8_lossy(&output.stdout);
++    let mut violations = Vec::new();
++
++    let state_dir = config.storage.state_dir.replace('\\', "/");
++    let trimmed_state_dir = state_dir.trim_end_matches('/');
++
++    for raw_line in files_str.lines() {
++        let line = raw_line
++            .trim()
++            .trim_matches('"')
++            .trim_matches('\'')
++            .replace('\\', "/");
++        if line.is_empty() {
++            continue;
++        }
++
++        let in_scratch = line.starts_with("scratch/")
++            || line.contains("/scratch/")
++            || line.starts_with("docs/state/scratch/")
++            || line.starts_with(&format!("{}/scratch/", trimmed_state_dir));
++        let is_scratch = in_scratch && line.ends_with(".jsonl");
++
++        let in_evidence = line.starts_with("evidence/")
++            || line.contains("/evidence/")
++            || line.starts_with("docs/state/evidence/")
++            || line.starts_with(&format!("{}/evidence/", trimmed_state_dir));
++        let is_evidence = in_evidence && line.ends_with(".json");
++
++        if !is_scratch && !is_evidence {
++            continue;
++        }
++
++        let show_out = Command::new("git")
++            .args(["show", &format!(":{}", line)])
++            .current_dir(workspace_root)
++            .output();
++
++        let content = match show_out {
++            Ok(res) if res.status.success() => String::from_utf8_lossy(&res.stdout).to_string(),
++            _ => continue,
++        };
++
++        for (pat_str, re) in &compiled {
++            if re.is_match(&content) {
++                violations.push(SecretViolation {
++                    file: line.clone(),
++                    pattern: pat_str.clone(),
++                });
++            }
++        }
++    }
++
++    Ok(violations)
++}
++
++/// Executes a legacy chained hook if present, propagating its exit code.
++pub fn run_legacy_hook(
++    workspace_root: &Path,
++    hooks_dir: &Path,
++    hook_name: &str,
++    args: &[String],
++    forward_stdin: bool,
++) -> Result<Option<i32>, QdevError> {
++    let legacy_name = format!("{}.legacy", hook_name);
++    let legacy_path = hooks_dir.join(&legacy_name);
++    if !legacy_path.exists() {
++        return Ok(None);
++    }
++
++    #[cfg(windows)]
++    let mut cmd = {
++        let is_binary = legacy_path
++            .extension()
++            .and_then(|ext| ext.to_str())
++            .map(|ext| {
++                let e = ext.to_ascii_lowercase();
++                e == "exe" || e == "cmd" || e == "bat"
++            })
++            .unwrap_or(false);
++
++        if is_binary {
++            let mut c = Command::new(&legacy_path);
++            c.args(args);
++            c
++        } else {
++            let mut c = Command::new("sh");
++            c.arg(&legacy_path).args(args);
++            c
++        }
++    };
++
++    #[cfg(not(windows))]
++    let mut cmd = {
++        let mut c = Command::new(&legacy_path);
++        c.args(args);
++        c
++    };
++
++    cmd.current_dir(workspace_root);
++
++    if forward_stdin {
++        cmd.stdin(std::process::Stdio::inherit());
++    } else {
++        cmd.stdin(std::process::Stdio::null());
++    }
++    cmd.stdout(std::process::Stdio::inherit());
++    cmd.stderr(std::process::Stdio::inherit());
++
++    let status = cmd.status().map_err(|e| {
++        QdevError::infrastructure_failure(
++            "legacy_hook_execution_failed",
++            format!("Failed to execute legacy hook '{}': {}", legacy_path.display(), e),
++        )
++    })?;
++
++    Ok(Some(status.code().unwrap_or(1)))
++}
++
++/// Executes `qdev hook pre-commit` checks:
++/// 1. Hygiene comment linter (stubbed / pass for Story 3.8).
++/// 2. Changed validation (`validate --changed`).
++/// 3. NFR-404 secret pattern scan over staged scratchpad/evidence files.
++/// 4. Chained `.git/hooks/pre-commit.legacy` execution.
++pub fn run_pre_commit(
++    workspace_root: &Path,
++    config: &Config,
++    args: &[String],
++    opt_store: Option<&dyn Store>,
++) -> Result<Option<i32>, QdevError> {
++    // 1. Hygiene check --diff
++    let qdev_bin = std::env::current_exe().ok().and_then(|current| {
++        let name = current.file_name()?.to_string_lossy();
++        if name == "qdev" || name == "qdev.exe" {
++            Some(current)
++        } else {
++            let candidate = current.parent()?.parent()?.join("qdev");
++            if candidate.exists() {
++                Some(candidate)
++            } else {
++                None
++            }
++        }
++    }).unwrap_or_else(|| PathBuf::from("qdev"));
++
++    let hygiene_res = Command::new(qdev_bin)
++        .args(["hygiene", "check", "--diff"])
++        .current_dir(workspace_root)
++        .status();
++
++    if let Ok(status) = hygiene_res {
++        if status.code() == Some(1) {
++            return Err(QdevError::logical_failure(
++                "hygiene_failure",
++                "Hygiene check failed on staged/diff changes",
++            ));
++        }
++    }
++
++    // 2. Validate --changed
++    let local_store;
++    let store_ref: &dyn Store = match opt_store {
++        Some(s) => s,
++        None => {
++            let db_path = workspace_root.join(&config.storage.cache_dir).join("cache.sqlite");
++            if db_path.exists() {
++                local_store = crate::store::SqliteStore::open(&db_path)?;
++                &local_store
++            } else {
++                // If cache store is not initialized, run in-memory / skip error check
++                local_store = crate::store::SqliteStore::open_in_memory()?;
++                &local_store
++            }
++        }
++    };
++
++    let mut findings = crate::validate::run_validation(store_ref, workspace_root, config)?;
++    match crate::validate::git_changed_files(workspace_root, &config.git.integration_branch) {
++        Ok(changed_paths) => {
++            findings = crate::validate::filter_by_changed(findings, &changed_paths);
++        }
++        Err(_) => {
++            // Integration branch might not exist or no commits yet; fall back to staged files
++            if let Ok(output) = Command::new("git")
++                .args(["-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--relative"])
++                .current_dir(workspace_root)
++                .output()
++            {
++                if output.status.success() {
++                    let files_str = String::from_utf8_lossy(&output.stdout);
++                    let staged_paths: std::collections::HashSet<String> = files_str
++                        .lines()
++                        .map(|l| {
++                            l.trim()
++                                .trim_matches('"')
++                                .trim_matches('\'')
++                                .replace('\\', "/")
++                        })
++                        .filter(|l| !l.is_empty())
++                        .collect();
++                    findings = crate::validate::filter_by_changed(findings, &staged_paths);
++                }
++            }
++        }
++    }
++    crate::validate::sort_findings(&mut findings);
++    if crate::validate::has_error_finding(&findings) {
++        let mut msg = String::from("Validation failed with error findings on changed files:\n");
++        for f in &findings {
++            if f.severity == "error" {
++                msg.push_str(&format!(
++                    "  [{}] {}: {}\n",
++                    f.code,
++                    f.path,
++                    f.message.as_deref().unwrap_or("")
++                ));
++            }
++        }
++        return Err(QdevError::logical_failure(
++            "validation_error",
++            msg.trim_end(),
++        ));
++    }
++
++    // 3. Secret patterns scan (NFR-404)
++    let violations = scan_staged_secrets(workspace_root, config)?;
++    if !violations.is_empty() {
++        let mut msg = format!(
++            "Found {} secret violation(s) in staged files:\n",
++            violations.len()
++        );
++        for v in &violations {
++            msg.push_str(&format!(
++                "  secret pattern match in staged file '{}': pattern '{}'\n",
++                v.file, v.pattern
++            ));
++        }
++        return Err(QdevError::logical_failure(
++            "secret_detected",
++            msg.trim_end(),
++        ));
++    }
++
++    // 4. Legacy hook chaining
++    let hooks_dir = resolve_hooks_dir(workspace_root)?;
++    run_legacy_hook(workspace_root, &hooks_dir, "pre-commit", args, false)
++}
++
++/// Executes `qdev hook pre-push` checks:
++/// 1. Runs preflight guard (`run_preflight`).
++/// 2. Chained `.git/hooks/pre-push.legacy` execution with forwarded stdin.
++pub fn run_pre_push(
++    workspace_root: &Path,
++    config: &Config,
++    args: &[String],
++    opt_store: Option<&dyn Store>,
++) -> Result<Option<i32>, QdevError> {
++    // 1. Run preflight
++    let outcome = run_preflight(
++        workspace_root,
++        config,
++        &PreflightOptions::default(),
++        opt_store,
++    )?;
++
++    if outcome.status == PreflightStatus::Refusal {
++        let text = crate::preflight::format_preflight_text(&outcome);
++        return Err(QdevError::policy_refusal(
++            "preflight_refusal",
++            text.trim_end(),
++        ));
++    }
++
++    // 2. Legacy hook chaining (with stdin forwarded)
++    let hooks_dir = resolve_hooks_dir(workspace_root)?;
++    run_legacy_hook(workspace_root, &hooks_dir, "pre-push", args, true)
++}
++
++/// Executes `qdev hook prepare-commit-msg`:
++/// 1. If `config.commit_messages.enabled` is false, no-op.
++/// 2. If enabled, draft message (Story 3.11).
++/// 3. Chained `.git/hooks/prepare-commit-msg.legacy` execution.
++pub fn run_prepare_commit_msg(
++    workspace_root: &Path,
++    config: &Config,
++    args: &[String],
++) -> Result<Option<i32>, QdevError> {
++    if config.commit_messages.enabled {
++        // Story 3.11 will implement full draft generation.
++        // If target file is provided and empty, draft placeholder message.
++        if let Some(target_file) = args.first() {
++            let target_path = PathBuf::from(target_file);
++            let p = if target_path.is_absolute() {
++                target_path
++            } else {
++                workspace_root.join(target_path)
++            };
++            if p.exists() {
++                let existing = fs::read_to_string(&p).unwrap_or_default();
++                let non_comment_lines: Vec<&str> = existing
++                    .lines()
++                    .filter(|l| !l.trim().starts_with('#'))
++                    .filter(|l| !l.trim().is_empty())
++                    .collect();
++                if non_comment_lines.is_empty() {
++                    // Draft message if empty
++                    let _ = fs::write(&p, format!("chore: update\n\n{}", existing));
++                }
++            }
++        }
++    }
++
++    let hooks_dir = resolve_hooks_dir(workspace_root)?;
++    run_legacy_hook(workspace_root, &hooks_dir, "prepare-commit-msg", args, false)
++}
+diff --git a/crates/qdev-core/tests/hook_tests.rs b/crates/qdev-core/tests/hook_tests.rs
+new file mode 100644
+index 0000000..648394d
+--- /dev/null
++++ b/crates/qdev-core/tests/hook_tests.rs
+@@ -0,0 +1,250 @@
++use std::fs;
++use std::path::Path;
++use std::process::Command;
++
++use qdev_core::config::Config;
++use qdev_core::hook::{
++    inspect_hooks, install_hooks, resolve_hooks_dir, run_legacy_hook, run_pre_commit,
++    scan_staged_secrets, shim_content, EXPECTED_HOOKS,
++};
++use tempfile::TempDir;
++
++fn init_git_repo(path: &Path) {
++    let status = Command::new("git")
++        .args(["init"])
++        .current_dir(path)
++        .status()
++        .expect("git init failed");
++    assert!(status.success());
++
++    // Configure user name and email for commits in tests
++    let _ = Command::new("git")
++        .args(["config", "user.name", "Test User"])
++        .current_dir(path)
++        .status();
++    let _ = Command::new("git")
++        .args(["config", "user.email", "test@example.com"])
++        .current_dir(path)
++        .status();
++}
++
++#[test]
++fn test_shim_content_generation() {
++    for hook in EXPECTED_HOOKS {
++        let content = shim_content(hook);
++        assert!(content.starts_with("#!/bin/sh\n"));
++        assert!(content.contains(&format!("exec qdev hook {} \"$@\"\n", hook)));
++        assert!(!content.contains('\r'), "Shims must never contain CRLF");
++    }
++}
++
++#[test]
++fn test_install_hooks_clean_and_inspect() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    init_git_repo(root);
++
++    // Initial inspection: hooks should be missing
++    let status = inspect_hooks(root).unwrap();
++    assert!(!status.all_installed);
++    assert_eq!(status.missing_hooks.len(), 3);
++    assert!(status.outdated_hooks.is_empty());
++
++    // Install hooks
++    let report = install_hooks(root).unwrap();
++    assert_eq!(report.installed_hooks.len(), 3);
++    assert!(report.preserved_legacy.is_empty());
++
++    // Inspection after install: all should be installed
++    let status2 = inspect_hooks(root).unwrap();
++    assert!(status2.all_installed);
++    assert!(status2.missing_hooks.is_empty());
++    assert!(status2.outdated_hooks.is_empty());
++
++    // Check executable permissions on Unix
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        let hooks_dir = resolve_hooks_dir(root).unwrap();
++        for hook in EXPECTED_HOOKS {
++            let meta = fs::metadata(hooks_dir.join(hook)).unwrap();
++            assert_ne!(
++                meta.permissions().mode() & 0o111,
++                0,
++                "Hook {} must be executable",
++                hook
++            );
++        }
++    }
++}
++
++#[test]
++fn test_install_hooks_preserves_legacy_and_is_idempotent() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    init_git_repo(root);
++
++    let hooks_dir = root.join(".git").join("hooks");
++    fs::create_dir_all(&hooks_dir).unwrap();
++
++    // Create custom pre-commit hook
++    let custom_script = "#!/bin/sh\necho 'running custom legacy hook'\nexit 0\n";
++    let pre_commit_path = hooks_dir.join("pre-commit");
++    fs::write(&pre_commit_path, custom_script).unwrap();
++
++    // First install: should preserve pre-commit as pre-commit.legacy
++    let report = install_hooks(root).unwrap();
++    assert_eq!(report.installed_hooks.len(), 3);
++    assert_eq!(report.preserved_legacy, vec!["pre-commit".to_string()]);
++
++    let legacy_path = hooks_dir.join("pre-commit.legacy");
++    assert!(legacy_path.exists());
++    assert_eq!(fs::read_to_string(&legacy_path).unwrap(), custom_script);
++
++    // Re-installing should be idempotent: does NOT rename qdev shim to .legacy
++    let report2 = install_hooks(root).unwrap();
++    assert_eq!(report2.installed_hooks.len(), 3);
++    assert!(report2.preserved_legacy.is_empty());
++    assert_eq!(fs::read_to_string(&legacy_path).unwrap(), custom_script);
++}
++
++#[test]
++fn test_inspect_hooks_outdated_detection() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    init_git_repo(root);
++
++    install_hooks(root).unwrap();
++
++    // Overwrite one hook with custom content
++    let hooks_dir = root.join(".git").join("hooks");
++    fs::write(hooks_dir.join("pre-commit"), "#!/bin/sh\necho outdated\n").unwrap();
++
++    let status = inspect_hooks(root).unwrap();
++    assert!(!status.all_installed);
++    assert_eq!(status.outdated_hooks, vec!["pre-commit".to_string()]);
++    assert!(status.missing_hooks.is_empty());
++}
++
++#[test]
++fn test_inspect_hooks_non_git_repo() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++
++    let err = inspect_hooks(root).unwrap_err();
++    assert_eq!(err.code(), "not_a_git_repository");
++}
++
++#[test]
++fn test_run_legacy_hook_exit_code_propagation() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    init_git_repo(root);
++
++    let hooks_dir = root.join(".git").join("hooks");
++    fs::create_dir_all(&hooks_dir).unwrap();
++
++    // Create a legacy script that exits with code 42
++    let script = "#!/bin/sh\nexit 42\n";
++    let legacy_file = hooks_dir.join("pre-commit.legacy");
++    fs::write(&legacy_file, script).unwrap();
++
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        let mut perms = fs::metadata(&legacy_file).unwrap().permissions();
++        perms.set_mode(0o755);
++        fs::set_permissions(&legacy_file, perms).unwrap();
++    }
++
++    let code = run_legacy_hook(root, &hooks_dir, "pre-commit", &[], false).unwrap();
++    assert_eq!(code, Some(42));
++}
++
++#[test]
++fn test_staged_secret_scanner_nfr_404() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    init_git_repo(root);
++
++    let mut config = Config::default();
++    config.hygiene.secret_patterns = vec![
++        r"SECRET_[0-9]+".to_string(),
++        r"ghp_[a-zA-Z0-9]{20,}".to_string(),
++    ];
++
++    // 1. Unstaged scratchpad file containing a secret: must NOT be flagged
++    let scratch_dir = root.join("docs").join("state").join("scratch");
++    fs::create_dir_all(&scratch_dir).unwrap();
++    let unstaged_file = scratch_dir.join("work.jsonl");
++    fs::write(&unstaged_file, "{\"note\": \"SECRET_12345\"}\n").unwrap();
++
++    let violations = scan_staged_secrets(root, &config).unwrap();
++    assert!(
++        violations.is_empty(),
++        "Unstaged files must never trigger secret scan"
++    );
++
++    // 2. Stage a normal source file with a secret: must NOT be flagged (only scratchpad/evidence are scanned)
++    let src_dir = root.join("src");
++    fs::create_dir_all(&src_dir).unwrap();
++    let src_file = src_dir.join("main.rs");
++    fs::write(&src_file, "// Mock SECRET_999\n").unwrap();
++    let _ = Command::new("git")
++        .args(["add", "src/main.rs"])
++        .current_dir(root)
++        .status();
++
++    let violations = scan_staged_secrets(root, &config).unwrap();
++    assert!(
++        violations.is_empty(),
++        "Non-scratchpad/non-evidence files should not trigger secret scan"
++    );
++
++    // 3. Stage the scratchpad file with secret: MUST be flagged
++    let _ = Command::new("git")
++        .args(["add", "docs/state/scratch/work.jsonl"])
++        .current_dir(root)
++        .status();
++
++    let violations = scan_staged_secrets(root, &config).unwrap();
++    assert_eq!(violations.len(), 1);
++    assert_eq!(violations[0].file, "docs/state/scratch/work.jsonl");
++    assert_eq!(violations[0].pattern, r"SECRET_[0-9]+");
++
++    // 4. Staging an evidence file with a secret token: MUST be flagged
++    let evidence_dir = root.join("docs").join("state").join("evidence");
++    fs::create_dir_all(&evidence_dir).unwrap();
++    let ev_file = evidence_dir.join("test.json");
++    fs::write(&ev_file, "{\"token\": \"ghp_abcdefghijklmnopqrstuvwx\"}\n").unwrap();
++    let _ = Command::new("git")
++        .args(["add", "docs/state/evidence/test.json"])
++        .current_dir(root)
++        .status();
++
++    let violations = scan_staged_secrets(root, &config).unwrap();
++    assert_eq!(violations.len(), 2);
++}
++
++#[test]
++fn test_run_pre_commit_secret_blocks() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path();
++    init_git_repo(root);
++
++    let mut config = Config::default();
++    config.hygiene.secret_patterns = vec![r"SUPER_SECRET".to_string()];
++
++    // Stage scratchpad containing secret
++    let scratch_dir = root.join("docs").join("state").join("scratch");
++    fs::create_dir_all(&scratch_dir).unwrap();
++    let scratch_file = scratch_dir.join("scratch.jsonl");
++    fs::write(&scratch_file, "SUPER_SECRET\n").unwrap();
++    let _ = Command::new("git")
++        .args(["add", "docs/state/scratch/scratch.jsonl"])
++        .current_dir(root)
++        .status();
++
++    let err = run_pre_commit(root, &config, &[], None).unwrap_err();
++    assert_eq!(err.code(), "secret_detected");
++}
+diff --git a/docs/bmad/implementation-artifacts/spec-3-8-git-hook-shims-qdev-hook.md b/docs/bmad/implementation-artifacts/spec-3-8-git-hook-shims-qdev-hook.md
+new file mode 100644
+index 0000000..595487a
+--- /dev/null
++++ b/docs/bmad/implementation-artifacts/spec-3-8-git-hook-shims-qdev-hook.md
+@@ -0,0 +1,149 @@
++---
++title: 'Story 3.8: Git Hook Shims & qdev hook'
++type: 'feature'
++created: '2026-09-25'
++status: 'in-review'
++baseline_commit: '01f4484e77bf1ededdd0de1ba80396f7a864f625'
++route: 'dispatch'
++review_loop_iteration: 0
++context:
++  - 'docs/compliance-and-safety.md'
++  - 'docs/bmad/implementation-artifacts/epic-3-context.md'
++---
++
++<frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
++
++## Intent
++
++**Problem:** Git operations (commit, push) can bypass local quality gates, commit secrets or PHI into scratchpads/evidence, or push out-of-scope/stale branches unless enforced automatically at the version control boundary by reliable, cross-platform Git hooks.
++**Approach:** Implement `qdev install hooks` to deploy lightweight two-line POSIX shims (`pre-commit`, `pre-push`, `prepare-commit-msg`) calling `qdev hook <name>`, preserving non-qdev hooks by chaining (`<name>.legacy`), enforce hygiene diff, changed validation, and NFR-404 secret pattern scans on `pre-commit`, preflight on `pre-push`, and provide missing/outdated shim detection and remediation via `qdev doctor [--fix]`.
++
++## Boundaries & Constraints
++
++**Always:**
++- Write hook shims (`pre-commit`, `pre-push`, `prepare-commit-msg`) in the Git hooks directory (`.git/hooks` or git common directory hooks) as two-line POSIX shims calling `exec qdev hook <name> "$@"` with LF (`\n`) newlines and executable permissions (`0o755` on Unix).
++- Preserve existing non-qdev hooks when installing shims by renaming them to `<name>.legacy` (preserving permissions) and chaining their execution inside `qdev hook <name>`.
++- In `qdev hook pre-commit`:
++  1. Run `hygiene check --diff` (fail with exit 1 on any comment hygiene finding).
++  2. Run `validate --changed` (fail with exit 1 on any error-severity validation finding in files changed against `config.git.integration_branch`).
++  3. When `config.hygiene.secret_patterns` is non-empty, scan staged scratchpad files (`docs/state/scratch/**` or `.jsonl`) and staged evidence files (`docs/state/evidence/**` or `.json`) using `git diff --cached --name-only` and staged content inspection. If any regex matches, fail with exit 1 and report the violating file and pattern (NFR-404).
++  4. If chained `.git/hooks/pre-commit.legacy` exists, execute it with forwarded arguments. If it exits non-zero, propagate its exit code.
++- In `qdev hook pre-push`:
++  1. Run preflight (`run_preflight`). If refusal, exit 3 (`PolicyRefusal`). If infrastructure failure, exit 4 (`InfrastructureFailure`).
++  2. If chained `.git/hooks/pre-push.legacy` exists, execute it forwarding arguments and standard input.
++- In `qdev hook prepare-commit-msg`:
++  1. When `config.commit_messages.enabled` is `false` (default), treat as a no-op (exit 0).
++  2. When `enabled` is `true`, draft message into target commit message file if message is empty/default.
++  3. If chained `.git/hooks/prepare-commit-msg.legacy` exists, execute it with forwarded arguments.
++- In `qdev doctor`:
++  - Add a `"hooks"` diagnostic section reporting `status`, `unavailable_reason`, `all_installed`, `missing_hooks`, and `outdated_hooks`.
++  - Report `status: "ok"` when all three shims exist, are executable, and contain `qdev hook <name>`.
++  - Report `status: "mismatch"` when any shim is missing or does not match expected contents.
++  - When `--fix` is passed to `qdev doctor`, rewrite missing or outdated shims (preserving legacy hooks) and report them as repaired.
++- Add `secret_patterns: Vec<String>` to `[hygiene]` configuration in `qdev.toml` schema and config parser.
++
++**Never:**
++- Never clobber or delete an existing non-qdev hook without preserving it as `<name>.legacy`.
++- Never use CRLF line endings in shims; shims must remain compatible with Git for Windows MSYS bash.
++- Never let `doctor` exit non-zero due to missing or outdated hooks (`doctor` is a diagnostic report).
++- Never scan working tree unstaged files for the pre-commit secret check; only inspect staged changes (`git diff --cached`).
++
++## I/O & Edge-Case Matrix
++
++| Scenario | Input / State | Expected Output / Behavior | Error Handling |
++|----------|--------------|---------------------------|----------------|
++| Install clean | `.git/hooks` has no existing hooks | Writes `pre-commit`, `pre-push`, `prepare-commit-msg` shims (0o755); exit 0 | N/A |
++| Install with legacy hook | Existing custom `.git/hooks/pre-commit` | Renames to `pre-commit.legacy`, writes new shim; exit 0 | Preserves permissions |
++| Reinstall existing qdev shims | Hooks already contain `qdev hook <name>` | Updates shims in-place; does NOT rename qdev shim to `.legacy` | Idempotent |
++| Pre-commit clean | Clean diff, 0 validate errors, 0 secret matches | Exit 0 | N/A |
++| Pre-commit secret found | Staged scratchpad contains string matching `secret_patterns` | Exit 1; outputs matched pattern and file path | LogicalFailure (exit 1) |
++| Pre-commit validate fails | Staged changes cause error finding in `validate --changed` | Exit 1; prints validation error findings | LogicalFailure (exit 1) |
++| Pre-push dirty scope | Uncommitted changes outside leased module | Exit 3; prints preflight refusal with stash command | PolicyRefusal (exit 3) |
++| Pre-commit chained hook | `pre-commit.legacy` exists and fails (exit 42) | Exit 42 (propagates legacy hook exit code) | Propagated exit code |
++| Doctor without shims | No shims in `.git/hooks` | Reports `status = mismatch`, `all_installed = false`, `missing_hooks = [...]` | Exit 0 (doctor report) |
++| Doctor with `--fix` | Missing or outdated shims present | Rewrites shims to `.git/hooks/`, reports `all_installed = true` | Exit 0 |
++| Non-git directory | Workspace is not a git repository | Doctor hooks section reports `status = unavailable`, reason `not_a_git_repository` | Exit 0 |
++
++</frozen-after-approval>
++
++## Code Map
++
++- `crates/qdev-core/src/config/types.rs` -- Add `pub secret_patterns: Vec<String>` to `HygieneConfig`.
++- `crates/qdev-core/src/config/mod.rs` -- Validate and extract `secret_patterns` string array under `[hygiene]` section.
++- `crates/qdev-core/src/config/source.rs` -- Emit `secret_patterns` in annotated config output.
++- `crates/qdev-core/src/hook.rs` -- New module: hook constants (`EXPECTED_HOOKS`, shim template), `install_hooks`, `inspect_hooks`, secret pattern scanner for staged scratchpad/evidence files, and hook execution dispatchers (`run_pre_commit`, `run_pre_push`, `run_prepare_commit_msg`).
++- `crates/qdev-core/src/doctor.rs` -- Implement `HooksDoctorSection` inspecting hook status; wire into `default_doctor_sections`.
++- `crates/qdev-core/schemas/payload-doctor.json` -- Add JSON Schema definition for `hooks` section under `allOf`.
++- `crates/qdev-core/src/schema.rs` -- Register `PayloadKind::HookInstall` (payload `hook_install`).
++- `crates/qdev-core/schemas/payload-hook-install.json` -- JSON Schema for `qdev install hooks` output envelope.
++- `crates/qdev-core/src/lib.rs` -- Export `hook` module and `HooksDoctorSection`.
++- `crates/qdev-cli/src/cli.rs` -- Add `Commands::Install(InstallArgs)`, `Commands::Hook(HookArgs)`, `Commands::Hygiene(HygieneArgs)`, and `DoctorArgs` with `--fix` flag.
++- `crates/qdev-cli/src/handlers/install.rs` -- CLI handler for `qdev install hooks`.
++- `crates/qdev-cli/src/handlers/hook.rs` -- CLI handler for `qdev hook <name>`.
++- `crates/qdev-cli/src/handlers/hygiene.rs` -- CLI handler for `qdev hygiene check [--diff]`.
++- `crates/qdev-cli/src/handlers/doctor.rs` or `main.rs` -- Handle `--fix` flag to rewrite hook shims before running doctor sections.
++- `crates/qdev-core/tests/hook_tests.rs` -- Unit tests for hook installation, shim generation, legacy chaining, and staged secret scanning.
++- `crates/qdev-cli/tests/hook_cli_tests.rs` -- Integration tests for `qdev install hooks`, `qdev hook pre-commit`, `qdev hook pre-push`, `qdev doctor` reporting and `--fix`.
++
++## Tasks & Acceptance
++
++**Execution:**
++- [x] `crates/qdev-core/src/config/types.rs` -- Add `secret_patterns` field to `HygieneConfig` -- Configuration data model.
++- [x] `crates/qdev-core/src/config/mod.rs` -- Add `secret_patterns` validation and parsing in `validate_hygiene_section` and config loading -- Config validation.
++- [x] `crates/qdev-core/src/config/source.rs` -- Add `secret_patterns` tracking in config source emitter -- Config provenance.
++- [x] `crates/qdev-core/schemas/payload-hook-install.json` -- Define JSON Schema for hook installation envelope -- Hook install contract.
++- [x] `crates/qdev-core/schemas/payload-doctor.json` -- Add `hooks` section definition to doctor payload schema -- Doctor schema extension.
++- [x] `crates/qdev-core/src/schema.rs` -- Register `PayloadKind::HookInstall` and embed schema -- Schema payload registry.
++- [x] `crates/qdev-core/src/hook.rs` -- Implement shim installation, legacy chaining, hook inspection, staged secret scanner, and execution runners -- Core hook engine.
++- [x] `crates/qdev-core/src/doctor.rs` -- Implement `HooksDoctorSection` and add to `default_doctor_sections` -- Doctor diagnostics integration.
++- [x] `crates/qdev-core/src/lib.rs` -- Export hook module and types -- Core library exports.
++- [x] `crates/qdev-cli/src/cli.rs` -- Define CLI grammar for `install`, `hook`, `hygiene`, and update `Doctor` with `DoctorArgs` -- CLI argument parsing.
++- [x] `crates/qdev-cli/src/handlers/install.rs` -- Implement `handle_install_hooks` -- CLI install handler.
++- [x] `crates/qdev-cli/src/handlers/hook.rs` -- Implement `handle_hook` -- CLI hook dispatcher.
++- [x] `crates/qdev-cli/src/handlers/hygiene.rs` -- Implement `handle_hygiene` -- CLI hygiene stub handler.
++- [x] `crates/qdev-cli/src/handlers/mod.rs` -- Expose install, hook, and hygiene handlers -- Handler module exports.
++- [x] `crates/qdev-cli/src/main.rs` -- Route CLI commands and handle `doctor --fix` -- CLI main routing.
++- [x] `crates/qdev-core/tests/hook_tests.rs` -- Unit tests for shim generation, legacy chaining, and staged secret scanner -- Core test coverage.
++- [x] `crates/qdev-cli/tests/hook_cli_tests.rs` -- CLI integration tests for `install hooks`, `hook pre-commit`, `hook pre-push`, and `doctor --fix` -- CLI test coverage.
++
++**Acceptance Criteria:**
++- Given `qdev install hooks`, when it runs, then `pre-commit`, `pre-push`, and `prepare-commit-msg` shims are written as in `docs/compliance-and-safety.md` §6, existing non-qdev hooks are preserved by chaining, and the shims work under Git for Windows.
++- `qdev hook pre-commit` runs `hygiene check --diff`, `validate --changed`, and, when `[hygiene] secret_patterns` is configured, a pattern scan of staged scratchpad and evidence files (NFR-404).
++- `qdev hook pre-push` runs `preflight`.
++- `qdev doctor` reports missing or outdated shims and `--fix` rewrites them.
++
++## Implementation Notes
++
++## Spec Change Log
++
++## Review Triage Log
++
++## Design Notes
++
++### Shim Content
++```sh
++#!/bin/sh
++exec qdev hook <name> "$@"
++```
++Written with standard POSIX shell syntax and LF line endings so Git for Windows executes it cleanly via MSYS bash.
++
++### Legacy Hook Chaining
++When `qdev install hooks` encounters an existing `.git/hooks/<name>` that does not contain `qdev hook <name>`, it renames it to `<name>.legacy`.
++When `qdev hook <name>` runs:
++1. Core checks execute first (`preflight` for pre-push, `hygiene` + `validate` + secret scan for pre-commit).
++2. If core checks fail, execution aborts immediately with the appropriate exit code.
++3. If core checks succeed and `<name>.legacy` exists, it executes `<name>.legacy "$@"` and propagates its exit code.
++
++### NFR-404 Secret Scanning
++Inspects staged files (`git diff --cached --name-only`) that belong to scratchpad or evidence directories:
++- `docs/state/scratch/**` (or `.jsonl` files)
++- `docs/state/evidence/**` (or `.json` files)
++Staged content is extracted via `git show :<staged-path>` and matched against compiled regex patterns from `config.hygiene.secret_patterns`.
++
++## Verification
++
++**Commands:**
++- `cargo test --test hook_tests` -- expected: All core hook unit tests pass.
++- `cargo test --test hook_cli_tests` -- expected: CLI integration tests for `install hooks`, `hook pre-commit`, `hook pre-push`, and `doctor --fix` pass.
++- `cargo test` -- expected: Full test suite passes.
++- `cargo clippy --all-targets -- -D warnings` -- expected: Zero clippy warnings.

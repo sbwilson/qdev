@@ -7,6 +7,7 @@ pub mod dw;
 pub mod envelope;
 pub mod errors;
 pub mod governance;
+pub mod hook;
 pub mod id;
 pub mod init;
 pub mod interactivity;
@@ -109,7 +110,13 @@ pub use dag::{
 
 pub use doctor::{
     default_doctor_sections, CacheDoctorSection, DoctorSection, DoctorSectionReport,
-    LeasesDoctorSection, ValidationDoctorSection,
+    HooksDoctorSection, LeasesDoctorSection, ValidationDoctorSection,
+};
+
+pub use hook::{
+    inspect_hooks, install_hooks, resolve_hooks_dir, run_legacy_hook, run_pre_commit, run_pre_push,
+    run_prepare_commit_msg, scan_staged_secrets, shim_content, HookInstallReport, HookStatus,
+    SecretViolation, EXPECTED_HOOKS,
 };
 
 pub use config::{

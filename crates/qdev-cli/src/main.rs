@@ -66,10 +66,10 @@ fn main() -> StdExitCode {
 
     let exit_code = match result {
         Ok(code) => code,
-        Err(_) => ExitCode::InfrastructureFailure,
+        Err(_) => ExitCode::InfrastructureFailure.as_i32(),
     };
 
-    StdExitCode::from(exit_code)
+    StdExitCode::from(exit_code as u8)
 }
 
 fn normalize_raw_args(raw_args: &[String]) -> Vec<String> {
@@ -140,7 +140,7 @@ fn normalize_raw_args(raw_args: &[String]) -> Vec<String> {
     before
 }
 
-fn run(raw_args: &[String]) -> ExitCode {
+fn run(raw_args: &[String]) -> i32 {
     let raw_args = normalize_raw_args(raw_args);
     let json_mode = is_json_requested(&raw_args);
     let output = OutputEmitter::new(json_mode);
@@ -150,13 +150,13 @@ fn run(raw_args: &[String]) -> ExitCode {
         Err(clap_err) => {
             if clap_err.kind() == clap::error::ErrorKind::DisplayHelp {
                 print!("{}", clap_err);
-                return ExitCode::Success;
+                return ExitCode::Success.as_i32();
             }
 
             let err_msg = clap_err.to_string();
             let qdev_err = QdevError::usage_error(err_msg.trim());
             let _ = output.emit_error(&qdev_err);
-            return ExitCode::UsageError;
+            return ExitCode::UsageError.as_i32();
         }
     };
 
@@ -172,12 +172,12 @@ fn run(raw_args: &[String]) -> ExitCode {
                     format!("Failed to emit version envelope: {}", e),
                 );
                 let _ = output.emit_error(&err);
-                return ExitCode::InfrastructureFailure;
+                return ExitCode::InfrastructureFailure.as_i32();
             }
         } else {
             println!("qdev {}", env!("CARGO_PKG_VERSION"));
         }
-        return ExitCode::Success;
+        return ExitCode::Success.as_i32();
     }
 
     // Resolve interactivity per AD-12
@@ -198,13 +198,13 @@ fn run(raw_args: &[String]) -> ExitCode {
                 format!("Failed to determine current working directory: {}", e),
             );
             let _ = output.emit_error(&qdev_err);
-            return ExitCode::InfrastructureFailure;
+            return ExitCode::InfrastructureFailure.as_i32();
         }
     };
 
     // Dispatch schema command before loading config so it works without an initialized workspace
     if let Some(Commands::Schema(ref schema_args)) = cli.command {
-        return handle_schema(schema_args, &cli, &output);
+        return handle_schema(schema_args, &cli, &output).as_i32();
     }
 
     // `init` is dispatched *after* this, not before: it resolves its layout through the same
@@ -216,7 +216,7 @@ fn run(raw_args: &[String]) -> ExitCode {
         Ok(cfg) => cfg,
         Err(e) => {
             let _ = output.emit_error(&e);
-            return e.exit_code();
+            return e.exit_code().as_i32();
         }
     };
 
@@ -230,7 +230,7 @@ fn run(raw_args: &[String]) -> ExitCode {
             &output,
             &root,
             &annotated_config,
-        );
+        ).as_i32();
     }
 
     // Every command that touches the cache is refused outside an initialized workspace, checked
@@ -240,7 +240,7 @@ fn run(raw_args: &[String]) -> ExitCode {
     if requires_workspace(cli.command.as_ref()) {
         if let Err(e) = ensure_query_workspace(&root) {
             let _ = output.emit_error(&e);
-            return e.exit_code();
+            return e.exit_code().as_i32();
         }
     }
 
@@ -264,7 +264,7 @@ fn run(raw_args: &[String]) -> ExitCode {
                 && matches!(cli.command, Some(Commands::Sync(ref args)) if args.rebuild);
             if !recoverable_by_this_command {
                 let _ = output.emit_error(&e);
-                return e.exit_code();
+                return e.exit_code().as_i32();
             }
         }
     }
@@ -272,7 +272,7 @@ fn run(raw_args: &[String]) -> ExitCode {
     // Dispatch commands
     match cli.command {
         None | Some(Commands::Status) => {
-            handlers::pulse::handle_pulse(&annotated_config, &cli, &output, &current_dir)
+            handlers::pulse::handle_pulse(&annotated_config, &cli, &output, &current_dir).as_i32()
         }
         Some(Commands::Config(config_args)) => match config_args.command {
             ConfigCommands::Show => {
@@ -284,7 +284,7 @@ fn run(raw_args: &[String]) -> ExitCode {
                             format!("Failed to emit config envelope: {}", e),
                         );
                         let _ = output.emit_error(&err);
-                        return ExitCode::InfrastructureFailure;
+                        return ExitCode::InfrastructureFailure.as_i32();
                     }
                 } else {
                     let report = annotated_config.to_text_report();
@@ -294,15 +294,15 @@ fn run(raw_args: &[String]) -> ExitCode {
                             format!("Failed to emit config report: {}", e),
                         );
                         let _ = output.emit_error(&err);
-                        return ExitCode::InfrastructureFailure;
+                        return ExitCode::InfrastructureFailure.as_i32();
                     }
                 }
-                ExitCode::Success
+                ExitCode::Success.as_i32()
             }
         },
         Some(Commands::Create(ref create_args)) => match create_args.command {
             CreateCommands::Story(ref story_args) => {
-                handle_create_story(story_args, &annotated_config, &cli, &output, &current_dir)
+                handle_create_story(story_args, &annotated_config, &cli, &output, &current_dir).as_i32()
             }
         },
         Some(Commands::Update(ref update_args)) => handle_update(
@@ -312,7 +312,7 @@ fn run(raw_args: &[String]) -> ExitCode {
             &output,
             &current_dir,
             interactivity,
-        ),
+        ).as_i32(),
         Some(Commands::Transition(ref transition_args)) => handlers::transition::handle_transition(
             transition_args,
             &annotated_config,
@@ -320,12 +320,12 @@ fn run(raw_args: &[String]) -> ExitCode {
             &output,
             &current_dir,
             interactivity,
-        ),
+        ).as_i32(),
         Some(Commands::Get(ref get_args)) => {
-            handle_get(get_args, &annotated_config, &cli, &output, &current_dir)
+            handle_get(get_args, &annotated_config, &cli, &output, &current_dir).as_i32()
         }
         Some(Commands::List(ref list_args)) => {
-            handle_list(list_args, &annotated_config, &cli, &output, &current_dir)
+            handle_list(list_args, &annotated_config, &cli, &output, &current_dir).as_i32()
         }
         Some(Commands::Relate(ref relate_args)) => handle_relate(
             relate_args,
@@ -334,7 +334,7 @@ fn run(raw_args: &[String]) -> ExitCode {
             &output,
             &current_dir,
             interactivity,
-        ),
+        ).as_i32(),
         Some(Commands::Unrelate(ref unrelate_args)) => handle_unrelate(
             unrelate_args,
             &annotated_config,
@@ -342,7 +342,7 @@ fn run(raw_args: &[String]) -> ExitCode {
             &output,
             &current_dir,
             interactivity,
-        ),
+        ).as_i32(),
         Some(Commands::Constraint(ref constraint_args)) => handlers::constraint::handle_constraint(
             constraint_args,
             &annotated_config,
@@ -350,9 +350,9 @@ fn run(raw_args: &[String]) -> ExitCode {
             &output,
             &current_dir,
             interactivity,
-        ),
+        ).as_i32(),
         Some(Commands::Graph(ref graph_args)) => {
-            handle_graph(graph_args, &annotated_config, &cli, &output, &current_dir)
+            handle_graph(graph_args, &annotated_config, &cli, &output, &current_dir).as_i32()
         }
         Some(Commands::Validate(ref validate_args)) => handle_validate(
             validate_args,
@@ -361,16 +361,18 @@ fn run(raw_args: &[String]) -> ExitCode {
             &output,
             &current_dir,
             interactivity,
-        ),
+        ).as_i32(),
         Some(Commands::Sync(ref sync_args)) => {
-            handle_sync(sync_args, &annotated_config, &cli, &output, &current_dir)
+            handle_sync(sync_args, &annotated_config, &cli, &output, &current_dir).as_i32()
         }
-        Some(Commands::Doctor) => handle_doctor(&annotated_config, &cli, &output, &current_dir),
+        Some(Commands::Doctor(ref doctor_args)) => {
+            handle_doctor(doctor_args, &annotated_config, &cli, &output, &current_dir).as_i32()
+        }
         Some(Commands::Claim(ref claim_args)) => {
-            handlers::claim::handle_claim(claim_args, &annotated_config, &cli, &output, &current_dir)
+            handlers::claim::handle_claim(claim_args, &annotated_config, &cli, &output, &current_dir).as_i32()
         }
         Some(Commands::Release(ref release_args)) => {
-            handlers::claim::handle_release(release_args, &annotated_config, &cli, &output, &current_dir)
+            handlers::claim::handle_release(release_args, &annotated_config, &cli, &output, &current_dir).as_i32()
         }
         Some(Commands::Scratch(ref scratch_args)) => handlers::scratch::handle_scratch(
             scratch_args,
@@ -379,14 +381,14 @@ fn run(raw_args: &[String]) -> ExitCode {
             &output,
             &current_dir,
             interactivity,
-        ),
+        ).as_i32(),
         Some(Commands::Decision(ref decision_args)) => handlers::decision::handle_decision(
             decision_args,
             &annotated_config,
             &cli,
             &output,
             &current_dir,
-        ),
+        ).as_i32(),
         Some(Commands::Dw(ref dw_args)) => handlers::dw::handle_dw(
             dw_args,
             &annotated_config,
@@ -394,22 +396,43 @@ fn run(raw_args: &[String]) -> ExitCode {
             &output,
             &current_dir,
             interactivity,
-        ),
+        ).as_i32(),
         Some(Commands::Sprint(ref sprint_args)) => {
-            handlers::sprint::handle_sprint(sprint_args, &annotated_config, &cli, &output, &current_dir)
+            handlers::sprint::handle_sprint(sprint_args, &annotated_config, &cli, &output, &current_dir).as_i32()
         }
         Some(Commands::Chore(ref chore_args)) => {
-            handlers::chore::handle_chore(chore_args, &annotated_config, &cli, &output, &current_dir)
+            handlers::chore::handle_chore(chore_args, &annotated_config, &cli, &output, &current_dir).as_i32()
         }
         Some(Commands::Next(ref next_args)) => {
-            handlers::next::handle_next(next_args, &annotated_config, &cli, &output, &current_dir)
+            handlers::next::handle_next(next_args, &annotated_config, &cli, &output, &current_dir).as_i32()
         }
         Some(Commands::Gate(ref gate_args)) => {
-            handlers::gate::handle_gate(gate_args, &annotated_config, &cli, &output, &root)
+            handlers::gate::handle_gate(gate_args, &annotated_config, &cli, &output, &root).as_i32()
         }
         Some(Commands::Preflight(ref preflight_args)) => {
-            handlers::preflight::handle_preflight(preflight_args, &annotated_config, &cli, &output, &root)
+            handlers::preflight::handle_preflight(preflight_args, &annotated_config, &cli, &output, &root).as_i32()
         }
+        Some(Commands::Install(ref install_args)) => handlers::install::handle_install(
+            install_args,
+            &annotated_config,
+            &cli,
+            &output,
+            &current_dir,
+        ).as_i32(),
+        Some(Commands::Hook(ref hook_args)) => handlers::hook::handle_hook(
+            hook_args,
+            &annotated_config,
+            &cli,
+            &output,
+            &current_dir,
+        ),
+        Some(Commands::Hygiene(ref hygiene_args)) => handlers::hygiene::handle_hygiene(
+            hygiene_args,
+            &annotated_config,
+            &cli,
+            &output,
+            &current_dir,
+        ).as_i32(),
         Some(Commands::Init(_)) => unreachable!(),
         Some(Commands::Schema(_)) => unreachable!(),
     }
@@ -476,7 +499,10 @@ fn requires_workspace(command: Option<&Commands>) -> bool {
         | Some(Commands::Status)
         | Some(Commands::Init(_))
         | Some(Commands::Schema(_))
-        | Some(Commands::Preflight(_)) => {
+        | Some(Commands::Preflight(_))
+        | Some(Commands::Install(_))
+        | Some(Commands::Hook(_))
+        | Some(Commands::Hygiene(_)) => {
             false
         }
         // Matched at subcommand granularity, not by whole variant: a future `create epic` or
@@ -497,7 +523,7 @@ fn requires_workspace(command: Option<&Commands>) -> bool {
         | Some(Commands::Graph(_))
         | Some(Commands::Validate(_))
         | Some(Commands::Sync(_))
-        | Some(Commands::Doctor)
+        | Some(Commands::Doctor(_))
         | Some(Commands::Claim(_))
         | Some(Commands::Release(_))
         | Some(Commands::Scratch(_))
@@ -2859,12 +2885,20 @@ struct DoctorPayload {
 }
 
 fn handle_doctor(
+    doctor_args: &cli::DoctorArgs,
     annotated_config: &qdev_core::AnnotatedConfig,
     cli: &Cli,
     output: &OutputEmitter,
     current_dir: &std::path::Path,
 ) -> ExitCode {
     let root = qdev_core::find_workspace_root(current_dir);
+
+    if doctor_args.fix {
+        if let Err(e) = qdev_core::install_hooks(&root) {
+            let _ = output.emit_error(&e);
+            return e.exit_code();
+        }
+    }
 
     let store = match open_query_store(&root, annotated_config) {
         Ok(s) => s,

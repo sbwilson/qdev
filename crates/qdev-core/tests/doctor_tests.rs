@@ -83,11 +83,28 @@ fn test_validation_section_reports_zero_for_an_empty_healthy_cache() {
 }
 
 /// `default_doctor_sections` stays the single wiring point, and reports `cache` before
-/// `validation` before `leases` — the order `qdev doctor --json` serializes them in.
+/// `validation` before `leases` before `hooks` — the order `qdev doctor --json` serializes them in.
 #[test]
 fn test_default_doctor_sections_order() {
     let temp = TempDir::new().unwrap();
     let sections = qdev_core::default_doctor_sections(temp.path(), &Config::default());
     let names: Vec<&str> = sections.iter().map(|s| s.name()).collect();
-    assert_eq!(names, vec!["cache", "validation", "leases"]);
+    assert_eq!(names, vec!["cache", "validation", "leases", "hooks"]);
 }
+
+#[test]
+fn test_doctor_hooks_section_reports_unavailable_on_non_git_repo() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteStore::open_in_memory().unwrap();
+
+    let section = qdev_core::HooksDoctorSection::new(temp.path().to_path_buf());
+    let report = section.run(&store).unwrap();
+
+    assert_eq!(report.name, "hooks");
+    assert_eq!(*field(&report, "status"), "unavailable");
+    assert_eq!(*field(&report, "unavailable_reason"), "not_a_git_repository");
+    assert!(field(&report, "all_installed").is_null());
+    assert!(field(&report, "missing_hooks").is_null());
+    assert!(field(&report, "outdated_hooks").is_null());
+}
+

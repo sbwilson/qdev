@@ -66,7 +66,7 @@ pub enum Commands {
     /// Run or rebuild the incremental hydration sweep
     Sync(SyncArgs),
     /// Report structured cache and workspace diagnostics
-    Doctor,
+    Doctor(DoctorArgs),
     /// Claim a story lease
     Claim(ClaimArgs),
     /// Release a story lease
@@ -87,6 +87,67 @@ pub enum Commands {
     Gate(GateArgs),
     /// Enforce working tree scope, branch freshness, and validation health
     Preflight(PreflightArgs),
+    /// Install developer tools and integrations (e.g. Git hooks)
+    Install(InstallArgs),
+    /// Execute a Git hook
+    Hook(HookArgs),
+    /// Inspect source code comment hygiene
+    Hygiene(HygieneArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct DoctorArgs {
+    /// Automatically fix remediable issues (e.g. rewrite missing or outdated git hook shims)
+    #[arg(long)]
+    pub fix: bool,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct InstallArgs {
+    #[command(subcommand)]
+    pub command: InstallCommands,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum InstallCommands {
+    /// Install git hook shims
+    Hooks(InstallHooksArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct InstallHooksArgs {}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct HookArgs {
+    /// Name of the hook to run (e.g. pre-commit, pre-push, prepare-commit-msg)
+    pub name: String,
+
+    /// Extra arguments forwarded from git to the hook
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub args: Vec<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct HygieneArgs {
+    #[command(subcommand)]
+    pub command: HygieneCommands,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum HygieneCommands {
+    /// Check source code comment hygiene
+    Check(HygieneCheckArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct HygieneCheckArgs {
+    /// Lint only changed files in git diff
+    #[arg(long)]
+    pub diff: bool,
+
+    /// Target paths to inspect
+    #[arg(value_name = "PATHS")]
+    pub paths: Vec<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]

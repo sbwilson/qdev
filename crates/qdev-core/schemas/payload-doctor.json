@@ -153,6 +153,46 @@
                 }
               }
             }
+          },
+          {
+            "if": {
+              "properties": { "name": { "const": "hooks" } },
+              "required": ["name"]
+            },
+            "then": {
+              "required": [
+                "status",
+                "unavailable_reason",
+                "all_installed",
+                "missing_hooks",
+                "outdated_hooks"
+              ],
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": ["ok", "mismatch", "unavailable"],
+                  "description": "\"ok\" when all expected hooks are installed and match expected content, \"mismatch\" when any is missing or outdated, \"unavailable\" if not a git repository."
+                },
+                "unavailable_reason": {
+                  "type": ["string", "null"],
+                  "description": "The error code that prevented the hooks check from completing (e.g. \"not_a_git_repository\"); null when status is \"ok\" or \"mismatch\"."
+                },
+                "all_installed": {
+                  "type": ["boolean", "null"],
+                  "description": "True when all expected hook shims exist, are executable, and contain the expected hook invocation. Null when unavailable."
+                },
+                "missing_hooks": {
+                  "type": ["array", "null"],
+                  "items": { "type": "string" },
+                  "description": "Names of expected hooks that do not exist or are not executable. Null when unavailable."
+                },
+                "outdated_hooks": {
+                  "type": ["array", "null"],
+                  "items": { "type": "string" },
+                  "description": "Names of expected hooks whose content does not match expected shim content. Null when unavailable."
+                }
+              }
+            }
           }
         ]
       }

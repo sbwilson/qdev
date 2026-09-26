@@ -546,8 +546,8 @@ fn test_doctor_section_order_is_cache_then_validation_with_no_duplicate_keys() {
     let names: Vec<&str> = first.iter().map(|s| s["name"].as_str().unwrap()).collect();
     assert_eq!(
         names,
-        vec!["cache", "validation", "leases"],
-        "cache must be reported before validation and validation before leases"
+        vec!["cache", "validation", "leases", "hooks"],
+        "cache must be reported before validation, validation before leases, and leases before hooks"
     );
     assert_eq!(
         first.iter().map(|s| s["name"].clone()).collect::<Vec<_>>(),

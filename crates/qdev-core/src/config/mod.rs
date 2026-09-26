@@ -464,6 +464,7 @@ fn validate_hygiene_section(val: &toml::Value, filename: &str) -> Result<(), Qde
         "forbid_patterns",
         "citation_pattern",
         "languages",
+        "secret_patterns",
     ];
     check_unknown_keys(table, allowed, "hygiene", filename)?;
 
@@ -510,6 +511,9 @@ fn validate_hygiene_section(val: &toml::Value, filename: &str) -> Result<(), Qde
     }
     if let Some(v) = table.get("languages") {
         validate_string_array(v, "languages", "hygiene", filename)?;
+    }
+    if let Some(v) = table.get("secret_patterns") {
+        validate_string_array(v, "secret_patterns", "hygiene", filename)?;
     }
     Ok(())
 }
@@ -1145,6 +1149,14 @@ pub fn merge_configs(
     if let Some(v) = lang_val {
         if let Ok(languages) = v.try_into() {
             config.hygiene.languages = languages;
+        }
+    }
+
+    let (sec_val, src) = get_val("hygiene", "secret_patterns");
+    sources.insert("hygiene.secret_patterns".to_string(), src);
+    if let Some(v) = sec_val {
+        if let Ok(patterns) = v.try_into() {
+            config.hygiene.secret_patterns = patterns;
         }
     }
 

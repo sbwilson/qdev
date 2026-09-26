@@ -150,6 +150,8 @@ pub struct HygieneConfig {
     pub citation_pattern: Option<String>,
     #[serde(default = "default_languages")]
     pub languages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_patterns: Vec<String>,
 }
 
 fn default_max_inline_comment_lines() -> u32 {
@@ -174,6 +176,7 @@ impl Default for HygieneConfig {
             forbid_patterns: Vec::new(),
             citation_pattern: Some(DEFAULT_CITATION_PATTERN.to_string()),
             languages: default_languages(),
+            secret_patterns: Vec::new(),
         }
     }
 }
