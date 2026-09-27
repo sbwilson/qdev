@@ -1,7 +1,5 @@
 #![allow(clippy::field_reassign_with_default)]
 
-use std::collections::BTreeMap;
-use std::fs;
 use qdev_core::config::{Config, EnvironmentConfig, GateConfig, ModuleConfig};
 use qdev_core::errors::ExitCode;
 use qdev_core::gate::{
@@ -10,6 +8,8 @@ use qdev_core::gate::{
     validate_gate_dependencies, GateRunOptions, GateRunOutcome, GateRunSetOutcome, GateStatus,
     HeadTailBuffer,
 };
+use std::collections::BTreeMap;
+use std::fs;
 use tempfile::TempDir;
 
 fn setup_test_workspace() -> TempDir {
@@ -221,10 +221,7 @@ sleep 100
         outcome.receipt(),
         "[INFRA] hang-gate | timeout after 200ms | halt and alert"
     );
-    assert_eq!(
-        outcome.agent_instruction.as_deref(),
-        Some("halt_and_alert")
-    );
+    assert_eq!(outcome.agent_instruction.as_deref(), Some("halt_and_alert"));
     // Should terminate quickly, well before 100 seconds
     assert!(elapsed.as_millis() < 5000);
 }
@@ -260,10 +257,7 @@ fn test_missing_executable_classification() {
         outcome.receipt(),
         "[INFRA] missing-gate | missing executable: definitely-nonexistent-executable-12345 | halt and alert"
     );
-    assert_eq!(
-        outcome.agent_instruction.as_deref(),
-        Some("halt_and_alert")
-    );
+    assert_eq!(outcome.agent_instruction.as_deref(), Some("halt_and_alert"));
 }
 
 #[test]
@@ -490,7 +484,10 @@ exit 101
     assert_eq!(outcome.status, GateStatus::Fail);
     assert_eq!(outcome.exit_code, 101);
     assert_eq!(outcome.summary, "1 of 18 tests failed");
-    assert_eq!(outcome.agent_instruction.as_deref(), Some("fix_cited_failures"));
+    assert_eq!(
+        outcome.agent_instruction.as_deref(),
+        Some("fix_cited_failures")
+    );
     assert_eq!(outcome.metric, Some(42.5));
     assert_eq!(outcome.constraint_ids, vec!["E12S4/NG-2"]);
     assert_eq!(outcome.failures.len(), 1);
@@ -729,7 +726,10 @@ fn test_fallback_40_lines_stderr_summary() {
 
     assert_eq!(outcome.status, GateStatus::Fail);
     assert_eq!(outcome.exit_code, 101);
-    assert_eq!(outcome.agent_instruction.as_deref(), Some("fix_cited_failures"));
+    assert_eq!(
+        outcome.agent_instruction.as_deref(),
+        Some("fix_cited_failures")
+    );
     let summary_lines: Vec<&str> = outcome.summary.lines().collect();
     assert_eq!(summary_lines.len(), 40);
     assert_eq!(summary_lines[0], "stderr error line 11");
@@ -768,8 +768,14 @@ fn test_receipt_formatting_multiple_failures() {
     let receipt = outcome.receipt();
     let lines: Vec<&str> = receipt.lines().collect();
     assert_eq!(lines.len(), 2);
-    assert_eq!(lines[0], "[FAIL] test-gate (exit 1) | src/foo.rs:10 | assertion failed: a == b");
-    assert_eq!(lines[1], "[FAIL] test-gate (exit 1) | src/bar.rs:25 | assertion failed: x == y");
+    assert_eq!(
+        lines[0],
+        "[FAIL] test-gate (exit 1) | src/foo.rs:10 | assertion failed: a == b"
+    );
+    assert_eq!(
+        lines[1],
+        "[FAIL] test-gate (exit 1) | src/bar.rs:25 | assertion failed: x == y"
+    );
 }
 
 #[test]
@@ -795,7 +801,10 @@ fn test_receipt_formatting_empty_message_omits_trailing_separator() {
         evidence_path: None,
     };
 
-    assert_eq!(outcome.receipt(), "[FAIL] empty-msg-gate (exit 1) | src/empty.rs:5");
+    assert_eq!(
+        outcome.receipt(),
+        "[FAIL] empty-msg-gate (exit 1) | src/empty.rs:5"
+    );
 }
 
 #[test]
@@ -1083,7 +1092,8 @@ fn test_topological_sort_kahn_declaration_order_tie_break() {
     assert_eq!(order, vec!["D", "A", "B", "C"]);
 
     // Test targeting C and its transitive dependencies
-    let target_order = resolve_gate_execution_order(&config.gates, Some(&["C".to_string()])).unwrap();
+    let target_order =
+        resolve_gate_execution_order(&config.gates, Some(&["C".to_string()])).unwrap();
     assert_eq!(target_order, vec!["A", "B", "C"]);
 }
 
@@ -1147,7 +1157,9 @@ fn test_unknown_dependency_rejection_exit_code_2() {
 
     let err = validate_gate_dependencies(&config.gates).unwrap_err();
     assert_eq!(err.exit_code, ExitCode::UsageError);
-    assert!(err.message.contains("gate 'A' depends on unknown gate 'nonexistent'"));
+    assert!(err
+        .message
+        .contains("gate 'A' depends on unknown gate 'nonexistent'"));
 }
 
 #[test]
@@ -1207,8 +1219,13 @@ fn test_prerequisite_logical_failure_cascades_skip() {
     };
 
     let options = GateRunOptions::default();
-    let set_outcome =
-        execute_gate_set(temp.path(), &config, &["A".to_string(), "B".to_string()], &options).unwrap();
+    let set_outcome = execute_gate_set(
+        temp.path(),
+        &config,
+        &["A".to_string(), "B".to_string()],
+        &options,
+    )
+    .unwrap();
 
     assert_eq!(set_outcome.outcomes.len(), 2);
     assert_eq!(set_outcome.outcomes[0].gate_id, "A");
@@ -1218,7 +1235,10 @@ fn test_prerequisite_logical_failure_cascades_skip() {
     assert_eq!(set_outcome.outcomes[1].status, GateStatus::Skip);
     assert_eq!(set_outcome.outcomes[1].summary, "dependency failed: A");
     assert!(!set_outcome.outcomes[1].skipped_locally);
-    assert_eq!(set_outcome.outcomes[1].receipt(), "[SKIP] B | dependency failed: A");
+    assert_eq!(
+        set_outcome.outcomes[1].receipt(),
+        "[SKIP] B | dependency failed: A"
+    );
 
     assert_eq!(set_outcome.aggregate_exit_code(), ExitCode::LogicalFailure);
 }
@@ -1260,14 +1280,22 @@ fn test_prerequisite_infra_failure_cascades_skip() {
     };
 
     let options = GateRunOptions::default();
-    let set_outcome =
-        execute_gate_set(temp.path(), &config, &["A".to_string(), "B".to_string()], &options).unwrap();
+    let set_outcome = execute_gate_set(
+        temp.path(),
+        &config,
+        &["A".to_string(), "B".to_string()],
+        &options,
+    )
+    .unwrap();
 
     assert_eq!(set_outcome.outcomes.len(), 2);
     assert_eq!(set_outcome.outcomes[0].status, GateStatus::Infra);
     assert_eq!(set_outcome.outcomes[1].status, GateStatus::Skip);
     assert_eq!(set_outcome.outcomes[1].summary, "dependency failed: A");
-    assert_eq!(set_outcome.aggregate_exit_code(), ExitCode::InfrastructureFailure);
+    assert_eq!(
+        set_outcome.aggregate_exit_code(),
+        ExitCode::InfrastructureFailure
+    );
 }
 
 #[test]
@@ -1344,7 +1372,10 @@ fn test_multi_level_cascade_skip() {
     assert_eq!(set_outcome.outcomes[1].summary, "dependency failed: A");
     assert_eq!(set_outcome.outcomes[2].status, GateStatus::Skip);
     assert_eq!(set_outcome.outcomes[2].summary, "dependency failed: B");
-    assert_eq!(set_outcome.outcomes[2].receipt(), "[SKIP] C | dependency failed: B");
+    assert_eq!(
+        set_outcome.outcomes[2].receipt(),
+        "[SKIP] C | dependency failed: B"
+    );
 
     assert_eq!(set_outcome.aggregate_exit_code(), ExitCode::LogicalFailure);
 }
@@ -1396,13 +1427,21 @@ fn test_local_skip_does_not_cascade() {
     };
 
     let options = GateRunOptions::default();
-    let set_outcome =
-        execute_gate_set(temp.path(), &config, &["A".to_string(), "B".to_string()], &options).unwrap();
+    let set_outcome = execute_gate_set(
+        temp.path(),
+        &config,
+        &["A".to_string(), "B".to_string()],
+        &options,
+    )
+    .unwrap();
 
     assert_eq!(set_outcome.outcomes.len(), 2);
     assert_eq!(set_outcome.outcomes[0].status, GateStatus::Skip);
     assert!(set_outcome.outcomes[0].skipped_locally);
-    assert_eq!(set_outcome.outcomes[0].receipt(), "[SKIP] A | skipped_locally");
+    assert_eq!(
+        set_outcome.outcomes[0].receipt(),
+        "[SKIP] A | skipped_locally"
+    );
 
     assert_eq!(set_outcome.outcomes[1].status, GateStatus::Pass);
     assert_eq!(set_outcome.aggregate_exit_code(), ExitCode::Success);
@@ -1788,10 +1827,7 @@ constraints:
     let outcome_fail = execute_scope_gate(temp.path(), &config, &opts).unwrap();
     assert_eq!(outcome_fail.status, GateStatus::Fail);
     assert_eq!(outcome_fail.constraint_ids, vec!["E12S4/NG-1"]);
-    assert_eq!(
-        outcome_fail.failures[0].location,
-        "crates/core/auth.rs"
-    );
+    assert_eq!(outcome_fail.failures[0].location, "crates/core/auth.rs");
     assert!(outcome_fail.failures[0].message.contains("E12S4/NG-1"));
 
     // 3. Failing scope check citing policy: modify another file outside target_modules with no matching no-go
@@ -1799,7 +1835,9 @@ constraints:
     fs::write(core_dir.join("misc.rs"), "// misc code\n").unwrap();
     let outcome_policy_fail = execute_scope_gate(temp.path(), &config, &opts).unwrap();
     assert_eq!(outcome_policy_fail.status, GateStatus::Fail);
-    assert!(outcome_policy_fail.failures[0].message.contains("policy: target_modules"));
+    assert!(outcome_policy_fail.failures[0]
+        .message
+        .contains("policy: target_modules"));
 }
 
 #[test]
@@ -1860,7 +1898,9 @@ target_modules:
     fs::write(bridge_dir.join("lib.rs"), "use app::Something;\n").unwrap();
     let outcome_fail = execute_deps_gate(temp.path(), &config, &opts).unwrap();
     assert_eq!(outcome_fail.status, GateStatus::Fail);
-    assert!(outcome_fail.failures[0].message.contains("undeclared dependency"));
+    assert!(outcome_fail.failures[0]
+        .message
+        .contains("undeclared dependency"));
     assert!(outcome_fail.failures[0].message.contains("may_depend_on"));
 
     // 3. Fail: layer inversion (bridge layer 2 -> app layer 3)
@@ -1868,15 +1908,14 @@ target_modules:
     fs::write(bridge_dir.join("lib.rs"), "use app::AppUi;\n").unwrap();
     let outcome_inversion = execute_deps_gate(temp.path(), &config, &opts).unwrap();
     assert_eq!(outcome_inversion.status, GateStatus::Fail);
-    assert!(outcome_inversion.failures[0].message.contains("layer inversion"));
+    assert!(outcome_inversion.failures[0]
+        .message
+        .contains("layer inversion"));
     assert!(
         outcome_inversion.failures[0].message.contains("layer 2")
             && outcome_inversion.failures[0].message.contains("layer 3")
     );
 }
-
-
-
 
 #[test]
 fn test_scope_gate_fails_closed_when_integration_branch_unresolvable() {
@@ -1900,7 +1939,10 @@ fn test_scope_gate_fails_closed_when_integration_branch_unresolvable() {
         outcome.summary
     );
     assert_eq!(outcome.agent_instruction.as_deref(), Some("halt_and_alert"));
-    assert!(!outcome.evidence_path.is_none(), "infra outcome must record evidence");
+    assert!(
+        !outcome.evidence_path.is_none(),
+        "infra outcome must record evidence"
+    );
 }
 
 #[test]

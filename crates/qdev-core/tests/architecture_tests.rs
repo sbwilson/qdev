@@ -84,10 +84,7 @@ fn test_qdev_core_resolved_graph_has_no_forbidden_dependencies() {
         if !visited.insert(id.clone()) {
             continue;
         }
-        let name = names_by_id
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(|| id.clone());
+        let name = names_by_id.get(&id).cloned().unwrap_or_else(|| id.clone());
         for &forbidden in FORBIDDEN_DEPENDENCIES {
             assert_ne!(
                 name, forbidden,

@@ -66,7 +66,11 @@ fn test_cli_gate_run_pass_receipt_and_exit_0() {
     setup_workspace(temp.path());
 
     let script_path = temp.path().join("pass.sh");
-    fs::write(&script_path, "#!/bin/sh\necho 'all 12 checks passed'\nexit 0\n").unwrap();
+    fs::write(
+        &script_path,
+        "#!/bin/sh\necho 'all 12 checks passed'\nexit 0\n",
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -524,7 +528,9 @@ timeout_ms = 5000
     assert_eq!(payload["exit_code"], 101);
     assert_eq!(payload["summary"], "1 of 18 tests failed");
     assert_eq!(payload["agent_instruction"], "fix_cited_failures");
-    let failures = payload["failures"].as_array().expect("failures must be array");
+    let failures = payload["failures"]
+        .as_array()
+        .expect("failures must be array");
     assert_eq!(failures.len(), 1);
     assert_eq!(
         failures[0]["location"],
@@ -607,7 +613,9 @@ timeout_ms = 5000
     assert_eq!(payload["exit_code"], 1);
     assert_eq!(payload["summary"], "1 of 18 tests failed");
     assert_eq!(payload["agent_instruction"], "fix_cited_failures");
-    let failures = payload["failures"].as_array().expect("failures must be array");
+    let failures = payload["failures"]
+        .as_array()
+        .expect("failures must be array");
     assert_eq!(failures.len(), 1);
     assert_eq!(failures[0]["location"], "Tests/AppTests/MyTests.swift:42");
 
@@ -891,8 +899,12 @@ command = "{}"
         .code(0);
 
     let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
-    let pos_a = stdout.find("[PASS] gate-a").expect("gate-a receipt missing");
-    let pos_b = stdout.find("[PASS] gate-b").expect("gate-b receipt missing");
+    let pos_a = stdout
+        .find("[PASS] gate-a")
+        .expect("gate-a receipt missing");
+    let pos_b = stdout
+        .find("[PASS] gate-b")
+        .expect("gate-b receipt missing");
     assert!(pos_a < pos_b, "gate-a must execute and print before gate-b");
 }
 
@@ -1002,7 +1014,10 @@ on_transition = ["release"]
     let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
     assert!(stdout.contains("[PASS] prereq-lint"));
     assert!(stdout.contains("[PASS] review-gate"));
-    assert!(!stdout.contains("release-gate"), "release-gate should not be executed");
+    assert!(
+        !stdout.contains("release-gate"),
+        "release-gate should not be executed"
+    );
 }
 
 #[test]
@@ -1021,7 +1036,11 @@ fn test_cli_gate_run_cascade_skip_receipt_and_exit_1() {
     }
 
     let pass_script = temp.path().join("pass.sh");
-    fs::write(&pass_script, "#!/bin/sh\necho 'integration passed'\nexit 0\n").unwrap();
+    fs::write(
+        &pass_script,
+        "#!/bin/sh\necho 'integration passed'\nexit 0\n",
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1316,8 +1335,12 @@ command = "{}"
         .code(0);
 
     let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
-    let pos_a = stdout.find("[PASS] gate-a").expect("gate-a receipt missing");
-    let pos_b = stdout.find("[PASS] gate-b").expect("gate-b receipt missing");
+    let pos_a = stdout
+        .find("[PASS] gate-a")
+        .expect("gate-a receipt missing");
+    let pos_b = stdout
+        .find("[PASS] gate-b")
+        .expect("gate-b receipt missing");
     assert!(pos_a < pos_b, "prerequisite gate-a must run before gate-b");
 
     // 2. JSON mode: must emit GateRunPayload for target gate-b
@@ -1427,4 +1450,3 @@ on_transition = ["review"]
     let stderr = std::str::from_utf8(&assert.get_output().stderr).unwrap();
     assert!(stderr.contains("no gates configured for transition 'nonexistent'"));
 }
-

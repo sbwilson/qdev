@@ -220,7 +220,8 @@ direction = "must_not_increase"
         .success()
         .code(0);
     let set_stdout = std::str::from_utf8(&set_assert.get_output().stdout).unwrap();
-    assert!(set_stdout.contains("Recorded baseline for gate 'warning-count' on branch 'main': value 10"));
+    assert!(set_stdout
+        .contains("Recorded baseline for gate 'warning-count' on branch 'main': value 10"));
 
     // Verify baseline file was written
     let baseline_file = root.join("docs/state/baselines/main/warning-count.json");
@@ -377,7 +378,14 @@ direction = "must_not_increase"
     Command::cargo_bin("qdev")
         .unwrap()
         .current_dir(root)
-        .args(["gate", "baseline", "warning-count", "--set", "--value", "10"])
+        .args([
+            "gate",
+            "baseline",
+            "warning-count",
+            "--set",
+            "--value",
+            "10",
+        ])
         .assert()
         .success();
 
@@ -416,7 +424,14 @@ direction = "must_not_increase"
     Command::cargo_bin("qdev")
         .unwrap()
         .current_dir(root)
-        .args(["gate", "baseline", "warning-count", "--set", "--value", "12"])
+        .args([
+            "gate",
+            "baseline",
+            "warning-count",
+            "--set",
+            "--value",
+            "12",
+        ])
         .assert()
         .success();
 
@@ -460,7 +475,14 @@ direction = "must_not_increase"
     Command::cargo_bin("qdev")
         .unwrap()
         .current_dir(root)
-        .args(["gate", "baseline", "warning-count", "--set", "--value", "10"])
+        .args([
+            "gate",
+            "baseline",
+            "warning-count",
+            "--set",
+            "--value",
+            "10",
+        ])
         .assert()
         .success();
 
@@ -514,7 +536,10 @@ updated_by:
     // 6. Verify release frontmatter contains baseline_snapshot
     let release_content = fs::read_to_string(root.join("docs/state/releases/0.1.0.md")).unwrap();
     assert!(release_content.contains("baseline_snapshot:"));
-    assert!(release_content.contains("warning-count: 10.0") || release_content.contains("warning-count: 10"));
+    assert!(
+        release_content.contains("warning-count: 10.0")
+            || release_content.contains("warning-count: 10")
+    );
 
     // Verify release validates against schema
     let fm: Value = qdev_core::extract_frontmatter(&release_content).unwrap();
@@ -545,7 +570,14 @@ direction = "must_not_increase"
     Command::cargo_bin("qdev")
         .unwrap()
         .current_dir(root)
-        .args(["gate", "baseline", "warning-count", "--set", "--value", "10"])
+        .args([
+            "gate",
+            "baseline",
+            "warning-count",
+            "--set",
+            "--value",
+            "10",
+        ])
         .assert()
         .success();
 
@@ -666,4 +698,3 @@ direction = "must_not_decrease"
         stdout
     );
 }
-

@@ -102,9 +102,11 @@ fn test_doctor_hooks_section_reports_unavailable_on_non_git_repo() {
 
     assert_eq!(report.name, "hooks");
     assert_eq!(*field(&report, "status"), "unavailable");
-    assert_eq!(*field(&report, "unavailable_reason"), "not_a_git_repository");
+    assert_eq!(
+        *field(&report, "unavailable_reason"),
+        "not_a_git_repository"
+    );
     assert!(field(&report, "all_installed").is_null());
     assert!(field(&report, "missing_hooks").is_null());
     assert!(field(&report, "outdated_hooks").is_null());
 }
-

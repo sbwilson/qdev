@@ -150,7 +150,7 @@ fn failed_or_unparseable_audit_never_creates_soup_records_but_keeps_evidence() {
             .args(["soup", "audit"])
             .output()
             .unwrap();
-        assert_eq!(out.status.code(), Some(expected_code as i32));
+        assert_eq!(out.status.code(), Some(expected_code));
         // A successful audit whose output is uninterpretable must say so: a silent zero of
         // findings would read as a clean audit. A failed audit already signals failure and
         // is not double-reported.
@@ -161,7 +161,10 @@ fn failed_or_unparseable_audit_never_creates_soup_records_but_keeps_evidence() {
                 "a succeeded-but-unparseable audit must warn, got: {stdout}"
             );
         } else {
-            assert!(!stdout.contains("no findings recorded"), "failed audit: {stdout}");
+            assert!(
+                !stdout.contains("no findings recorded"),
+                "failed audit: {stdout}"
+            );
         }
         assert!(
             !root.join("docs/state/soup/example-1.0.md").exists(),
@@ -206,7 +209,10 @@ fn sbom_cli_records_artifact_and_refuses_missing_artifact_without_mutation() {
     setup(failed_root);
     release(failed_root, "0.1.0.md");
     let failed_script = failed_root.join("failed.sh");
-    executable(&failed_script, "#!/bin/sh\nprintf '{}' > bom.json\necho bom.json\nexit 1\n");
+    executable(
+        &failed_script,
+        "#!/bin/sh\nprintf '{}' > bom.json\necho bom.json\nexit 1\n",
+    );
     configure_soup(
         failed_root,
         &format!("sbom_command = \"{}\"\n", failed_script.display()),

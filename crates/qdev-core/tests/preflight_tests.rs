@@ -121,9 +121,15 @@ fn test_is_metadata_exempt() {
     assert!(is_metadata_exempt(".qdev/cache/cache.sqlite", &storage));
     assert!(is_metadata_exempt(".git/index", &storage));
     assert!(is_metadata_exempt("docs/specs/stories/E12S4.md", &storage));
-    assert!(is_metadata_exempt("docs/state/decisions/DEC-1.json", &storage));
+    assert!(is_metadata_exempt(
+        "docs/state/decisions/DEC-1.json",
+        &storage
+    ));
 
-    assert!(!is_metadata_exempt("crates/foundation/src/lib.rs", &storage));
+    assert!(!is_metadata_exempt(
+        "crates/foundation/src/lib.rs",
+        &storage
+    ));
     assert!(!is_metadata_exempt("README.md", &storage));
 }
 
@@ -179,8 +185,14 @@ fn test_working_tree_no_lease_no_chore_dirty_refusal() {
     assert_eq!(outcome.diagnostics.len(), 1);
     assert_eq!(outcome.diagnostics[0].category, "working_tree");
     assert_eq!(outcome.diagnostics[0].code, "out_of_scope_changes");
-    assert_eq!(outcome.diagnostics[0].remediation.as_deref(), Some("git stash -u"));
-    assert_eq!(outcome.remediation_commands, vec!["git stash -u".to_string()]);
+    assert_eq!(
+        outcome.diagnostics[0].remediation.as_deref(),
+        Some("git stash -u")
+    );
+    assert_eq!(
+        outcome.remediation_commands,
+        vec!["git stash -u".to_string()]
+    );
 }
 
 #[test]
@@ -191,7 +203,11 @@ fn test_working_tree_exempt_files_dirty_passes() {
     git(root, &["branch", "develop"]);
 
     // Dirty an exempt metadata file
-    fs::write(root.join("docs/specs/stories/E12S4.md"), "---\nmodified: true\n---\n").unwrap();
+    fs::write(
+        root.join("docs/specs/stories/E12S4.md"),
+        "---\nmodified: true\n---\n",
+    )
+    .unwrap();
     fs::write(root.join(".gitignore"), "target/\n").unwrap();
 
     let options = PreflightOptions::default();
@@ -211,7 +227,11 @@ fn test_working_tree_with_story_lease_in_scope_passes() {
     claim_story(root, "E12S4", &author, Some(&config.storage), None).unwrap();
 
     // Modify a file in foundation (in scope!)
-    fs::write(root.join("crates/foundation/src/lib.rs"), "// updated in scope\n").unwrap();
+    fs::write(
+        root.join("crates/foundation/src/lib.rs"),
+        "// updated in scope\n",
+    )
+    .unwrap();
 
     let options = PreflightOptions::default();
     let outcome = run_preflight(root, &config, &options, None).unwrap();
@@ -230,14 +250,21 @@ fn test_working_tree_with_story_lease_out_of_scope_refusal() {
     claim_story(root, "E12S4", &author, Some(&config.storage), None).unwrap();
 
     // Modify a file in bridge (out of scope for E12S4!)
-    fs::write(root.join("crates/bridge/src/lib.rs"), "// modified outside scope\n").unwrap();
+    fs::write(
+        root.join("crates/bridge/src/lib.rs"),
+        "// modified outside scope\n",
+    )
+    .unwrap();
 
     let options = PreflightOptions::default();
     let outcome = run_preflight(root, &config, &options, None).unwrap();
     assert_eq!(outcome.status, PreflightStatus::Refusal);
     assert_eq!(outcome.diagnostics.len(), 1);
     assert_eq!(outcome.diagnostics[0].category, "working_tree");
-    assert_eq!(outcome.diagnostics[0].paths, vec!["crates/bridge/src/lib.rs"]);
+    assert_eq!(
+        outcome.diagnostics[0].paths,
+        vec!["crates/bridge/src/lib.rs"]
+    );
     assert_eq!(
         outcome.diagnostics[0].remediation.as_deref(),
         Some("git stash push -u -m \"out-of-scope\" -- \"crates/bridge/src/lib.rs\"")
@@ -252,7 +279,11 @@ fn test_working_tree_explicit_story_flag_overrides_scope() {
     git(root, &["branch", "develop"]);
 
     // No lease held, but pass `--story E12S4`
-    fs::write(root.join("crates/foundation/src/lib.rs"), "// updated in foundation\n").unwrap();
+    fs::write(
+        root.join("crates/foundation/src/lib.rs"),
+        "// updated in foundation\n",
+    )
+    .unwrap();
 
     let options = PreflightOptions {
         story: Some("E12S4".to_string()),
@@ -264,7 +295,10 @@ fn test_working_tree_explicit_story_flag_overrides_scope() {
     fs::write(root.join("crates/bridge/src/lib.rs"), "// updated bridge\n").unwrap();
     let outcome2 = run_preflight(root, &config, &options, None).unwrap();
     assert_eq!(outcome2.status, PreflightStatus::Refusal);
-    assert_eq!(outcome2.diagnostics[0].paths, vec!["crates/bridge/src/lib.rs"]);
+    assert_eq!(
+        outcome2.diagnostics[0].paths,
+        vec!["crates/bridge/src/lib.rs"]
+    );
 }
 
 #[test]
@@ -293,10 +327,17 @@ fn test_working_tree_with_open_chore() {
     assert_eq!(outcome.status, PreflightStatus::Pass);
 
     // Modify file in foundation -> out of chore scope!
-    fs::write(root.join("crates/foundation/src/lib.rs"), "// out of chore scope\n").unwrap();
+    fs::write(
+        root.join("crates/foundation/src/lib.rs"),
+        "// out of chore scope\n",
+    )
+    .unwrap();
     let outcome2 = run_preflight(root, &config, &options, None).unwrap();
     assert_eq!(outcome2.status, PreflightStatus::Refusal);
-    assert_eq!(outcome2.diagnostics[0].paths, vec!["crates/foundation/src/lib.rs"]);
+    assert_eq!(
+        outcome2.diagnostics[0].paths,
+        vec!["crates/foundation/src/lib.rs"]
+    );
 }
 
 #[test]
@@ -324,7 +365,15 @@ fn test_branch_freshness_integration_branch_behind_remote() {
     // Create a bare remote
     let remote_dir = TempDir::new().unwrap();
     git(remote_dir.path(), &["init", "--bare"]);
-    git(root, &["remote", "add", "origin", remote_dir.path().to_str().unwrap()]);
+    git(
+        root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote_dir.path().to_str().unwrap(),
+        ],
+    );
 
     // Push develop to remote
     git(root, &["checkout", "-b", "develop"]);
@@ -374,7 +423,11 @@ fn test_branch_freshness_merge_base_staleness_limit() {
     // Advance develop by 3 commits (limit is 2)
     git(root, &["checkout", "develop"]);
     for i in 1..=3 {
-        fs::write(root.join("crates/foundation/src/lib.rs"), format!("// develop commit {}\n", i)).unwrap();
+        fs::write(
+            root.join("crates/foundation/src/lib.rs"),
+            format!("// develop commit {}\n", i),
+        )
+        .unwrap();
         git(root, &["commit", "-am", &format!("develop commit {}", i)]);
     }
 
@@ -384,8 +437,12 @@ fn test_branch_freshness_merge_base_staleness_limit() {
     let diags = check_branch_freshness(root, &config, Some("E12S4")).unwrap();
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].code, "merge_base_stale");
-    assert!(diags[0].message.contains("is 3 commits behind develop at merge-base (limit 2)"));
-    assert!(diags[0].message.contains("Rebase onto develop before continuing E12S4."));
+    assert!(diags[0]
+        .message
+        .contains("is 3 commits behind develop at merge-base (limit 2)"));
+    assert!(diags[0]
+        .message
+        .contains("Rebase onto develop before continuing E12S4."));
     assert_eq!(diags[0].remediation.as_deref(), Some("git rebase develop"));
 
     // Feature branch being ahead of develop is NOT an error
@@ -408,11 +465,23 @@ fn test_branch_freshness_trunk_mode_behind_remote() {
 
     let remote_dir = TempDir::new().unwrap();
     git(remote_dir.path(), &["init", "--bare"]);
-    git(root, &["remote", "add", "origin", remote_dir.path().to_str().unwrap()]);
+    git(
+        root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote_dir.path().to_str().unwrap(),
+        ],
+    );
     git(root, &["push", "-u", "origin", "main"]);
 
     // Add commit on remote
-    fs::write(root.join("crates/foundation/src/lib.rs"), "// commit on remote\n").unwrap();
+    fs::write(
+        root.join("crates/foundation/src/lib.rs"),
+        "// commit on remote\n",
+    )
+    .unwrap();
     git(root, &["commit", "-am", "Commit on remote"]);
     git(root, &["push", "origin", "main"]);
 
@@ -422,7 +491,10 @@ fn test_branch_freshness_trunk_mode_behind_remote() {
     let diags = check_branch_freshness(root, &config, None).unwrap();
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].code, "trunk_branch_behind_remote");
-    assert_eq!(diags[0].remediation.as_deref(), Some("git pull origin main"));
+    assert_eq!(
+        diags[0].remediation.as_deref(),
+        Some("git pull origin main")
+    );
 }
 
 #[test]
@@ -434,13 +506,15 @@ fn test_validation_health_blocking_error() {
 
     let store = SqliteStore::open_in_memory().unwrap();
     // Insert an error finding into store
-    store.upsert_finding(&FindingRecord {
-        path: "docs/specs/stories/E99S99.md".to_string(),
-        code: "orphan_deferred_work".to_string(),
-        severity: "error".to_string(),
-        message: Some("Orphan deferred work record".to_string()),
-        found_at: "2026-09-25T00:00:00Z".to_string(),
-    }).unwrap();
+    store
+        .upsert_finding(&FindingRecord {
+            path: "docs/specs/stories/E99S99.md".to_string(),
+            code: "orphan_deferred_work".to_string(),
+            severity: "error".to_string(),
+            message: Some("Orphan deferred work record".to_string()),
+            found_at: "2026-09-25T00:00:00Z".to_string(),
+        })
+        .unwrap();
 
     let options = PreflightOptions::default();
     let outcome = run_preflight(root, &config, &options, Some(&store)).unwrap();
@@ -448,7 +522,10 @@ fn test_validation_health_blocking_error() {
     assert_eq!(outcome.diagnostics.len(), 1);
     assert_eq!(outcome.diagnostics[0].category, "validation");
     assert_eq!(outcome.diagnostics[0].code, "blocking_validation_errors");
-    assert_eq!(outcome.diagnostics[0].remediation.as_deref(), Some("qdev validate"));
+    assert_eq!(
+        outcome.diagnostics[0].remediation.as_deref(),
+        Some("qdev validate")
+    );
 }
 
 #[test]
@@ -460,7 +537,8 @@ fn test_preflight_payload_schema_conformance() {
     // 1. Pass payload
     let pass_payload = PreflightPayload {
         status: "pass".to_string(),
-        summary: "working tree in scope, integration branch fresh, zero blocking findings".to_string(),
+        summary: "working tree in scope, integration branch fresh, zero blocking findings"
+            .to_string(),
         diagnostics: Vec::new(),
         remediation_commands: Vec::new(),
     };
@@ -476,9 +554,13 @@ fn test_preflight_payload_schema_conformance() {
             code: "out_of_scope_changes".to_string(),
             message: "uncommitted changes outside target modules".to_string(),
             paths: vec!["crates/bridge/src/lib.rs".to_string()],
-            remediation: Some("git stash push -u -m \"out-of-scope\" -- \"crates/bridge/src/lib.rs\"".to_string()),
+            remediation: Some(
+                "git stash push -u -m \"out-of-scope\" -- \"crates/bridge/src/lib.rs\"".to_string(),
+            ),
         }],
-        remediation_commands: vec!["git stash push -u -m \"out-of-scope\" -- \"crates/bridge/src/lib.rs\"".to_string()],
+        remediation_commands: vec![
+            "git stash push -u -m \"out-of-scope\" -- \"crates/bridge/src/lib.rs\"".to_string(),
+        ],
     };
     let refusal_val = serde_json::to_value(qdev_core::JsonEnvelope::new(refusal_payload)).unwrap();
     assert!(validator.is_valid(&refusal_val));
@@ -499,14 +581,21 @@ fn test_branch_freshness_within_staleness_limit_passes() {
 
     // Advance develop by 1 commit (limit is 2, so 1 <= 2 passes)
     git(root, &["checkout", "develop"]);
-    fs::write(root.join("crates/foundation/src/lib.rs"), "// develop commit 1\n").unwrap();
+    fs::write(
+        root.join("crates/foundation/src/lib.rs"),
+        "// develop commit 1\n",
+    )
+    .unwrap();
     git(root, &["commit", "-am", "develop commit 1"]);
 
     // Switch back to feature branch
     git(root, &["checkout", "feature/E12S4-test"]);
 
     let diags = check_branch_freshness(root, &config, Some("E12S4")).unwrap();
-    assert!(diags.is_empty(), "expected 0 diagnostics when staleness (1) <= limit (2)");
+    assert!(
+        diags.is_empty(),
+        "expected 0 diagnostics when staleness (1) <= limit (2)"
+    );
 
     let options = PreflightOptions {
         story: Some("E12S4".to_string()),
@@ -524,16 +613,21 @@ fn test_validation_health_warning_does_not_block() {
 
     let store = SqliteStore::open_in_memory().unwrap();
     // Insert a warning finding into store (severity = "warning")
-    store.upsert_finding(&FindingRecord {
-        path: "docs/specs/stories/E12S4.md".to_string(),
-        code: "orphan_warning".to_string(),
-        severity: "warning".to_string(),
-        message: Some("Non-blocking warning".to_string()),
-        found_at: "2026-09-25T00:00:00Z".to_string(),
-    }).unwrap();
+    store
+        .upsert_finding(&FindingRecord {
+            path: "docs/specs/stories/E12S4.md".to_string(),
+            code: "orphan_warning".to_string(),
+            severity: "warning".to_string(),
+            message: Some("Non-blocking warning".to_string()),
+            found_at: "2026-09-25T00:00:00Z".to_string(),
+        })
+        .unwrap();
 
     let options = PreflightOptions::default();
     let outcome = run_preflight(root, &config, &options, Some(&store)).unwrap();
     assert_eq!(outcome.status, PreflightStatus::Pass);
-    assert_eq!(outcome.summary, "working tree in scope, integration branch fresh, zero blocking findings");
+    assert_eq!(
+        outcome.summary,
+        "working tree in scope, integration branch fresh, zero blocking findings"
+    );
 }

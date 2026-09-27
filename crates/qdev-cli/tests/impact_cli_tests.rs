@@ -164,7 +164,10 @@ fn test_schema_payload_impact() {
 
     // Compiles with jsonschema validator
     let validator = jsonschema::validator_for(&schema);
-    assert!(validator.is_ok(), "schema must compile as valid JSON schema");
+    assert!(
+        validator.is_ok(),
+        "schema must compile as valid JSON schema"
+    );
 }
 
 #[test]
@@ -180,14 +183,20 @@ fn test_impact_cli_by_story_id_text_and_json() {
         .args(["impact", "E12S4"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("Impact Analysis for Story: E12S4"))
+        .stdout(predicates::str::contains(
+            "Impact Analysis for Story: E12S4",
+        ))
         .stdout(predicates::str::contains("Modules: bridge"))
-        .stdout(predicates::str::contains("E12S5 [in-progress]: Active Bridge Buffer"))
+        .stdout(predicates::str::contains(
+            "E12S5 [in-progress]: Active Bridge Buffer",
+        ))
         .stdout(predicates::str::contains("E12S5 (depth 1, depends_on)"))
         .stdout(predicates::str::contains("Linked Requirements: FR-102"))
         .stdout(predicates::str::contains("Linked Hazards: HAZ-14"))
         .stdout(predicates::str::contains("Linked ADRs: AD-43"))
-        .stdout(predicates::str::contains("Overlapping Gates: c-abi-round-trip"));
+        .stdout(predicates::str::contains(
+            "Overlapping Gates: c-abi-round-trip",
+        ));
 
     // 2. JSON mode
     let mut cmd_json = Command::cargo_bin("qdev").unwrap();
@@ -300,7 +309,9 @@ fn test_impact_cli_missing_target_no_lease_fails_exit_2() {
         .args(["impact"])
         .assert()
         .code(2)
-        .stderr(predicates::str::contains("No target story or paths specified"));
+        .stderr(predicates::str::contains(
+            "No target story or paths specified",
+        ));
 
     // In JSON mode
     let mut cmd_json = Command::cargo_bin("qdev").unwrap();

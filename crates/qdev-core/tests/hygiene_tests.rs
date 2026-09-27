@@ -1,10 +1,10 @@
-use std::path::Path;
 use qdev_core::config::{Config, HygieneConfig};
 use qdev_core::hygiene::{
     check_hygiene, lint_comments, tokenize_comments, CommentKind, HygieneCheckOptions,
     SupportedLanguage, RULE_FORBID_PATTERNS, RULE_MAX_INLINE_COMMENT_LINES, RULE_REVIEW_ROUND,
     RULE_STORY_BANNER,
 };
+use std::path::Path;
 
 #[test]
 fn test_rust_tokenizer_line_and_doc_comments() {
@@ -81,7 +81,11 @@ fn main() {
 }
 "###;
     let tokens = tokenize_comments(source, SupportedLanguage::Rust);
-    assert_eq!(tokens.len(), 0, "No comments should be extracted from strings or char literals");
+    assert_eq!(
+        tokens.len(),
+        0,
+        "No comments should be extracted from strings or char literals"
+    );
 }
 
 #[test]
@@ -264,7 +268,11 @@ fn documented() {}
 "#;
     let tokens = tokenize_comments(doc_source, SupportedLanguage::Rust);
     let findings = lint_comments("src/doc.rs", &tokens, &config).unwrap();
-    assert_eq!(findings.len(), 0, "Doc comments must never be flagged under max_inline_comment_lines");
+    assert_eq!(
+        findings.len(),
+        0,
+        "Doc comments must never be flagged under max_inline_comment_lines"
+    );
 }
 
 #[test]
@@ -285,7 +293,11 @@ fn test_linter_citation_exemption() {
 "#;
     let tokens = tokenize_comments(source, SupportedLanguage::Rust);
     let findings = lint_comments("src/citations.rs", &tokens, &config).unwrap();
-    assert_eq!(findings.len(), 0, "Compact citations must be completely exempt");
+    assert_eq!(
+        findings.len(),
+        0,
+        "Compact citations must be completely exempt"
+    );
 
     // Lines with citations do not count toward max_inline_comment_lines
     let block_with_citation = r#"
@@ -299,7 +311,11 @@ fn test_linter_citation_exemption() {
 "#;
     let tokens2 = tokenize_comments(block_with_citation, SupportedLanguage::Rust);
     let findings2 = lint_comments("src/block.rs", &tokens2, &config).unwrap();
-    assert_eq!(findings2.len(), 0, "Block with 6 regular lines and 1 citation line must pass");
+    assert_eq!(
+        findings2.len(),
+        0,
+        "Block with 6 regular lines and 1 citation line must pass"
+    );
 
     // 7 regular lines + 1 citation line -> 7 non-citation lines > 6 -> violation
     let block_over_limit = r#"
@@ -345,7 +361,8 @@ fn test_rust_tokenizer_escaped_quote_char() {
 
 #[test]
 fn test_swift_tokenizer_interpolation_with_quotes() {
-    let source = "let msg = \"Hello \\(name == \"world\" ? 1 : 2)\"; // comment after interpolation\n";
+    let source =
+        "let msg = \"Hello \\(name == \"world\" ? 1 : 2)\"; // comment after interpolation\n";
     let tokens = tokenize_comments(source, SupportedLanguage::Swift);
     assert_eq!(tokens.len(), 1);
     assert_eq!(tokens[0].lines[0].text, "// comment after interpolation");
@@ -368,7 +385,11 @@ let g = 7; // comment 7
 "#;
     let tokens = tokenize_comments(source, SupportedLanguage::Rust);
     let findings = lint_comments("src/statements.rs", &tokens, &config).unwrap();
-    assert_eq!(findings.len(), 0, "Trailing statement comments must not be grouped into inline block");
+    assert_eq!(
+        findings.len(),
+        0,
+        "Trailing statement comments must not be grouped into inline block"
+    );
 }
 
 #[test]
@@ -386,7 +407,11 @@ fn test_check_hygiene_bare_workspace_traversal_multi_language() {
 
     let py_file = root.join("scripts/build.py");
     std::fs::create_dir_all(py_file.parent().unwrap()).unwrap();
-    std::fs::write(&py_file, "# Review round 1 findings: fix script\nprint('ok')\n").unwrap();
+    std::fs::write(
+        &py_file,
+        "# Review round 1 findings: fix script\nprint('ok')\n",
+    )
+    .unwrap();
 
     let config = Config {
         hygiene: HygieneConfig {
@@ -399,6 +424,12 @@ fn test_check_hygiene_bare_workspace_traversal_multi_language() {
 
     let outcome = check_hygiene(root, &config, &HygieneCheckOptions::default()).unwrap();
     assert_eq!(outcome.findings.len(), 2);
-    assert!(outcome.findings.iter().any(|f| f.file.ends_with("App.swift") && f.rule_id == RULE_STORY_BANNER));
-    assert!(outcome.findings.iter().any(|f| f.file.ends_with("build.py") && f.rule_id == RULE_REVIEW_ROUND));
+    assert!(outcome
+        .findings
+        .iter()
+        .any(|f| f.file.ends_with("App.swift") && f.rule_id == RULE_STORY_BANNER));
+    assert!(outcome
+        .findings
+        .iter()
+        .any(|f| f.file.ends_with("build.py") && f.rule_id == RULE_REVIEW_ROUND));
 }

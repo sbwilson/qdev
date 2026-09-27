@@ -304,7 +304,10 @@ fn test_execute_gate_ratchet_regression_fails() {
     assert!(outcome
         .summary
         .contains("ratchet regression: warnings increased from 10 to 15 (delta: +5)"));
-    assert_eq!(outcome.agent_instruction.as_deref(), Some("fix_cited_failures"));
+    assert_eq!(
+        outcome.agent_instruction.as_deref(),
+        Some("fix_cited_failures")
+    );
     assert!(outcome.receipt().contains("[FAIL] warn-count (exit 1)"));
 }
 
@@ -410,16 +413,37 @@ fn test_execute_gate_ratchet_missing_direction_fails_usage_error() {
 #[test]
 fn test_evaluate_ratchet_non_finite_metric_rejected() {
     let baseline = sample_baseline("gate", "metric", "must_not_increase", 10.0);
-    let err = evaluate_ratchet(f64::NAN, Some(&baseline), "must_not_increase", "metric", "main").unwrap_err();
+    let err = evaluate_ratchet(
+        f64::NAN,
+        Some(&baseline),
+        "must_not_increase",
+        "metric",
+        "main",
+    )
+    .unwrap_err();
     assert_eq!(err.code(), "usage_error");
     assert!(err.message().contains("finite"));
 
-    let err2 = evaluate_ratchet(f64::INFINITY, Some(&baseline), "must_not_increase", "metric", "main").unwrap_err();
+    let err2 = evaluate_ratchet(
+        f64::INFINITY,
+        Some(&baseline),
+        "must_not_increase",
+        "metric",
+        "main",
+    )
+    .unwrap_err();
     assert_eq!(err2.code(), "usage_error");
 
     let mut invalid_baseline = baseline.clone();
     invalid_baseline.value = f64::NAN;
-    let err3 = evaluate_ratchet(10.0, Some(&invalid_baseline), "must_not_increase", "metric", "main").unwrap_err();
+    let err3 = evaluate_ratchet(
+        10.0,
+        Some(&invalid_baseline),
+        "must_not_increase",
+        "metric",
+        "main",
+    )
+    .unwrap_err();
     assert_eq!(err3.code(), "usage_error");
     assert!(err3.message().contains("finite"));
 }
@@ -435,7 +459,10 @@ fn test_write_baseline_has_trailing_newline() {
     let path = write_baseline(root, &storage, "main", &baseline).unwrap();
 
     let raw = std::fs::read_to_string(&path).unwrap();
-    assert!(raw.ends_with('\n'), "baseline file must have trailing newline");
+    assert!(
+        raw.ends_with('\n'),
+        "baseline file must have trailing newline"
+    );
 }
 
 #[test]
@@ -498,7 +525,10 @@ fn test_execute_gate_ratchet_no_numeric_metric_fails() {
     assert_eq!(outcome.status, GateStatus::Fail);
     assert_eq!(outcome.exit_code, 1);
     assert!(outcome.summary.contains("did not produce a numeric metric"));
-    assert_eq!(outcome.agent_instruction.as_deref(), Some("fix_cited_failures"));
+    assert_eq!(
+        outcome.agent_instruction.as_deref(),
+        Some("fix_cited_failures")
+    );
     assert_eq!(outcome.failures.len(), 1);
     assert_eq!(outcome.failures[0].location, "text-gate");
 }
@@ -534,4 +564,3 @@ fn test_execute_gate_ratchet_fallback_extraction_patterns() {
     assert_eq!(outcome.metric, Some(5.0));
     assert!(outcome.summary.contains("delta: -5"));
 }
-

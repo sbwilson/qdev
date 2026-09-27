@@ -131,7 +131,11 @@ verifies = ["FR-102", "HAZ-01"]
     let ev_start = stdout.find(ev_marker).unwrap() + ev_marker.len();
     let ev_rel_path = stdout[ev_start..].trim_end();
     let ev_file = root.join(ev_rel_path);
-    assert!(ev_file.is_file(), "Evidence file must exist at {}", ev_file.display());
+    assert!(
+        ev_file.is_file(),
+        "Evidence file must exist at {}",
+        ev_file.display()
+    );
 
     let content = fs::read_to_string(&ev_file).unwrap();
     let val: Value = serde_json::from_str(&content).unwrap();
@@ -171,7 +175,9 @@ verifies = ["FR-105"]
         .args(["gate", "run", "lint", "--story", "E12S4"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("evidence docs/state/evidence/E12S4/"));
+        .stdout(predicate::str::contains(
+            "evidence docs/state/evidence/E12S4/",
+        ));
 
     let ev_dir = root.join("docs/state/evidence/E12S4");
     let files: Vec<_> = fs::read_dir(&ev_dir)
@@ -283,8 +289,14 @@ command = "echo 'fmt pass'"
     assert_eq!(ev_arr[1]["gate"], "lint");
     assert_eq!(ev_arr[0]["status"], "pass");
     assert_eq!(ev_arr[1]["status"], "pass");
-    assert!(ev_arr[0]["evidence_path"].as_str().unwrap().contains("-fmt.json"));
-    assert!(ev_arr[1]["evidence_path"].as_str().unwrap().contains("-lint.json"));
+    assert!(ev_arr[0]["evidence_path"]
+        .as_str()
+        .unwrap()
+        .contains("-fmt.json"));
+    assert!(ev_arr[1]["evidence_path"]
+        .as_str()
+        .unwrap()
+        .contains("-lint.json"));
 }
 
 #[test]
@@ -359,7 +371,10 @@ command = "echo 'lint run'"
     let ev_arr = val["evidence"].as_array().unwrap();
     assert_eq!(ev_arr.len(), 1);
     assert_eq!(ev_arr[0]["gate"], "lint");
-    assert!(ev_arr[0]["evidence_path"].as_str().unwrap().contains("-lint-2.json"));
+    assert!(ev_arr[0]["evidence_path"]
+        .as_str()
+        .unwrap()
+        .contains("-lint-2.json"));
 }
 
 #[test]
@@ -375,5 +390,7 @@ fn test_get_expand_bogus_usage_error_includes_evidence() {
         .assert()
         .failure()
         .code(2)
-        .stderr(predicate::str::contains("expected one of: relations, constraints, scratch, evidence"));
+        .stderr(predicate::str::contains(
+            "expected one of: relations, constraints, scratch, evidence",
+        ));
 }

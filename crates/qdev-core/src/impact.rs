@@ -4,10 +4,13 @@
 //! hazards, ADRs, reverse dependents with depth tracking, overlapping verification gates,
 //! and inline code citations.
 
+use crate::gate::git::{
+    diff_name_only_relative, merge_base_commit, name_only_paths, ref_exists, run_git,
+    status_porcelain_untracked_all,
+};
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -168,7 +171,8 @@ pub fn run_impact(
     let mut resolved_modules_set = BTreeSet::new();
 
     if let Some(ref story_id) = target_story {
-        let story_modules = resolve_story_target_modules(workspace_root, config, opt_store, story_id)?;
+        let story_modules =
+            resolve_story_target_modules(workspace_root, config, opt_store, story_id)?;
         for m in story_modules {
             resolved_modules_set.insert(m);
         }
@@ -191,7 +195,8 @@ pub fn run_impact(
                 kind: Some(EntityKind::Story),
                 ..Default::default()
             };
-            #[allow(clippy::disallowed_methods)] // Impact analysis reads entities to report active stories in modules.
+            #[allow(clippy::disallowed_methods)]
+            // Impact analysis reads entities to report active stories in modules.
             if let Ok(entities) = store.list_entities(&filter) {
                 for entity in entities {
                     if !entity.exists_for_derivation() {
@@ -201,25 +206,32 @@ pub fn run_impact(
                         continue;
                     }
                     let status = entity.status.as_deref().unwrap_or("");
-                    let is_active = status == "in-progress" || status == "in_progress" || status == "review";
+                    let is_active =
+                        status == "in-progress" || status == "in_progress" || status == "review";
                     if !is_active {
                         continue;
                     }
 
-                    let mut story_modules: Vec<String> = if let Some(ref tm_json) = entity.target_modules {
-                        serde_json::from_str(tm_json).unwrap_or_default()
-                    } else if let Ok(Some(details)) = store.get_story_details(&entity.id) {
-                        details
-                            .target_modules
-                            .as_ref()
-                            .and_then(|tm| serde_json::from_str(tm).ok())
-                            .unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    };
+                    let mut story_modules: Vec<String> =
+                        if let Some(ref tm_json) = entity.target_modules {
+                            serde_json::from_str(tm_json).unwrap_or_default()
+                        } else if let Ok(Some(details)) = store.get_story_details(&entity.id) {
+                            details
+                                .target_modules
+                                .as_ref()
+                                .and_then(|tm| serde_json::from_str(tm).ok())
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
 
                     if story_modules.is_empty() {
-                        if let Ok(mods) = resolve_story_target_modules(workspace_root, config, Some(store), &entity.id) {
+                        if let Ok(mods) = resolve_story_target_modules(
+                            workspace_root,
+                            config,
+                            Some(store),
+                            &entity.id,
+                        ) {
                             story_modules = mods;
                         }
                     }
@@ -236,7 +248,9 @@ pub fn run_impact(
             }
         } else {
             // Fallback to scanning filesystem when no store is present
-            let stories_dir = workspace_root.join(&config.storage.specs_dir).join("stories");
+            let stories_dir = workspace_root
+                .join(&config.storage.specs_dir)
+                .join("stories");
             if stories_dir.is_dir() {
                 if let Ok(entries) = fs::read_dir(&stories_dir) {
                     for entry in entries.flatten() {
@@ -245,12 +259,23 @@ pub fn run_impact(
                             if let Ok(content) = fs::read_to_string(&path) {
                                 if let Ok(fm) = extract_frontmatter(&content) {
                                     let id = fm.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                    let title = fm.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
-                                    let status = fm.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                                    let is_active = status == "in-progress" || status == "in_progress" || status == "review";
-                                    if is_active && !id.is_empty() && target_story.as_deref() != Some(id) {
+                                    let title = fm
+                                        .get("title")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
+                                    let status =
+                                        fm.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                                    let is_active = status == "in-progress"
+                                        || status == "in_progress"
+                                        || status == "review";
+                                    if is_active
+                                        && !id.is_empty()
+                                        && target_story.as_deref() != Some(id)
+                                    {
                                         let mut story_mods = Vec::new();
-                                        if let Some(arr) = fm.get("target_modules").and_then(|v| v.as_array()) {
+                                        if let Some(arr) =
+                                            fm.get("target_modules").and_then(|v| v.as_array())
+                                        {
                                             for item in arr {
                                                 if let Some(s) = item.as_str() {
                                                     story_mods.push(s.to_string());
@@ -313,7 +338,9 @@ pub fn run_impact(
 
             let (title, status) = if let Some(store) = opt_store {
                 match store.get_live_entity_for_derivation(&rel.source_id) {
-                    Ok(Some(ent)) if ent.kind == EntityKind::Story && ent.exists_for_derivation() => {
+                    Ok(Some(ent))
+                        if ent.kind == EntityKind::Story && ent.exists_for_derivation() =>
+                    {
                         (ent.title, ent.status)
                     }
                     _ => continue,
@@ -386,7 +413,9 @@ pub fn run_impact(
                     }
 
                     if let Some(rel_obj) = fm.get("relations").and_then(|v| v.as_object()) {
-                        if let Some(traces_arr) = rel_obj.get("traces_to").and_then(|v| v.as_array()) {
+                        if let Some(traces_arr) =
+                            rel_obj.get("traces_to").and_then(|v| v.as_array())
+                        {
                             for t in traces_arr {
                                 if let Some(req_id) = t.as_str() {
                                     requirements_set.insert(req_id.to_string());
@@ -400,7 +429,8 @@ pub fn run_impact(
                                 }
                             }
                         }
-                        if let Some(gov_arr) = rel_obj.get("governed_by").and_then(|v| v.as_array()) {
+                        if let Some(gov_arr) = rel_obj.get("governed_by").and_then(|v| v.as_array())
+                        {
                             for a in gov_arr {
                                 if let Some(adr_id) = a.as_str() {
                                     adrs_set.insert(adr_id.to_string());
@@ -428,7 +458,10 @@ pub fn run_impact(
     let mut overlapping_gates_set = BTreeSet::new();
     for gate_cfg in &config.gates {
         let matches_declared = story_declared_gates.contains(&gate_cfg.id);
-        let matches_verifies = gate_cfg.verifies.iter().any(|v| requirements_set.contains(v));
+        let matches_verifies = gate_cfg
+            .verifies
+            .iter()
+            .any(|v| requirements_set.contains(v));
         if matches_declared || matches_verifies {
             overlapping_gates_set.insert(gate_cfg.id.clone());
         }
@@ -508,10 +541,7 @@ fn resolve_changed_files(
         return files;
     }
 
-    let is_git = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(workspace_root)
-        .output()
+    let is_git = run_git(workspace_root, &["rev-parse", "--is-inside-work-tree"])
         .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
         .unwrap_or(false);
 
@@ -522,88 +552,38 @@ fn resolve_changed_files(
     let mut changed = HashSet::new();
 
     // 1. Try merge-base with integration_branch
-    let mb_output = Command::new("git")
-        .args(["merge-base", "HEAD", integration_branch])
-        .current_dir(workspace_root)
-        .output();
-
-    let mut diff_target = None;
-    if let Ok(ref out) = mb_output {
-        if out.status.success() {
-            let mb = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !mb.is_empty() {
-                diff_target = Some(mb);
-            }
-        }
-    }
+    let mut diff_target = merge_base_commit(workspace_root, integration_branch);
 
     // Try merge-base with origin/<integration_branch> if local branch ref not found
     if diff_target.is_none() {
         let remote_branch = format!("origin/{}", integration_branch);
-        let mb_remote = Command::new("git")
-            .args(["merge-base", "HEAD", &remote_branch])
-            .current_dir(workspace_root)
-            .output();
-        if let Ok(ref out) = mb_remote {
-            if out.status.success() {
-                let mb = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !mb.is_empty() {
-                    diff_target = Some(mb);
-                }
-            }
-        }
+        diff_target = merge_base_commit(workspace_root, &remote_branch);
     }
 
     // Fallback: integration_branch ref directly
-    if diff_target.is_none() {
-        let verify = Command::new("git")
-            .args(["rev-parse", "--verify", "--quiet", integration_branch])
-            .current_dir(workspace_root)
-            .output();
-        if let Ok(ref out) = verify {
-            if out.status.success() {
-                diff_target = Some(integration_branch.to_string());
-            }
-        }
+    if diff_target.is_none() && ref_exists(workspace_root, integration_branch) {
+        diff_target = Some(integration_branch.to_string());
     }
 
     // Fallback: origin/<integration_branch> ref directly
     if diff_target.is_none() {
         let remote_branch = format!("origin/{}", integration_branch);
-        let verify_remote = Command::new("git")
-            .args(["rev-parse", "--verify", "--quiet", &remote_branch])
-            .current_dir(workspace_root)
-            .output();
-        if let Ok(ref out) = verify_remote {
-            if out.status.success() {
-                diff_target = Some(remote_branch);
-            }
+        if ref_exists(workspace_root, &remote_branch) {
+            diff_target = Some(remote_branch);
         }
     }
 
     if let Some(target) = diff_target {
-        if let Ok(diff_out) = Command::new("git")
-            .args(["-c", "core.quotePath=false", "diff", "--name-only", "--relative", &target])
-            .current_dir(workspace_root)
-            .output()
-        {
+        if let Ok(diff_out) = diff_name_only_relative(workspace_root, &target) {
             if diff_out.status.success() {
-                for line in String::from_utf8_lossy(&diff_out.stdout).lines() {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        changed.insert(trimmed.to_string());
-                    }
-                }
+                let diff_stdout = String::from_utf8_lossy(&diff_out.stdout);
+                changed.extend(name_only_paths(&diff_stdout));
             }
         }
     }
 
     // Include uncommitted changes (staged, unstaged, untracked)
-    if let Ok(status_out) = Command::new("git")
-        .args(["-c", "core.quotePath=false", "status", "--porcelain=v1", "-uall"])
-        .current_dir(workspace_root)
-        .output()
-    {
+    if let Ok(status_out) = status_porcelain_untracked_all(workspace_root) {
         if status_out.status.success() {
             for line in String::from_utf8_lossy(&status_out.stdout).lines() {
                 if line.len() >= 3 {
@@ -652,7 +632,10 @@ fn scan_citations_in_files(files: &[PathBuf], pattern: &str) -> Vec<String> {
             let id = if let Some(m) = caps.get(1) {
                 m.as_str().trim()
             } else if let Some(m) = caps.get(0) {
-                m.as_str().trim().trim_start_matches('[').trim_end_matches(']')
+                m.as_str()
+                    .trim()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
             } else {
                 continue;
             };
@@ -746,7 +729,10 @@ pub fn format_impact_text(outcome: &ImpactOutcome) -> String {
     if outcome.hazards.is_empty() {
         out.push_str("  Linked Hazards: (none)\n");
     } else {
-        out.push_str(&format!("  Linked Hazards: {}\n", outcome.hazards.join(", ")));
+        out.push_str(&format!(
+            "  Linked Hazards: {}\n",
+            outcome.hazards.join(", ")
+        ));
     }
 
     // ADRs
@@ -760,7 +746,10 @@ pub fn format_impact_text(outcome: &ImpactOutcome) -> String {
     if outcome.gates.is_empty() {
         out.push_str("  Overlapping Gates: (none)\n");
     } else {
-        out.push_str(&format!("  Overlapping Gates: {}\n", outcome.gates.join(", ")));
+        out.push_str(&format!(
+            "  Overlapping Gates: {}\n",
+            outcome.gates.join(", ")
+        ));
     }
 
     // Cited Entities

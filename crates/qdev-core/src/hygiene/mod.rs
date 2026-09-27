@@ -5,20 +5,22 @@
 pub mod linter;
 pub mod tokenizer;
 
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::errors::QdevError;
+use crate::gate::git::{
+    diff_name_only_relative, is_inside_work_tree, merge_base_commit, name_only_paths, ref_exists,
+    status_porcelain_untracked_all,
+};
 
 pub use linter::{
     lint_comments, HygieneFinding, HygieneLinter, RULE_FORBID_PATTERNS,
     RULE_MAX_INLINE_COMMENT_LINES, RULE_REVIEW_ROUND, RULE_STORY_BANNER,
 };
-pub use tokenizer::{
-    tokenize_comments, CommentKind, CommentLine, CommentToken, SupportedLanguage,
-};
+pub use tokenizer::{tokenize_comments, CommentKind, CommentLine, CommentToken, SupportedLanguage};
 
 /// Structured output of a hygiene check.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,11 +61,7 @@ pub fn check_hygiene(
             let filter_paths = resolve_explicit_paths(workspace_root, &options.paths)?;
             diff_files
                 .into_iter()
-                .filter(|df| {
-                    filter_paths
-                        .iter()
-                        .any(|fp| df == fp || df.starts_with(fp))
-                })
+                .filter(|df| filter_paths.iter().any(|fp| df == fp || df.starts_with(fp)))
                 .collect()
         } else {
             diff_files
@@ -113,9 +111,7 @@ pub fn check_hygiene(
     }
 
     // Sort findings deterministically: file, line, rule_id
-    all_findings.sort_by(|a, b| {
-        (&a.file, a.line, &a.rule_id).cmp(&(&b.file, b.line, &b.rule_id))
-    });
+    all_findings.sort_by(|a, b| (&a.file, a.line, &a.rule_id).cmp(&(&b.file, b.line, &b.rule_id)));
 
     let status = if all_findings.is_empty() {
         "pass"
@@ -141,12 +137,7 @@ fn resolve_diff_files(
     workspace_root: &Path,
     integration_branch: &str,
 ) -> Result<Vec<PathBuf>, QdevError> {
-    let is_git = std::process::Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(workspace_root)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let is_git = is_inside_work_tree(workspace_root);
 
     if !is_git {
         return Err(QdevError::infrastructure_failure(
@@ -158,45 +149,20 @@ fn resolve_diff_files(
     let mut changed = std::collections::HashSet::new();
 
     // 1. Try merge-base with integration_branch
-    let mb_output = std::process::Command::new("git")
-        .args(["merge-base", "HEAD", integration_branch])
-        .current_dir(workspace_root)
-        .output();
-
-    let mut diff_target = None;
-    if let Ok(ref out) = mb_output {
-        if out.status.success() {
-            let mb = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !mb.is_empty() {
-                diff_target = Some(mb);
-            }
-        }
-    }
+    let mut diff_target = merge_base_commit(workspace_root, integration_branch);
 
     // Fallback: integration_branch ref directly
-    if diff_target.is_none() {
-        let verify = std::process::Command::new("git")
-            .args(["rev-parse", "--verify", "--quiet", integration_branch])
-            .current_dir(workspace_root)
-            .output();
-        if let Ok(ref out) = verify {
-            if out.status.success() {
-                diff_target = Some(integration_branch.to_string());
-            }
-        }
+    if diff_target.is_none() && ref_exists(workspace_root, integration_branch) {
+        diff_target = Some(integration_branch.to_string());
     }
 
     if let Some(target) = diff_target {
-        let diff_out = std::process::Command::new("git")
-            .args(["-c", "core.quotePath=false", "diff", "--name-only", "--relative", &target])
-            .current_dir(workspace_root)
-            .output()
-            .map_err(|e| {
-                QdevError::infrastructure_failure(
-                    "git_diff_failed",
-                    format!("Failed to execute git diff: {}", e),
-                )
-            })?;
+        let diff_out = diff_name_only_relative(workspace_root, &target).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "git_diff_failed",
+                format!("Failed to execute git diff: {}", e),
+            )
+        })?;
 
         if !diff_out.status.success() {
             return Err(QdevError::infrastructure_failure(
@@ -208,25 +174,17 @@ fn resolve_diff_files(
             ));
         }
 
-        for line in String::from_utf8_lossy(&diff_out.stdout).lines() {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                changed.insert(trimmed.to_string());
-            }
-        }
+        let diff_stdout = String::from_utf8_lossy(&diff_out.stdout);
+        changed.extend(name_only_paths(&diff_stdout));
     }
 
     // Include uncommitted changes (staged and unstaged + untracked)
-    let status_out = std::process::Command::new("git")
-        .args(["-c", "core.quotePath=false", "status", "--porcelain=v1", "-uall"])
-        .current_dir(workspace_root)
-        .output()
-        .map_err(|e| {
-            QdevError::infrastructure_failure(
-                "git_status_failed",
-                format!("Failed to execute git status: {}", e),
-            )
-        })?;
+    let status_out = status_porcelain_untracked_all(workspace_root).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "git_status_failed",
+            format!("Failed to execute git status: {}", e),
+        )
+    })?;
 
     if !status_out.status.success() {
         return Err(QdevError::infrastructure_failure(

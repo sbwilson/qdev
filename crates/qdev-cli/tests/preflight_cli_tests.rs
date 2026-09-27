@@ -118,7 +118,9 @@ fn test_cli_preflight_clean_text() {
     let assert = cmd.current_dir(root).args(["preflight"]).assert().success();
 
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
-    assert!(stdout.contains("✓ preflight: working tree in scope, integration branch fresh, zero blocking findings"));
+    assert!(stdout.contains(
+        "✓ preflight: working tree in scope, integration branch fresh, zero blocking findings"
+    ));
 }
 
 #[test]
@@ -128,7 +130,11 @@ fn test_cli_preflight_clean_json() {
     setup_workspace(root);
 
     let mut cmd = Command::cargo_bin("qdev").unwrap();
-    let assert = cmd.current_dir(root).args(["preflight", "--json"]).assert().success();
+    let assert = cmd
+        .current_dir(root)
+        .args(["preflight", "--json"])
+        .assert()
+        .success();
 
     let json_val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert_eq!(json_val["schema_version"], "1");
@@ -158,7 +164,11 @@ fn test_cli_preflight_non_git_directory() {
 
     // Also test --json mode
     let mut json_cmd = Command::cargo_bin("qdev").unwrap();
-    let json_assert = json_cmd.current_dir(root).args(["preflight", "--json"]).assert().code(4);
+    let json_assert = json_cmd
+        .current_dir(root)
+        .args(["preflight", "--json"])
+        .assert()
+        .code(4);
     let json_val: Value = serde_json::from_slice(&json_assert.get_output().stdout).unwrap();
     assert_eq!(json_val["error"]["code"], "not_a_git_repository");
 }
@@ -181,7 +191,11 @@ fn test_cli_preflight_dirty_no_lease_refusal() {
 
     // In JSON mode
     let mut json_cmd = Command::cargo_bin("qdev").unwrap();
-    let json_assert = json_cmd.current_dir(root).args(["preflight", "--json"]).assert().code(3);
+    let json_assert = json_cmd
+        .current_dir(root)
+        .args(["preflight", "--json"])
+        .assert()
+        .code(3);
     let json_val: Value = serde_json::from_slice(&json_assert.get_output().stdout).unwrap();
     assert_eq!(json_val["status"], "refusal");
     assert_eq!(json_val["remediation_commands"][0], "git stash -u");
@@ -200,10 +214,18 @@ fn test_cli_preflight_story_lease_in_scope_and_out_of_scope() {
 
     // Claim lease for E12S4 (target_modules: foundation)
     let mut claim_cmd = Command::cargo_bin("qdev").unwrap();
-    claim_cmd.current_dir(root).args(["claim", "E12S4"]).assert().success();
+    claim_cmd
+        .current_dir(root)
+        .args(["claim", "E12S4"])
+        .assert()
+        .success();
 
     // Modify file inside foundation (in scope)
-    fs::write(root.join("crates/foundation/src/lib.rs"), "// updated in foundation\n").unwrap();
+    fs::write(
+        root.join("crates/foundation/src/lib.rs"),
+        "// updated in foundation\n",
+    )
+    .unwrap();
 
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     cmd.current_dir(root).args(["preflight"]).assert().success();
@@ -217,7 +239,8 @@ fn test_cli_preflight_story_lease_in_scope_and_out_of_scope() {
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(stderr.contains("uncommitted changes outside target modules for story 'E12S4'"));
     assert!(stderr.contains("crates/bridge/src/lib.rs"));
-    assert!(stderr.contains("Fix: git stash push -u -m \"out-of-scope\" -- \"crates/bridge/src/lib.rs\""));
+    assert!(stderr
+        .contains("Fix: git stash push -u -m \"out-of-scope\" -- \"crates/bridge/src/lib.rs\""));
 }
 
 #[test]
@@ -227,15 +250,25 @@ fn test_cli_preflight_explicit_story_flag() {
     setup_workspace(root);
 
     // Modify file in foundation without lease, but pass `--story E12S4`
-    fs::write(root.join("crates/foundation/src/lib.rs"), "// foundation edit\n").unwrap();
+    fs::write(
+        root.join("crates/foundation/src/lib.rs"),
+        "// foundation edit\n",
+    )
+    .unwrap();
 
     let mut cmd = Command::cargo_bin("qdev").unwrap();
-    cmd.current_dir(root).args(["preflight", "--story", "E12S4"]).assert().success();
+    cmd.current_dir(root)
+        .args(["preflight", "--story", "E12S4"])
+        .assert()
+        .success();
 
     // Also modify bridge -> should fail
     fs::write(root.join("crates/bridge/src/lib.rs"), "// bridge edit\n").unwrap();
     let mut cmd2 = Command::cargo_bin("qdev").unwrap();
-    cmd2.current_dir(root).args(["preflight", "--story", "E12S4"]).assert().code(3);
+    cmd2.current_dir(root)
+        .args(["preflight", "--story", "E12S4"])
+        .assert()
+        .code(3);
 }
 
 #[test]
@@ -248,17 +281,31 @@ fn test_cli_preflight_open_chore() {
     let mut chore_cmd = Command::cargo_bin("qdev").unwrap();
     chore_cmd
         .current_dir(root)
-        .args(["chore", "start", "Tweak bridge", "--paths", "crates/bridge/**"])
+        .args([
+            "chore",
+            "start",
+            "Tweak bridge",
+            "--paths",
+            "crates/bridge/**",
+        ])
         .assert()
         .success();
 
     // Edit file in bridge -> passes
-    fs::write(root.join("crates/bridge/src/lib.rs"), "// chore modification\n").unwrap();
+    fs::write(
+        root.join("crates/bridge/src/lib.rs"),
+        "// chore modification\n",
+    )
+    .unwrap();
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     cmd.current_dir(root).args(["preflight"]).assert().success();
 
     // Edit file in foundation -> out of chore allowlist
-    fs::write(root.join("crates/foundation/src/lib.rs"), "// foundation edit\n").unwrap();
+    fs::write(
+        root.join("crates/foundation/src/lib.rs"),
+        "// foundation edit\n",
+    )
+    .unwrap();
     let mut cmd2 = Command::cargo_bin("qdev").unwrap();
     let assert = cmd2.current_dir(root).args(["preflight"]).assert().code(3);
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
@@ -273,7 +320,10 @@ fn test_cli_preflight_staleness_limit() {
 
     // Update max_integration_staleness_commits to 2 in qdev.toml
     let toml = fs::read_to_string(root.join("qdev.toml")).unwrap();
-    let new_toml = toml.replace("max_integration_staleness_commits = 20", "max_integration_staleness_commits = 2");
+    let new_toml = toml.replace(
+        "max_integration_staleness_commits = 20",
+        "max_integration_staleness_commits = 2",
+    );
     fs::write(root.join("qdev.toml"), new_toml).unwrap();
     git(root, &["commit", "-am", "Update staleness limit"]);
 
@@ -283,7 +333,11 @@ fn test_cli_preflight_staleness_limit() {
     // Advance develop by 3 commits
     git(root, &["checkout", "develop"]);
     for i in 1..=3 {
-        fs::write(root.join("crates/foundation/src/lib.rs"), format!("// develop commit {}\n", i)).unwrap();
+        fs::write(
+            root.join("crates/foundation/src/lib.rs"),
+            format!("// develop commit {}\n", i),
+        )
+        .unwrap();
         git(root, &["commit", "-am", &format!("develop commit {}", i)]);
     }
 
@@ -291,7 +345,11 @@ fn test_cli_preflight_staleness_limit() {
     git(root, &["checkout", "feature/E12S4-staleness"]);
 
     let mut cmd = Command::cargo_bin("qdev").unwrap();
-    let assert = cmd.current_dir(root).args(["preflight", "--story", "E12S4"]).assert().code(3);
+    let assert = cmd
+        .current_dir(root)
+        .args(["preflight", "--story", "E12S4"])
+        .assert()
+        .code(3);
 
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(stderr.contains("is 3 commits behind develop at merge-base (limit 2)"));
@@ -308,13 +366,25 @@ fn test_cli_preflight_integration_branch_behind_remote() {
     // Create bare remote
     let remote_dir = TempDir::new().unwrap();
     git(remote_dir.path(), &["init", "--bare"]);
-    git(root, &["remote", "add", "origin", remote_dir.path().to_str().unwrap()]);
+    git(
+        root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote_dir.path().to_str().unwrap(),
+        ],
+    );
 
     git(root, &["checkout", "develop"]);
     git(root, &["push", "-u", "origin", "develop"]);
 
     // Advance remote develop
-    fs::write(root.join("crates/foundation/src/lib.rs"), "// remote commit\n").unwrap();
+    fs::write(
+        root.join("crates/foundation/src/lib.rs"),
+        "// remote commit\n",
+    )
+    .unwrap();
     git(root, &["commit", "-am", "Remote commit"]);
     git(root, &["push", "origin", "develop"]);
 
@@ -345,17 +415,32 @@ fn test_cli_preflight_trunk_mode_behind_remote() {
 
     // Switch to trunk mode in qdev.toml
     let toml = fs::read_to_string(root.join("qdev.toml")).unwrap();
-    let new_toml = toml.replace("branching_mode = \"story-branch\"", "branching_mode = \"trunk\"");
+    let new_toml = toml.replace(
+        "branching_mode = \"story-branch\"",
+        "branching_mode = \"trunk\"",
+    );
     fs::write(root.join("qdev.toml"), new_toml).unwrap();
     git(root, &["commit", "-am", "Use trunk mode"]);
 
     let remote_dir = TempDir::new().unwrap();
     git(remote_dir.path(), &["init", "--bare"]);
-    git(root, &["remote", "add", "origin", remote_dir.path().to_str().unwrap()]);
+    git(
+        root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote_dir.path().to_str().unwrap(),
+        ],
+    );
     git(root, &["push", "-u", "origin", "main"]);
 
     // Remote commit
-    fs::write(root.join("crates/foundation/src/lib.rs"), "// remote main\n").unwrap();
+    fs::write(
+        root.join("crates/foundation/src/lib.rs"),
+        "// remote main\n",
+    )
+    .unwrap();
     git(root, &["commit", "-am", "Remote main"]);
     git(root, &["push", "origin", "main"]);
 
@@ -380,7 +465,8 @@ fn test_cli_preflight_blocking_validation_error() {
     fs::write(
         root.join("docs/specs/stories/E12S99.md"),
         "---\nid: E12S99\ntitle: Broken Story\nstatus: [bad yaml\n---\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let mut sync_cmd = Command::cargo_bin("qdev").unwrap();
     // sync records hydration errors into cache

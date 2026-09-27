@@ -368,8 +368,8 @@ fn alternate_close_persists_reason_and_decision_without_release_baseline() {
         "{sprint_file}"
     );
     let mut ruling_found = false;
-    if let Ok(mut entries) = fs::read_dir(root.join("docs/state/decisions")) {
-        while let Some(entry) = entries.next() {
+    if let Ok(entries) = fs::read_dir(root.join("docs/state/decisions")) {
+        for entry in entries {
             let content = fs::read_to_string(entry.unwrap().path()).unwrap_or_default();
             if content.contains("Awaiting vendor evidence") {
                 ruling_found = true;

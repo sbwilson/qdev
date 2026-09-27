@@ -105,7 +105,10 @@ fn test_sync_reports_the_boot_time_hydration_pass() {
         .success()
         .code(0);
     let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
-    assert_eq!(val["parsed"], 3, "first sync must report the boot rebuild: {val}");
+    assert_eq!(
+        val["parsed"], 3,
+        "first sync must report the boot rebuild: {val}"
+    );
 
     // Modify one file, then sync again: the modification is hydrated by this invocation's
     // own boot sweep, and the sync reports that one re-parse — not a misleading zero.
@@ -140,7 +143,10 @@ fn test_sync_reports_the_boot_time_hydration_pass() {
         .code(0);
     let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert_eq!(val["parsed"], 0);
-    assert_eq!(val["unchanged"], 3, "a settled workspace reports all-unchanged: {val}");
+    assert_eq!(
+        val["unchanged"], 3,
+        "a settled workspace reports all-unchanged: {val}"
+    );
 }
 
 #[test]

@@ -4,8 +4,8 @@ use qdev_core::config::AnnotatedConfig;
 use qdev_core::{
     current_iso8601, execute_gate, execute_gate_set, format_metric_number, get_gate_list,
     read_baseline, resolve_author, resolve_commit_sha, resolve_gate_execution_order,
-    write_baseline, ExitCode, GateBaselinePayload, GateListPayload, GateRunOptions,
-    GateStatus, JsonEnvelope, QdevError, RatchetBaseline,
+    write_baseline, ExitCode, GateBaselinePayload, GateListPayload, GateRunOptions, GateStatus,
+    JsonEnvelope, QdevError, RatchetBaseline,
 };
 
 use crate::cli::{Cli, GateArgs, GateBaselineArgs, GateCommands};
@@ -66,9 +66,8 @@ pub fn handle_gate(
                 return ExitCode::UsageError;
             }
             if count == 0 {
-                let err = QdevError::usage_error(
-                    "must specify a gate ID, --all, or --for-transition",
-                );
+                let err =
+                    QdevError::usage_error("must specify a gate ID, --all, or --for-transition");
                 let _ = output.emit_error(&err);
                 return ExitCode::UsageError;
             }
@@ -128,7 +127,11 @@ pub fn handle_gate(
 
             if cli.json {
                 if let Some(ref target_id) = run_args.id {
-                    if let Some(target_outcome) = set_outcome.outcomes.iter().find(|o| &o.gate_id == target_id) {
+                    if let Some(target_outcome) = set_outcome
+                        .outcomes
+                        .iter()
+                        .find(|o| &o.gate_id == target_id)
+                    {
                         let envelope = JsonEnvelope::new(target_outcome.to_payload());
                         let _ = output.emit_envelope(&envelope);
                     } else {
@@ -159,7 +162,12 @@ pub fn handle_gate_baseline(
     output: &OutputEmitter,
     workspace_root: &Path,
 ) -> ExitCode {
-    let gate_config = match annotated_config.config.gates.iter().find(|g| g.id == args.id) {
+    let gate_config = match annotated_config
+        .config
+        .gates
+        .iter()
+        .find(|g| g.id == args.id)
+    {
         Some(g) => g,
         None => {
             let err =

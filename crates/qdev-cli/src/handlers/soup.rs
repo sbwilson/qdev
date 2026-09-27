@@ -57,11 +57,11 @@ pub fn handle_soup(
                 audit_command,
                 // Workspace-level command: the run must never be attributed to an unrelated
                 // story that happens to hold a lease in this workspace.
+                // All three fields specified: `GateRunOptions` has no others.
                 &GateRunOptions {
                     story: None,
                     workspace_level: true,
                     timeout_ms: None,
-                    ..Default::default()
                 },
             ) {
                 Ok(run) => run,

@@ -64,7 +64,6 @@ fn test_evidence_bundle_schema_validation() {
     assert!(qdev_core::validate_evidence(&invalid_author_extra).is_err());
 }
 
-
 #[test]
 fn test_all_13_schemas_embedded_and_valid_json() {
     let all_kinds = EntityKind::all();
@@ -107,10 +106,7 @@ fn test_attribution_and_required_fields_contract_on_all_schemas() {
         EntityKind::Decision,
     ];
 
-    let kinds_without_title = [
-        EntityKind::Scratchpad,
-        EntityKind::Soup,
-    ];
+    let kinds_without_title = [EntityKind::Scratchpad, EntityKind::Soup];
 
     let ev_json = EntityKind::Evidence.schema_json();
     let ev_req = ev_json["required"]

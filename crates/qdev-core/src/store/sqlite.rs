@@ -440,9 +440,8 @@ impl SqliteStore {
         entity_files.dedup();
         // Generated release reports are sweep outputs, not entities: drop them before the
         // hydration pass so qdev's own report files never produce schema findings.
-        entity_files.retain(|f| {
-            !is_generated_release_report(f, workspace_root, &storage.state_dir)
-        });
+        entity_files
+            .retain(|f| !is_generated_release_report(f, workspace_root, &storage.state_dir));
 
         // Also collect scratchpad (.jsonl) and evidence (.json) files
         let scratch_dir = state_dir.join("scratch");
@@ -3110,9 +3109,8 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
         entity_files.dedup_by(|a, b| a.0 == b.0);
         // Generated release reports are sweep outputs, not entities: drop them before role
         // assignment so the hydration pass never tries to parse qdev's own report files.
-        entity_files.retain(|(f, _)| {
-            !is_generated_release_report(f, workspace_root, &storage.state_dir)
-        });
+        entity_files
+            .retain(|(f, _)| !is_generated_release_report(f, workspace_root, &storage.state_dir));
 
         let mut scratch_files: Vec<(PathBuf, (i64, u64))> = Vec::new();
         collect_files_with_ext_and_stamp(
@@ -5835,10 +5833,7 @@ fn hydrate_evidence_file(
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .unwrap_or_else(|| {
-                let stem = file_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
+                let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 let parent = file_path
                     .parent()
                     .and_then(|p| p.file_name())
@@ -5949,7 +5944,11 @@ ON CONFLICT(id) DO UPDATE SET
 /// carry no frontmatter by design: hydrating them as entities emitted `schema_violation`
 /// findings against files qdev itself wrote, and the findings then made `qdev validate` and
 /// `qdev hook pre-push` refuse every workspace that had just run a sprint review.
-pub(crate) fn is_generated_release_report(file: &Path, workspace_root: &Path, state_dir: &str) -> bool {
+pub(crate) fn is_generated_release_report(
+    file: &Path,
+    workspace_root: &Path,
+    state_dir: &str,
+) -> bool {
     let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
     if !crate::review::RELEASE_REPORT_FILENAMES.contains(&name) {
         return false;

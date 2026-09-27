@@ -120,12 +120,12 @@ pub use review::{
 
 pub use store::{
     create_schema, determine_entity_kind, drop_all_user_tables, ensure_cache,
-    ensure_cache_with_summary, inspect_cache_schema,
-    newer_cache_conflict, stamp_cache_version, CacheSchemaStatus, ConstraintRecord, DecisionRecord,
-    DeferredWorkRecord, DirtyEntityRecord, EntityFilter, EntityPresence, EntityRecord,
-    FindingRecord, GateRecord, GateRunRecord, RelationRecord, ScratchpadRecord, SoupRecord,
-    SprintAssignmentRecord, SprintRecord, SqliteStore, Store, StoryRecord, SweepSummary,
-    SyncStateRecord, ALL_TABLE_NAMES, BUSY_TIMEOUT_MS,
+    ensure_cache_with_summary, inspect_cache_schema, newer_cache_conflict, stamp_cache_version,
+    CacheSchemaStatus, ConstraintRecord, DecisionRecord, DeferredWorkRecord, DirtyEntityRecord,
+    EntityFilter, EntityPresence, EntityRecord, FindingRecord, GateRecord, GateRunRecord,
+    RelationRecord, ScratchpadRecord, SoupRecord, SprintAssignmentRecord, SprintRecord,
+    SqliteStore, Store, StoryRecord, SweepSummary, SyncStateRecord, ALL_TABLE_NAMES,
+    BUSY_TIMEOUT_MS,
 };
 
 pub use dag::{

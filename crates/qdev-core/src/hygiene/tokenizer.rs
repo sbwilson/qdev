@@ -3,8 +3,8 @@
 //! Correctly parses line comments, block comments (with nesting), and doc comments,
 //! while shielding comments inside standard, multiline, raw strings and character literals.
 
-use std::path::Path;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommentKind {
@@ -278,7 +278,11 @@ fn tokenize_rust(source: &str) -> Vec<CommentToken> {
                     j += 1;
                 }
                 found_close
-            } else if i + 2 < n && chars[i + 2] == '\'' && chars[i + 1] != '\n' && chars[i + 1] != '\\' {
+            } else if i + 2 < n
+                && chars[i + 2] == '\''
+                && chars[i + 1] != '\n'
+                && chars[i + 1] != '\\'
+            {
                 // Simple single char literal: 'x', '/', '*'
                 i += 3;
                 true
@@ -336,7 +340,11 @@ fn scan_swift_interpolation(chars: &[char], n: usize, i: &mut usize, current_lin
                                 }
                                 *i += 1;
                             }
-                        } else if chars[*i] == '"' && *i + 2 < n && chars[*i + 1] == '"' && chars[*i + 2] == '"' {
+                        } else if chars[*i] == '"'
+                            && *i + 2 < n
+                            && chars[*i + 1] == '"'
+                            && chars[*i + 2] == '"'
+                        {
                             *i += 3;
                             break;
                         } else {
@@ -426,7 +434,9 @@ fn tokenize_swift(source: &str) -> Vec<CommentToken> {
         if chars[i] == '/' && i + 1 < n && chars[i + 1] == '*' {
             let start_line = current_line;
             let start_idx = i;
-            let is_doc = i + 2 < n && chars[i + 2] == '*' && !(i + 3 < n && (chars[i + 3] == '*' || chars[i + 3] == '/'));
+            let is_doc = i + 2 < n
+                && chars[i + 2] == '*'
+                && !(i + 3 < n && (chars[i + 3] == '*' || chars[i + 3] == '/'));
             let kind = if is_doc {
                 CommentKind::DocBlock
             } else {
@@ -480,7 +490,11 @@ fn tokenize_swift(source: &str) -> Vec<CommentToken> {
                         if chars[i] == '\n' {
                             current_line += 1;
                             i += 1;
-                        } else if chars[i] == '"' && i + 2 < n && chars[i + 1] == '"' && chars[i + 2] == '"' {
+                        } else if chars[i] == '"'
+                            && i + 2 < n
+                            && chars[i + 1] == '"'
+                            && chars[i + 2] == '"'
+                        {
                             let mut matches_hashes = true;
                             for h in 0..hash_count {
                                 if i + 3 + h >= n || chars[i + 3 + h] != '#' {
@@ -544,7 +558,8 @@ fn tokenize_swift(source: &str) -> Vec<CommentToken> {
                         }
                         i += 1;
                     }
-                } else if chars[i] == '"' && i + 2 < n && chars[i + 1] == '"' && chars[i + 2] == '"' {
+                } else if chars[i] == '"' && i + 2 < n && chars[i + 1] == '"' && chars[i + 2] == '"'
+                {
                     i += 3;
                     break;
                 } else {
@@ -616,7 +631,8 @@ fn tokenize_python(source: &str) -> Vec<CommentToken> {
                         }
                         i += 1;
                     }
-                } else if chars[i] == '"' && i + 2 < n && chars[i + 1] == '"' && chars[i + 2] == '"' {
+                } else if chars[i] == '"' && i + 2 < n && chars[i + 1] == '"' && chars[i + 2] == '"'
+                {
                     i += 3;
                     break;
                 } else {
@@ -654,7 +670,11 @@ fn tokenize_python(source: &str) -> Vec<CommentToken> {
                         }
                         i += 1;
                     }
-                } else if chars[i] == '\'' && i + 2 < n && chars[i + 1] == '\'' && chars[i + 2] == '\'' {
+                } else if chars[i] == '\''
+                    && i + 2 < n
+                    && chars[i + 1] == '\''
+                    && chars[i + 2] == '\''
+                {
                     i += 3;
                     break;
                 } else {

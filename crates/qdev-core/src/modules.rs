@@ -55,7 +55,10 @@ impl ModuleRegistry {
 
         let mut matched = Vec::new();
         for m in &self.modules {
-            if m.paths.iter().any(|pattern| glob_match(pattern, &normalized)) {
+            if m.paths
+                .iter()
+                .any(|pattern| glob_match(pattern, &normalized))
+            {
                 matched.push(m.id.clone());
             }
         }
@@ -66,7 +69,10 @@ impl ModuleRegistry {
     ///
     /// Returns `Ok(())` if all IDs are registered, or `Err(unregistered_ids)` containing
     /// the unrecognized IDs without duplicates in first-seen order.
-    pub fn validate_target_modules<T: AsRef<str>>(&self, target_modules: &[T]) -> Result<(), Vec<String>> {
+    pub fn validate_target_modules<T: AsRef<str>>(
+        &self,
+        target_modules: &[T],
+    ) -> Result<(), Vec<String>> {
         let mut unregistered = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for m in target_modules {

@@ -247,7 +247,9 @@ paths = ["nonexistent/**"]
     let stdout_str = std::str::from_utf8(&output.stdout).unwrap();
     let val: Value = serde_json::from_str(stdout_str).expect("Valid JSON on stdout");
 
-    let findings = val["findings"].as_array().expect("findings array must be present");
+    let findings = val["findings"]
+        .as_array()
+        .expect("findings array must be present");
     let unmatched = findings
         .iter()
         .find(|f| f["code"] == "module_glob_unmatched")

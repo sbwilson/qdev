@@ -273,7 +273,9 @@ fn build_entity_projection(
                 let mut skipped_locally = false;
 
                 if let Ok(content) = std::fs::read_to_string(&r.evidence_path) {
-                    if let Ok(bundle) = serde_json::from_str::<crate::gate::EvidenceBundle>(&content) {
+                    if let Ok(bundle) =
+                        serde_json::from_str::<crate::gate::EvidenceBundle>(&content)
+                    {
                         run_by = Some(bundle.run_by);
                         verifies = bundle.verifies;
                         skipped_locally = bundle.skipped_locally;

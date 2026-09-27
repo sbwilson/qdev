@@ -3968,12 +3968,10 @@ fn test_generated_release_reports_are_never_hydrated_as_entities() {
         summary.findings, 0,
         "warm sweep must not flag generated reports: {summary:?}"
     );
-    assert!(
-        store
-            .get_findings_for_path("docs/state/releases/0.1.0/rtm.md")
-            .unwrap()
-            .is_empty()
-    );
+    assert!(store
+        .get_findings_for_path("docs/state/releases/0.1.0/rtm.md")
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -3994,7 +3992,7 @@ fn test_preexisting_report_findings_heal_on_sweep() {
     )
     .unwrap();
 
-    let mut store = ensure_cache(root, &storage).unwrap();
+    let store = ensure_cache(root, &storage).unwrap();
     // Simulate a cache polluted by an older binary that still hydrated the report:
     // a sync_state row plus a schema_violation finding against the generated file.
     {
@@ -4041,9 +4039,5 @@ fn test_preexisting_report_findings_heal_on_sweep() {
             |r| r.get::<_, i64>(0),
         )
         .ok();
-    assert_eq!(
-        row,
-        Some(0),
-        "sync_state row for the report must be purged"
-    );
+    assert_eq!(row, Some(0), "sync_state row for the report must be purged");
 }

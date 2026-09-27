@@ -10,9 +10,9 @@
 //! (decision D-1), so nothing outside the declared allowlist ever reaches Git except the `DEC-`
 //! record itself, which is the single permitted exception (decision D-5).
 
+use crate::gate::git::{rev_parse_head, run_git};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -309,16 +309,16 @@ struct ChangedPath {
 /// Every path git reports as changed, staged, unstaged, or untracked — the set the allowlist
 /// partitions, so that "out of the allowlist" also covers work sitting in the index (D-4).
 fn changed_paths(workspace_root: &Path) -> Result<Vec<ChangedPath>, QdevError> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-        .current_dir(workspace_root)
-        .output()
-        .map_err(|e| {
-            QdevError::infrastructure_failure(
-                "git_unavailable",
-                format!("Failed to run 'git status': {}", e),
-            )
-        })?;
+    let output = run_git(
+        workspace_root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )
+    .map_err(|e| {
+        QdevError::infrastructure_failure(
+            "git_unavailable",
+            format!("Failed to run 'git status': {}", e),
+        )
+    })?;
 
     if !output.status.success() {
         return Err(QdevError::infrastructure_failure(
@@ -591,12 +591,9 @@ pub fn abort_chore(input: &FinishChoreInput) -> Result<ChoreRecord, QdevError> {
 /// Stages exactly the given paths. Nothing else is touched, so work that was already in the
 /// index stays there and is reported to the user instead of being committed (D-4).
 fn stage_paths(workspace_root: &Path, paths: &[String]) -> Result<(), QdevError> {
-    let mut command = Command::new("git");
-    command.args(["add", "--"]);
-    for path in paths {
-        command.arg(path);
-    }
-    let output = command.current_dir(workspace_root).output().map_err(|e| {
+    let mut args: Vec<&str> = vec!["add", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    let output = run_git(workspace_root, &args).map_err(|e| {
         QdevError::infrastructure_failure(
             "git_unavailable",
             format!("Failed to run 'git add': {}", e),
@@ -621,12 +618,9 @@ fn commit_with_pathspec(
     message: &str,
     paths: &[String],
 ) -> Result<String, QdevError> {
-    let mut command = Command::new("git");
-    command.args(["commit", "-m", message, "--"]);
-    for path in paths {
-        command.arg(path);
-    }
-    let output = command.current_dir(workspace_root).output().map_err(|e| {
+    let mut args: Vec<&str> = vec!["commit", "-m", message, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    let output = run_git(workspace_root, &args).map_err(|e| {
         QdevError::infrastructure_failure(
             "git_unavailable",
             format!("Failed to run 'git commit': {}", e),
@@ -642,16 +636,12 @@ fn commit_with_pathspec(
         ));
     }
 
-    let head = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(workspace_root)
-        .output()
-        .map_err(|e| {
-            QdevError::infrastructure_failure(
-                "git_unavailable",
-                format!("Failed to run 'git rev-parse': {}", e),
-            )
-        })?;
+    let head = rev_parse_head(workspace_root).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "git_unavailable",
+            format!("Failed to run 'git rev-parse': {}", e),
+        )
+    })?;
     if !head.status.success() {
         return Err(QdevError::infrastructure_failure(
             "git_rev_parse_failed",

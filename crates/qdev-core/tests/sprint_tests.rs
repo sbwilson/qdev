@@ -128,7 +128,7 @@ fn completed_release_close_snapshots_counts_ratchets_commit_and_soup() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     setup_test_workspace(root);
-    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let store = SqliteStore::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
     let storage = StorageConfig::default();
     let author = test_author();
     write_release(root, &store, "0.1.0");
@@ -226,7 +226,7 @@ fn close_refusals_leave_sprint_unchanged() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     setup_test_workspace(root);
-    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let store = SqliteStore::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
     let storage = StorageConfig::default();
     let author = test_author();
     open_sprint(&SprintOpenOptions {
@@ -867,7 +867,7 @@ fn close_refuses_terminal_and_non_active_sprints() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     setup_test_workspace(root);
-    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let store = SqliteStore::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
     let storage = StorageConfig::default();
     let author = test_author();
     open_sprint(&SprintOpenOptions {
@@ -958,7 +958,7 @@ fn paused_close_refuses_safety_violations_and_resolved_dw_unblocks() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     setup_test_workspace(root);
-    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let store = SqliteStore::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
     let storage = StorageConfig::default();
     let author = test_author();
     open_sprint(&SprintOpenOptions {
@@ -1034,7 +1034,7 @@ fn paused_close_with_carry_over_is_refused() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     setup_test_workspace(root);
-    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let store = SqliteStore::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
     let storage = StorageConfig::default();
     let author = test_author();
     open_sprint(&SprintOpenOptions {
@@ -1090,7 +1090,7 @@ fn completed_close_missing_or_malformed_release_refused_before_mutation() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     setup_test_workspace(root);
-    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let store = SqliteStore::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
     let storage = StorageConfig::default();
     let author = test_author();
     write_release(root, &store, "0.1.0");
@@ -1157,7 +1157,7 @@ fn close_completed_with_reason_records_decision() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     setup_test_workspace(root);
-    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let store = SqliteStore::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
     let storage = StorageConfig::default();
     let author = test_author();
     open_sprint(&SprintOpenOptions {
@@ -1206,7 +1206,7 @@ fn baseline_counts_only_this_release_soup() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     setup_test_workspace(root);
-    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let store = SqliteStore::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
     let storage = StorageConfig::default();
     let author = test_author();
     write_release(root, &store, "0.1.0");
@@ -1273,7 +1273,7 @@ fn baseline_marks_unreadable_ratchet_instead_of_silent_omission() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     setup_test_workspace(root);
-    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let store = SqliteStore::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
     let storage = StorageConfig::default();
     let author = test_author();
     write_release(root, &store, "0.1.0");

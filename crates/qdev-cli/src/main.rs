@@ -258,15 +258,14 @@ fn run(raw_args: &[String]) -> i32 {
         match qdev_core::ensure_cache_with_summary(&root, &annotated_config.config.storage) {
             Ok((_, summary)) => boot_summary = Some(summary),
             Err(e) => {
-            // A cache stamped by a newer binary is refused on boot for every command — except
-            // `qdev sync --rebuild`, the documented recovery path the refusal itself names.
-            // That command drops and repopulates every table from the Markdown files, so it is
-            // the one caller that does not need to read the newer cache first. Every other
-            // command, `qdev doctor` included, still exits 5 here — the pulse included too,
-            // which performs this check itself in `handle_pulse`.
-                let recoverable_by_this_command =
-                    e.code() == "schema_version_mismatch"
-                        && matches!(cli.command, Some(Commands::Sync(ref args)) if args.rebuild);
+                // A cache stamped by a newer binary is refused on boot for every command — except
+                // `qdev sync --rebuild`, the documented recovery path the refusal itself names.
+                // That command drops and repopulates every table from the Markdown files, so it is
+                // the one caller that does not need to read the newer cache first. Every other
+                // command, `qdev doctor` included, still exits 5 here — the pulse included too,
+                // which performs this check itself in `handle_pulse`.
+                let recoverable_by_this_command = e.code() == "schema_version_mismatch"
+                    && matches!(cli.command, Some(Commands::Sync(ref args)) if args.rebuild);
                 if !recoverable_by_this_command {
                     let _ = output.emit_error(&e);
                     return e.exit_code().as_i32();
@@ -375,17 +374,15 @@ fn run(raw_args: &[String]) -> i32 {
             interactivity,
         )
         .as_i32(),
-        Some(Commands::Sync(ref sync_args)) => {
-            handle_sync(
-                sync_args,
-                &annotated_config,
-                &cli,
-                &output,
-                &current_dir,
-                boot_summary.as_ref(),
-            )
-            .as_i32()
-        }
+        Some(Commands::Sync(ref sync_args)) => handle_sync(
+            sync_args,
+            &annotated_config,
+            &cli,
+            &output,
+            &current_dir,
+            boot_summary.as_ref(),
+        )
+        .as_i32(),
         Some(Commands::Doctor(ref doctor_args)) => {
             handle_doctor(doctor_args, &annotated_config, &cli, &output, &current_dir).as_i32()
         }

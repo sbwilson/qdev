@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::Path;
 
-use sha2::Digest;
 use qdev_core::config::{Config, GateConfig, StorageConfig};
 use qdev_core::gate::{
     execute_gate, write_evidence_bundle, EvidenceBundle, GateRunOptions, GateStatus,
@@ -11,6 +10,7 @@ use qdev_core::schema::{validate_evidence, EntityKind};
 use qdev_core::store::sqlite::SqliteStore;
 use qdev_core::store::{EntityRecord, Store};
 use qdev_core::write::Author;
+use sha2::Digest;
 use tempfile::TempDir;
 
 fn setup_test_workspace(root: &Path) {
@@ -29,7 +29,8 @@ fn sample_bundle(gate: &str, story: Option<&str>, commit: &str) -> EvidenceBundl
         duration_ms: 120,
         metric: None,
         summary: "10 tests passed".to_string(),
-        output_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+        output_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            .to_string(),
         run_by: Author {
             author_type: "agent".to_string(),
             id: "claude-code".to_string(),
@@ -274,7 +275,9 @@ fn test_execute_gate_failure_generates_fail_evidence() {
     assert_eq!(outcome.status, GateStatus::Fail);
     assert_eq!(outcome.exit_code, 101);
 
-    let ev_path_rel = outcome.evidence_path.expect("evidence_path must be present");
+    let ev_path_rel = outcome
+        .evidence_path
+        .expect("evidence_path must be present");
     let full_path = root.join(&ev_path_rel);
     assert!(full_path.is_file());
 
@@ -309,7 +312,9 @@ fn test_execute_gate_infra_generates_infra_evidence() {
     assert_eq!(outcome.status, GateStatus::Infra);
     assert_eq!(outcome.exit_code, 4);
 
-    let ev_path_rel = outcome.evidence_path.expect("evidence_path must be present");
+    let ev_path_rel = outcome
+        .evidence_path
+        .expect("evidence_path must be present");
     let full_path = root.join(&ev_path_rel);
     assert!(full_path.is_file());
 
@@ -347,7 +352,9 @@ fn test_execute_gate_with_skipped_locally() {
     assert_eq!(outcome.status, GateStatus::Skip);
     assert!(outcome.skipped_locally);
 
-    let ev_path_rel = outcome.evidence_path.expect("evidence_path must be present");
+    let ev_path_rel = outcome
+        .evidence_path
+        .expect("evidence_path must be present");
     let full_path = root.join(&ev_path_rel);
     assert!(full_path.is_file());
 
@@ -546,10 +553,18 @@ fn test_query_entity_expand_evidence_deduplicates_latest() {
         expand_evidence: true,
         ..Default::default()
     };
-    let res = query_entity(&store, Some(qdev_core::schema::EntityKind::Story), "E12S4", &opts).unwrap();
+    let res = query_entity(
+        &store,
+        Some(qdev_core::schema::EntityKind::Story),
+        "E12S4",
+        &opts,
+    )
+    .unwrap();
     match res {
         qdev_core::GetResult::Entity(p) => {
-            let ev = p.evidence.expect("evidence must be present when expand_evidence: true");
+            let ev = p
+                .evidence
+                .expect("evidence must be present when expand_evidence: true");
             // Deduplicated to 2 gates: fmt and lint (sorted ascending by gate)
             assert_eq!(ev.len(), 2);
             assert_eq!(ev[0].gate, "fmt");
@@ -566,7 +581,13 @@ fn test_query_entity_expand_evidence_deduplicates_latest() {
         expand_evidence: false,
         ..Default::default()
     };
-    let res_no_ev = query_entity(&store, Some(qdev_core::schema::EntityKind::Story), "E12S4", &opts_no_ev).unwrap();
+    let res_no_ev = query_entity(
+        &store,
+        Some(qdev_core::schema::EntityKind::Story),
+        "E12S4",
+        &opts_no_ev,
+    )
+    .unwrap();
     match res_no_ev {
         qdev_core::GetResult::Entity(p) => {
             assert!(p.evidence.is_none());

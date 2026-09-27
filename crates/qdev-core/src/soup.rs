@@ -191,11 +191,8 @@ pub fn persist_soup_records(
         if let Some(previous) = normalized_ids.insert(id.clone(), identity) {
             if previous != identity {
                 return Err(QdevError::usage_error(format!(
-                    "SOUP dependencies '{}' and '{}@{}' normalize to the same record ID '{}'; refusing to overwrite either record",
-                    format!("{}@{}", previous.0, previous.1),
-                    finding.name,
-                    finding.version,
-                    id
+                    "SOUP dependencies '{}{}' and '{}@{}' normalize to the same record ID '{}'; refusing to overwrite either record",
+                    previous.0, previous.1, finding.name, finding.version, id
                 )));
             }
         }
@@ -260,7 +257,8 @@ pub fn persist_soup_records(
                     ..Default::default()
                 },
                 &fields_to_remove,
-            ).map(|(content, version)| (content, version, Some(existing)))?
+            )
+            .map(|(content, version)| (content, version, Some(existing)))?
         } else {
             (content, 1, None)
         };
@@ -302,13 +300,30 @@ pub fn persist_soup_records(
 
 fn rollback_records(records: &[&PreparedSoupRecord]) -> Result<(), QdevError> {
     for record in records.iter().rev() {
-        match &record.original { Some(content) => write_file_atomic(&record.path, content)?, None => { if record.path.exists() { fs::remove_file(&record.path).map_err(|e| QdevError::infrastructure_failure("io_error", e.to_string()))?; } } }
+        match &record.original {
+            Some(content) => write_file_atomic(&record.path, content)?,
+            None => {
+                if record.path.exists() {
+                    fs::remove_file(&record.path).map_err(|e| {
+                        QdevError::infrastructure_failure("io_error", e.to_string())
+                    })?;
+                }
+            }
+        }
     }
     Ok(())
 }
 
-fn sync_soup_batch(cache: &Path, workspace_root: &Path, records: &[PreparedSoupRecord], author: &crate::write::Author, release: Option<&str>) -> Result<(), QdevError> {
-    if !cache.exists() { return Ok(()); }
+fn sync_soup_batch(
+    cache: &Path,
+    workspace_root: &Path,
+    records: &[PreparedSoupRecord],
+    author: &crate::write::Author,
+    release: Option<&str>,
+) -> Result<(), QdevError> {
+    if !cache.exists() {
+        return Ok(());
+    }
     let store = crate::store::SqliteStore::open(cache)?;
     store.with_conn_mut(|conn| {
         let tx = conn.transaction().map_err(|e| QdevError::infrastructure_failure("sqlite_error", e.to_string()))?;
@@ -331,7 +346,9 @@ pub fn record_sbom_artifact(
     let artifact_path = Path::new(artifact);
     if artifact.trim().is_empty()
         || artifact_path.is_absolute()
-        || artifact_path.components().any(|component| component == Component::ParentDir)
+        || artifact_path
+            .components()
+            .any(|component| component == Component::ParentDir)
     {
         return Err(QdevError::usage_error(format!(
             "SBOM artifact '{}' must be a workspace-relative path without parent traversal",

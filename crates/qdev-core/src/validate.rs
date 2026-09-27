@@ -2,9 +2,9 @@
 //! computed integrity checks, `--changed` filtering against a git merge-base diff, and the
 //! pure logic backing the guided `--fix-ids` duplicate-planning-id renumber.
 
+use crate::gate::git::{diff_name_only_relative, merge_base, name_only_paths, run_git};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::process::Command;
 
 use crate::config::Config;
 use crate::errors::QdevError;
@@ -768,16 +768,12 @@ pub fn git_changed_files(
     workspace_root: &Path,
     integration_branch: &str,
 ) -> Result<HashSet<String>, QdevError> {
-    let merge_base_output = Command::new("git")
-        .args(["merge-base", "HEAD", integration_branch])
-        .current_dir(workspace_root)
-        .output()
-        .map_err(|e| {
-            QdevError::infrastructure_failure(
-                "git_unavailable",
-                format!("Failed to run 'git merge-base': {}", e),
-            )
-        })?;
+    let merge_base_output = merge_base(workspace_root, integration_branch).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "git_unavailable",
+            format!("Failed to run 'git merge-base': {}", e),
+        )
+    })?;
 
     if !merge_base_output.status.success() {
         return Err(QdevError::infrastructure_failure(
@@ -806,23 +802,12 @@ pub fn git_changed_files(
     // that can never match a finding's workspace-relative `path`, and `--changed` silently
     // reports nothing. `core.quotePath=false` stops git octal-escaping non-ASCII paths, which
     // would likewise never match.
-    let diff_output = Command::new("git")
-        .args([
-            "-c",
-            "core.quotePath=false",
-            "diff",
-            "--name-only",
-            "--relative",
-            &merge_base,
-        ])
-        .current_dir(workspace_root)
-        .output()
-        .map_err(|e| {
-            QdevError::infrastructure_failure(
-                "git_unavailable",
-                format!("Failed to run 'git diff': {}", e),
-            )
-        })?;
+    let diff_output = diff_name_only_relative(workspace_root, &merge_base).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "git_unavailable",
+            format!("Failed to run 'git diff': {}", e),
+        )
+    })?;
 
     if !diff_output.status.success() {
         return Err(QdevError::infrastructure_failure(
@@ -835,34 +820,30 @@ pub fn git_changed_files(
         ));
     }
 
-    let mut paths: HashSet<String> = String::from_utf8_lossy(&diff_output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect();
+    let diff_stdout = String::from_utf8_lossy(&diff_output.stdout);
+    let mut paths: HashSet<String> = name_only_paths(&diff_stdout).into_iter().collect();
 
     // `git diff --name-only` only reports tracked-file changes, so a file that was just
     // created and not yet `git add`ed would otherwise never appear in `--changed` — the most
     // common real trigger for a fresh `duplicate_planning_id`.
     // `git ls-files` already reports paths relative to the working directory, so this only
     // needs the quoting disabled to line up with the diff output above.
-    let untracked_output = Command::new("git")
-        .args([
+    let untracked_output = run_git(
+        workspace_root,
+        &[
             "-c",
             "core.quotePath=false",
             "ls-files",
             "--others",
             "--exclude-standard",
-        ])
-        .current_dir(workspace_root)
-        .output()
-        .map_err(|e| {
-            QdevError::infrastructure_failure(
-                "git_unavailable",
-                format!("Failed to run 'git ls-files': {}", e),
-            )
-        })?;
+        ],
+    )
+    .map_err(|e| {
+        QdevError::infrastructure_failure(
+            "git_unavailable",
+            format!("Failed to run 'git ls-files': {}", e),
+        )
+    })?;
 
     if !untracked_output.status.success() {
         return Err(QdevError::infrastructure_failure(
@@ -874,13 +855,8 @@ pub fn git_changed_files(
         ));
     }
 
-    paths.extend(
-        String::from_utf8_lossy(&untracked_output.stdout)
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string),
-    );
+    let untracked_stdout = String::from_utf8_lossy(&untracked_output.stdout);
+    paths.extend(name_only_paths(&untracked_stdout));
 
     Ok(paths)
 }

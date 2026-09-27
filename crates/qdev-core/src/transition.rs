@@ -260,11 +260,7 @@ impl PreTransitionHook for TransitionGateHook {
         }
 
         if ctx.skip_gates {
-            let justification = ctx
-                .justification
-                .as_deref()
-                .map(str::trim)
-                .unwrap_or("");
+            let justification = ctx.justification.as_deref().map(str::trim).unwrap_or("");
             if justification.is_empty() {
                 return Err(QdevError::policy_refusal(
                     "needs_justification",
@@ -306,45 +302,58 @@ impl PreTransitionHook for TransitionGateHook {
             .collect();
 
         // 1. Built-in qdev-scope (run first for fast failure)
-        if !review_gate_ids.iter().any(|id| id == crate::gate::BUILTIN_GATE_SCOPE) {
-            let scope_outcome = crate::gate::execute_scope_gate(
-                &ctx.workspace_root,
-                &self.config,
-                &gate_options,
-            )?;
+        if !review_gate_ids
+            .iter()
+            .any(|id| id == crate::gate::BUILTIN_GATE_SCOPE)
+        {
+            let scope_outcome =
+                crate::gate::execute_scope_gate(&ctx.workspace_root, &self.config, &gate_options)?;
 
             if scope_outcome.status == crate::gate::GateStatus::Fail {
                 let payload = serde_json::to_value(scope_outcome.to_payload()).unwrap_or_default();
-                return Err(QdevError::logical_failure("gate_failed", scope_outcome.summary)
-                    .with_details(payload));
+                return Err(
+                    QdevError::logical_failure("gate_failed", scope_outcome.summary)
+                        .with_details(payload),
+                );
             } else if scope_outcome.status == crate::gate::GateStatus::Infra {
                 let payload = serde_json::to_value(scope_outcome.to_payload()).unwrap_or_default();
-                return Err(QdevError::infrastructure_failure("gate_infra_failure", scope_outcome.summary)
-                    .with_details(payload));
+                return Err(QdevError::infrastructure_failure(
+                    "gate_infra_failure",
+                    scope_outcome.summary,
+                )
+                .with_details(payload));
             }
         }
 
         // 2. Built-in qdev-deps (run second for fast failure)
-        if !review_gate_ids.iter().any(|id| id == crate::gate::BUILTIN_GATE_DEPS) {
-            let deps_outcome = crate::gate::execute_deps_gate(
-                &ctx.workspace_root,
-                &self.config,
-                &gate_options,
-            )?;
+        if !review_gate_ids
+            .iter()
+            .any(|id| id == crate::gate::BUILTIN_GATE_DEPS)
+        {
+            let deps_outcome =
+                crate::gate::execute_deps_gate(&ctx.workspace_root, &self.config, &gate_options)?;
 
             if deps_outcome.status == crate::gate::GateStatus::Fail {
                 let payload = serde_json::to_value(deps_outcome.to_payload()).unwrap_or_default();
-                return Err(QdevError::logical_failure("gate_failed", deps_outcome.summary)
-                    .with_details(payload));
+                return Err(
+                    QdevError::logical_failure("gate_failed", deps_outcome.summary)
+                        .with_details(payload),
+                );
             } else if deps_outcome.status == crate::gate::GateStatus::Infra {
                 let payload = serde_json::to_value(deps_outcome.to_payload()).unwrap_or_default();
-                return Err(QdevError::infrastructure_failure("gate_infra_failure", deps_outcome.summary)
-                    .with_details(payload));
+                return Err(QdevError::infrastructure_failure(
+                    "gate_infra_failure",
+                    deps_outcome.summary,
+                )
+                .with_details(payload));
             }
         }
 
         // 3. Built-in qdev-hygiene
-        if !review_gate_ids.iter().any(|id| id == crate::gate::BUILTIN_GATE_HYGIENE) {
+        if !review_gate_ids
+            .iter()
+            .any(|id| id == crate::gate::BUILTIN_GATE_HYGIENE)
+        {
             let hygiene_outcome = crate::gate::execute_hygiene_gate(
                 &ctx.workspace_root,
                 &self.config,
@@ -352,13 +361,20 @@ impl PreTransitionHook for TransitionGateHook {
             )?;
 
             if hygiene_outcome.status == crate::gate::GateStatus::Fail {
-                let payload = serde_json::to_value(hygiene_outcome.to_payload()).unwrap_or_default();
-                return Err(QdevError::logical_failure("gate_failed", hygiene_outcome.summary)
-                    .with_details(payload));
+                let payload =
+                    serde_json::to_value(hygiene_outcome.to_payload()).unwrap_or_default();
+                return Err(
+                    QdevError::logical_failure("gate_failed", hygiene_outcome.summary)
+                        .with_details(payload),
+                );
             } else if hygiene_outcome.status == crate::gate::GateStatus::Infra {
-                let payload = serde_json::to_value(hygiene_outcome.to_payload()).unwrap_or_default();
-                return Err(QdevError::infrastructure_failure("gate_infra_failure", hygiene_outcome.summary)
-                    .with_details(payload));
+                let payload =
+                    serde_json::to_value(hygiene_outcome.to_payload()).unwrap_or_default();
+                return Err(QdevError::infrastructure_failure(
+                    "gate_infra_failure",
+                    hygiene_outcome.summary,
+                )
+                .with_details(payload));
             }
         }
 
@@ -383,8 +399,11 @@ impl PreTransitionHook for TransitionGateHook {
                         .with_details(payload));
                 } else if outcome.status == crate::gate::GateStatus::Infra {
                     let payload = serde_json::to_value(outcome.to_payload()).unwrap_or_default();
-                    return Err(QdevError::infrastructure_failure("gate_infra_failure", outcome.summary)
-                        .with_details(payload));
+                    return Err(QdevError::infrastructure_failure(
+                        "gate_infra_failure",
+                        outcome.summary,
+                    )
+                    .with_details(payload));
                 }
             }
         }

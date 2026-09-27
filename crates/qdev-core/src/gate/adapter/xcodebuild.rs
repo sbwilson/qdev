@@ -56,7 +56,9 @@ pub fn parse_xcodebuild_output(
             let raw_msg = line[err_idx + ": error:".len()..].trim();
             // If message contains -[TestClass testMethod] : <assertion>, extract the assertion
             let message = if let Some(bracket_colon_idx) = raw_msg.find("] : ") {
-                raw_msg[bracket_colon_idx + "] : ".len()..].trim().to_string()
+                raw_msg[bracket_colon_idx + "] : ".len()..]
+                    .trim()
+                    .to_string()
             } else {
                 raw_msg.to_string()
             };
@@ -82,11 +84,7 @@ pub fn parse_xcodebuild_output(
             "tests passed".to_string()
         }
     } else if !failures.is_empty() {
-        format!(
-            "{} of {} tests failed",
-            failures.len(),
-            failures.len()
-        )
+        format!("{} of {} tests failed", failures.len(), failures.len())
     } else if exit_code == 0 {
         "tests passed".to_string()
     } else {

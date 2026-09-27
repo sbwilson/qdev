@@ -10,9 +10,9 @@
 
 use regex::Regex;
 
+use super::tokenizer::CommentToken;
 use crate::config::{HygieneConfig, DEFAULT_CITATION_PATTERN};
 use crate::errors::QdevError;
-use super::tokenizer::CommentToken;
 
 pub const RULE_MAX_INLINE_COMMENT_LINES: &str = "max_inline_comment_lines";
 pub const RULE_FORBID_PATTERNS: &str = "forbid_patterns";
@@ -45,7 +45,10 @@ impl HygieneLinter {
             .unwrap_or(DEFAULT_CITATION_PATTERN);
 
         let citation_regex = Regex::new(citation_pat).map_err(|e| {
-            QdevError::usage_error(format!("Invalid regex in hygiene.citation_pattern '{}': {}", citation_pat, e))
+            QdevError::usage_error(format!(
+                "Invalid regex in hygiene.citation_pattern '{}': {}",
+                citation_pat, e
+            ))
         })?;
 
         // Story/epic banner pattern: ⭐ story/epic, STORY \d+, EPIC \d+, STORY E\d+S\d+, etc.
@@ -63,7 +66,10 @@ impl HygieneLinter {
         let mut forbid_regexes = Vec::new();
         for pat in &config.forbid_patterns {
             let re = Regex::new(pat).map_err(|e| {
-                QdevError::usage_error(format!("Invalid regex in hygiene.forbid_patterns '{}': {}", pat, e))
+                QdevError::usage_error(format!(
+                    "Invalid regex in hygiene.forbid_patterns '{}': {}",
+                    pat, e
+                ))
             })?;
             forbid_regexes.push((pat.clone(), re));
         }

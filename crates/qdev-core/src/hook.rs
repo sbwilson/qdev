@@ -8,6 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::gate::git::{diff_cached_name_only, run_git};
+
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
@@ -36,10 +38,7 @@ pub fn shim_content(hook_name: &str) -> String {
 /// Executes `git rev-parse --git-path hooks` to properly handle both standard
 /// repositories and linked git worktrees. Falls back to `.git/hooks` if the directory exists.
 pub fn resolve_hooks_dir(workspace_root: &Path) -> Result<PathBuf, QdevError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--git-path", "hooks"])
-        .current_dir(workspace_root)
-        .output();
+    let output = run_git(workspace_root, &["rev-parse", "--git-path", "hooks"]);
 
     match output {
         Ok(out) if out.status.success() => {
@@ -193,7 +192,11 @@ fn write_shim(hook_path: &Path, hook: &str) -> Result<(), QdevError> {
     set_executable(hook_path).map_err(|e| {
         QdevError::infrastructure_failure(
             "io_error",
-            format!("Failed to set permissions on '{}': {}", hook_path.display(), e),
+            format!(
+                "Failed to set permissions on '{}': {}",
+                hook_path.display(),
+                e
+            ),
         )
     })?;
     Ok(())
@@ -257,16 +260,12 @@ pub fn scan_staged_secrets(
         }
     }
 
-    let output = Command::new("git")
-        .args(["-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--relative"])
-        .current_dir(workspace_root)
-        .output()
-        .map_err(|e| {
-            QdevError::infrastructure_failure(
-                "git_unavailable",
-                format!("Failed to execute git diff --cached: {}", e),
-            )
-        })?;
+    let output = diff_cached_name_only(workspace_root).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "git_unavailable",
+            format!("Failed to execute git diff --cached: {}", e),
+        )
+    })?;
 
     if !output.status.success() {
         return Err(QdevError::infrastructure_failure(
@@ -310,10 +309,7 @@ pub fn scan_staged_secrets(
             continue;
         }
 
-        let show_out = Command::new("git")
-            .args(["show", &format!(":{}", line)])
-            .current_dir(workspace_root)
-            .output();
+        let show_out = run_git(workspace_root, &["show", &format!(":{}", line)]);
 
         let content = match show_out {
             Ok(res) if res.status.success() => String::from_utf8_lossy(&res.stdout).to_string(),
@@ -389,7 +385,11 @@ pub fn run_legacy_hook(
     let status = cmd.status().map_err(|e| {
         QdevError::infrastructure_failure(
             "legacy_hook_execution_failed",
-            format!("Failed to execute legacy hook '{}': {}", legacy_path.display(), e),
+            format!(
+                "Failed to execute legacy hook '{}': {}",
+                legacy_path.display(),
+                e
+            ),
         )
     })?;
 
@@ -408,19 +408,22 @@ pub fn run_pre_commit(
     opt_store: Option<&dyn Store>,
 ) -> Result<Option<i32>, QdevError> {
     // 1. Hygiene check --diff
-    let qdev_bin = std::env::current_exe().ok().and_then(|current| {
-        let name = current.file_name()?.to_string_lossy();
-        if name == "qdev" || name == "qdev.exe" {
-            Some(current)
-        } else {
-            let candidate = current.parent()?.parent()?.join("qdev");
-            if candidate.exists() {
-                Some(candidate)
+    let qdev_bin = std::env::current_exe()
+        .ok()
+        .and_then(|current| {
+            let name = current.file_name()?.to_string_lossy();
+            if name == "qdev" || name == "qdev.exe" {
+                Some(current)
             } else {
-                None
+                let candidate = current.parent()?.parent()?.join("qdev");
+                if candidate.exists() {
+                    Some(candidate)
+                } else {
+                    None
+                }
             }
-        }
-    }).unwrap_or_else(|| PathBuf::from("qdev"));
+        })
+        .unwrap_or_else(|| PathBuf::from("qdev"));
 
     let hygiene_res = Command::new(qdev_bin)
         .args(["hygiene", "check", "--diff"])
@@ -441,7 +444,9 @@ pub fn run_pre_commit(
     let store_ref: &dyn Store = match opt_store {
         Some(s) => s,
         None => {
-            let db_path = workspace_root.join(&config.storage.cache_dir).join("cache.sqlite");
+            let db_path = workspace_root
+                .join(&config.storage.cache_dir)
+                .join("cache.sqlite");
             if db_path.exists() {
                 local_store = crate::store::SqliteStore::open(&db_path)?;
                 &local_store
@@ -460,11 +465,7 @@ pub fn run_pre_commit(
         }
         Err(_) => {
             // Integration branch might not exist or no commits yet; fall back to staged files
-            if let Ok(output) = Command::new("git")
-                .args(["-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--relative"])
-                .current_dir(workspace_root)
-                .output()
-            {
+            if let Ok(output) = diff_cached_name_only(workspace_root) {
                 if output.status.success() {
                     let files_str = String::from_utf8_lossy(&output.stdout);
                     let staged_paths: std::collections::HashSet<String> = files_str
@@ -593,13 +594,20 @@ pub fn run_prepare_commit_msg(
                     let current = fs::read_to_string(&p).map_err(|e| {
                         QdevError::infrastructure_failure(
                             "commit_message_read_failed",
-                            format!("Failed to reread commit message file '{}': {}", p.display(), e),
+                            format!(
+                                "Failed to reread commit message file '{}': {}",
+                                p.display(),
+                                e
+                            ),
                         )
                     })?;
                     if current != existing {
                         return Err(QdevError::conflict(
                             "commit_message_changed",
-                            format!("Commit message file '{}' changed while qdev prepared its draft", p.display()),
+                            format!(
+                                "Commit message file '{}' changed while qdev prepared its draft",
+                                p.display()
+                            ),
                         ));
                     }
                     let mut content = if existing.is_empty() {
@@ -627,11 +635,13 @@ pub fn run_prepare_commit_msg(
 }
 
 fn git_comment_char(workspace_root: &Path) -> Result<char, QdevError> {
-    let output = Command::new("git")
-        .args(["config", "--get", "core.commentChar"])
-        .current_dir(workspace_root)
-        .output()
-        .map_err(|e| QdevError::infrastructure_failure("git_unavailable", format!("Failed to read Git comment character: {}", e)))?;
+    let output =
+        run_git(workspace_root, &["config", "--get", "core.commentChar"]).map_err(|e| {
+            QdevError::infrastructure_failure(
+                "git_unavailable",
+                format!("Failed to read Git comment character: {}", e),
+            )
+        })?;
     if !output.status.success() {
         return Ok('#');
     }
@@ -695,14 +705,20 @@ fn build_commit_message_draft(workspace_root: &Path, config: &Config) -> Result<
     if title.contains('\r') || title.contains('\n') {
         return Err(QdevError::logical_failure(
             "leased_story_title_multiline",
-            format!("Leased story '{}' has a multiline title", story_path.display()),
+            format!(
+                "Leased story '{}' has a multiline title",
+                story_path.display()
+            ),
         ));
     }
     let title = title.trim();
     if title.is_empty() {
         return Err(QdevError::logical_failure(
             "leased_story_title_missing",
-            format!("Leased story '{}' has no readable title", story_path.display()),
+            format!(
+                "Leased story '{}' has no readable title",
+                story_path.display()
+            ),
         ));
     }
 

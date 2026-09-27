@@ -5,9 +5,10 @@ use std::time::{Duration, Instant};
 
 use sha2::Digest;
 
-use crate::config::{Config, GateConfig, ModuleConfig};
+use crate::config::{Config, GateConfig};
 use crate::errors::QdevError;
 use crate::gate::adapter::{parse_with_adapter, validate_adapter_name};
+use crate::gate::git::head_sha;
 use crate::gate::process::ProcessGroupIsolation;
 use crate::gate::result::GateResultDocument;
 use crate::gate::ring_buffer::HeadTailBuffer;
@@ -16,20 +17,13 @@ use crate::gate::{
 };
 use crate::lease::find_active_lease_with_storage;
 use crate::modules::ModuleRegistry;
-use crate::schema::EntityKind;
 use crate::store::Store;
-use crate::write::resolve_entity_file;
 
-pub const BUILTIN_GATE_SCOPE: &str = "qdev-scope";
-pub const BUILTIN_GATE_DEPS: &str = "qdev-deps";
-pub const BUILTIN_GATE_HYGIENE: &str = "qdev-hygiene";
-
-pub fn is_builtin_gate(gate_id: &str) -> bool {
-    matches!(
-        gate_id,
-        BUILTIN_GATE_SCOPE | BUILTIN_GATE_DEPS | BUILTIN_GATE_HYGIENE
-    )
-}
+pub use super::builtin::{
+    execute_deps_gate, execute_hygiene_gate, execute_scope_gate, is_builtin_gate,
+    scan_rust_imports, scan_swift_imports, BUILTIN_GATE_DEPS, BUILTIN_GATE_HYGIENE,
+    BUILTIN_GATE_SCOPE,
+};
 
 /// Execution options for running a gate.
 #[derive(Debug, Clone, Default)]
@@ -150,7 +144,8 @@ fn check_file_with_extensions(candidate: &Path) -> Option<PathBuf> {
     let is_windows = false;
 
     if is_windows && candidate.extension().is_none() {
-        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+        let pathext =
+            std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
         for ext in pathext.split(';') {
             let ext = ext.trim();
             if !ext.is_empty() {
@@ -196,22 +191,11 @@ pub fn resolve_binary(workspace_root: &Path, binary_str: &str) -> (String, bool)
 
 /// Resolves the current git commit SHA using `git rev-parse HEAD`.
 pub fn resolve_commit_sha(workspace_root: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .current_dir(workspace_root)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !sha.is_empty() {
-            return Some(sha);
-        }
-    }
-    None
+    head_sha(workspace_root)
 }
 
 /// Resolves the active or specified story ID.
-fn resolve_story_id(
+pub(crate) fn resolve_story_id(
     workspace_root: &Path,
     config: &Config,
     options: &GateRunOptions,
@@ -273,7 +257,7 @@ fn extract_metric_from_text(text: &str, metric_name: &str) -> Option<f64> {
 
 /// Helper function to write an immutable evidence bundle and hydrate into SQLite cache.
 #[allow(clippy::too_many_arguments)]
-fn record_gate_evidence(
+pub(crate) fn record_gate_evidence(
     workspace_root: &Path,
     config: &Config,
     gate_config: &GateConfig,
@@ -373,12 +357,8 @@ fn record_gate_evidence(
                 let content_hash = crate::write::sha256_digest(
                     std::fs::read(&evidence_path).unwrap_or_default().as_slice(),
                 );
-                let _ = store.upsert_sync_state(
-                    &rel_evidence_path,
-                    mtime,
-                    size,
-                    Some(&content_hash),
-                );
+                let _ =
+                    store.upsert_sync_state(&rel_evidence_path, mtime, size, Some(&content_hash));
             }
         }
     }
@@ -459,77 +439,35 @@ pub fn execute_gate(
     let cmd_str = match &gate_config.command {
         Some(s) if !s.trim().is_empty() => s.trim(),
         _ => {
-            let summary = "missing executable: <none>".to_string();
-            let evidence_path = record_gate_evidence(
+            return record_infra_outcome(
                 workspace_root,
                 config,
                 gate_config,
+                gate_id,
                 story_id.as_deref(),
                 commit_sha.as_deref(),
-                "infra",
-                4,
                 0,
+                "missing executable: <none>",
                 None,
-                &summary,
                 None,
-                None,
-                false,
-            )?;
-            return Ok(GateRunOutcome {
-                gate_id: gate_id.to_string(),
-                status: GateStatus::Infra,
-                exit_code: 4,
-                duration_ms: 0,
-                summary,
-                skipped_locally: false,
-                commit_sha,
-                story_id,
-                stdout: None,
-                stderr: None,
-                agent_instruction: Some("halt_and_alert".to_string()),
-                failures: Vec::new(),
-                metric: None,
-                constraint_ids: Vec::new(),
-                evidence_path: Some(evidence_path),
-            });
+            );
         }
     };
 
     let args = parse_command_args(cmd_str);
     if args.is_empty() {
-        let summary = "missing executable: <empty>".to_string();
-        let evidence_path = record_gate_evidence(
+        return record_infra_outcome(
             workspace_root,
             config,
             gate_config,
+            gate_id,
             story_id.as_deref(),
             commit_sha.as_deref(),
-            "infra",
-            4,
             0,
+            "missing executable: <empty>",
             None,
-            &summary,
             None,
-            None,
-            false,
-        )?;
-        return Ok(GateRunOutcome {
-            gate_id: gate_id.to_string(),
-            status: GateStatus::Infra,
-            exit_code: 4,
-            duration_ms: 0,
-            summary,
-            skipped_locally: false,
-            commit_sha,
-            story_id,
-            stdout: None,
-            stderr: None,
-            agent_instruction: Some("halt_and_alert".to_string()),
-            failures: Vec::new(),
-            metric: None,
-            constraint_ids: Vec::new(),
-            evidence_path: Some(evidence_path),
-        });
+        );
     }
 
     let binary_str = &args[0];
@@ -539,38 +477,18 @@ pub fn execute_gate(
     let (resolved_path, binary_exists) = resolve_binary(workspace_root, binary_str);
     if !binary_exists {
         let summary = format!("missing executable: {}", resolved_path);
-        let evidence_path = record_gate_evidence(
+        return record_infra_outcome(
             workspace_root,
             config,
             gate_config,
+            gate_id,
             story_id.as_deref(),
             commit_sha.as_deref(),
-            "infra",
-            4,
             0,
-            None,
             &summary,
             None,
             None,
-            false,
-        )?;
-        return Ok(GateRunOutcome {
-            gate_id: gate_id.to_string(),
-            status: GateStatus::Infra,
-            exit_code: 4,
-            duration_ms: 0,
-            summary,
-            skipped_locally: false,
-            commit_sha,
-            story_id,
-            stdout: None,
-            stderr: None,
-            agent_instruction: Some("halt_and_alert".to_string()),
-            failures: Vec::new(),
-            metric: None,
-            constraint_ids: Vec::new(),
-            evidence_path: Some(evidence_path),
-        });
+        );
     }
 
     // 4. Assemble environment variables
@@ -617,109 +535,43 @@ pub fn execute_gate(
         Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let summary = format!("missing executable: {}", resolved_path);
-            let evidence_path = record_gate_evidence(
+            return record_infra_outcome(
                 workspace_root,
                 config,
                 gate_config,
+                gate_id,
                 story_id.as_deref(),
                 commit_sha.as_deref(),
-                "infra",
-                4,
                 0,
-                None,
                 &summary,
                 None,
                 None,
-                false,
-            )?;
-            return Ok(GateRunOutcome {
-                gate_id: gate_id.to_string(),
-                status: GateStatus::Infra,
-                exit_code: 4,
-                duration_ms: 0,
-                summary,
-                skipped_locally: false,
-                commit_sha,
-                story_id,
-                stdout: None,
-                stderr: None,
-                agent_instruction: Some("halt_and_alert".to_string()),
-                failures: Vec::new(),
-                metric: None,
-                constraint_ids: Vec::new(),
-                evidence_path: Some(evidence_path),
-            });
+            );
         }
         Err(e) => {
             let summary = format!("failed to spawn executable {}: {}", resolved_path, e);
-            let evidence_path = record_gate_evidence(
+            return record_infra_outcome(
                 workspace_root,
                 config,
                 gate_config,
+                gate_id,
                 story_id.as_deref(),
                 commit_sha.as_deref(),
-                "infra",
-                4,
                 0,
-                None,
                 &summary,
                 None,
                 None,
-                false,
-            )?;
-            return Ok(GateRunOutcome {
-                gate_id: gate_id.to_string(),
-                status: GateStatus::Infra,
-                exit_code: 4,
-                duration_ms: 0,
-                summary,
-                skipped_locally: false,
-                commit_sha,
-                story_id,
-                stdout: None,
-                stderr: None,
-                agent_instruction: Some("halt_and_alert".to_string()),
-                failures: Vec::new(),
-                metric: None,
-                constraint_ids: Vec::new(),
-                evidence_path: Some(evidence_path),
-            });
+            );
         }
     };
 
     let isolation = ProcessGroupIsolation::on_spawned(&child);
 
     // 6. Concurrently capture stdout and stderr into bounded HeadTailBuffers
-    let mut child_stdout = child.stdout.take().expect("child stdout must be piped");
-    let mut child_stderr = child.stderr.take().expect("child stderr must be piped");
-
-    let stdout_handle = std::thread::spawn(move || {
-        let mut buffer = HeadTailBuffer::new();
-        let mut chunk = [0u8; 8192];
-        loop {
-            match child_stdout.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => buffer.write_bytes(&chunk[..n]),
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-        }
-        buffer
-    });
-
-    let stderr_handle = std::thread::spawn(move || {
-        let mut buffer = HeadTailBuffer::new();
-        let mut chunk = [0u8; 8192];
-        loop {
-            match child_stderr.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => buffer.write_bytes(&chunk[..n]),
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-        }
-        buffer
-    });
+    let stdout_handle =
+        spawn_stream_capture(child.stdout.take().expect("child stdout must be piped"));
+    let stderr_handle =
+        spawn_stream_capture(child.stderr.take().expect("child stderr must be piped"));
 
     // 7. Enforce timeout and monitor child process
     let timeout_ms = options
@@ -760,39 +612,18 @@ pub fn execute_gate(
         let summary = format!("timeout after {}ms", timeout_ms);
         let stdout_str = stdout_buf.to_string_lossy();
         let stderr_str = stderr_buf.to_string_lossy();
-        let evidence_path = record_gate_evidence(
+        return record_infra_outcome(
             workspace_root,
             config,
             gate_config,
+            gate_id,
             story_id.as_deref(),
             commit_sha.as_deref(),
-            "infra",
-            4,
             duration_ms,
-            None,
             &summary,
             Some(&stdout_str),
             Some(&stderr_str),
-            false,
-        )?;
-
-        return Ok(GateRunOutcome {
-            gate_id: gate_id.to_string(),
-            status: GateStatus::Infra,
-            exit_code: 4,
-            duration_ms,
-            summary,
-            skipped_locally: false,
-            commit_sha,
-            story_id,
-            stdout: Some(stdout_str),
-            stderr: Some(stderr_str),
-            agent_instruction: Some("halt_and_alert".to_string()),
-            failures: Vec::new(),
-            metric: None,
-            constraint_ids: Vec::new(),
-            evidence_path: Some(evidence_path),
-        });
+        );
     }
 
     let status = match child_status {
@@ -826,59 +657,135 @@ pub fn execute_gate(
 
     if let Some(sig) = killed_by_signal {
         let summary = format!("process terminated by signal {}", sig);
-        let evidence_path = record_gate_evidence(
+        return record_infra_outcome(
             workspace_root,
             config,
             gate_config,
+            gate_id,
             story_id.as_deref(),
             commit_sha.as_deref(),
-            "infra",
-            4,
             duration_ms,
-            None,
             &summary,
             Some(&stdout_str),
             Some(&stderr_str),
-            false,
-        )?;
-        return Ok(GateRunOutcome {
-            gate_id: gate_id.to_string(),
-            status: GateStatus::Infra,
-            exit_code: 4,
-            duration_ms,
-            summary,
-            skipped_locally: false,
-            commit_sha,
-            story_id,
-            stdout: Some(stdout_str),
-            stderr: Some(stderr_str),
-            agent_instruction: Some("halt_and_alert".to_string()),
-            failures: Vec::new(),
-            metric: None,
-            constraint_ids: Vec::new(),
-            evidence_path: Some(evidence_path),
-        });
+        );
     }
 
     let raw_exit_code = status.code().unwrap_or(-1);
 
     // 8. Output classification based on output_adapter configuration
-    let (
-        mut status,
-        mut exit_code,
-        mut summary,
-        mut agent_instruction,
-        mut failures,
-        mut metric,
-        constraint_ids,
-    ) = match gate_config.output_adapter.as_deref() {
+    let mut classification = classify_gate_output(
+        workspace_root,
+        gate_config,
+        raw_exit_code,
+        &stdout_str,
+        &stderr_str,
+        &result_file_path,
+    )?;
+
+    // 9. If gate is a ratchet gate, evaluate against branch baseline
+    apply_ratchet_evaluation(
+        workspace_root,
+        config,
+        gate_id,
+        gate_config,
+        &stdout_str,
+        &stderr_str,
+        &mut classification,
+    )?;
+
+    // 10. Record evidence and build the final outcome
+    let ev_status = match classification.status {
+        GateStatus::Pass => "pass",
+        GateStatus::Fail => "fail",
+        GateStatus::Infra => "infra",
+        GateStatus::Skip => "pass",
+    };
+    let evidence_path = record_gate_evidence(
+        workspace_root,
+        config,
+        gate_config,
+        story_id.as_deref(),
+        commit_sha.as_deref(),
+        ev_status,
+        classification.exit_code,
+        duration_ms,
+        classification.metric,
+        &classification.summary,
+        Some(&stdout_str),
+        Some(&stderr_str),
+        false,
+    )?;
+
+    Ok(GateRunOutcome {
+        gate_id: gate_id.to_string(),
+        status: classification.status,
+        exit_code: classification.exit_code,
+        duration_ms,
+        summary: classification.summary,
+        skipped_locally: false,
+        commit_sha,
+        story_id,
+        stdout: Some(stdout_str),
+        stderr: Some(stderr_str),
+        agent_instruction: classification.agent_instruction,
+        failures: classification.failures,
+        metric: classification.metric,
+        constraint_ids: classification.constraint_ids,
+        evidence_path: Some(evidence_path),
+    })
+}
+
+/// Spawns a thread that drains a piped child stream into a bounded head/tail buffer.
+fn spawn_stream_capture<R: Read + Send + 'static>(
+    mut reader: R,
+) -> std::thread::JoinHandle<HeadTailBuffer> {
+    std::thread::spawn(move || {
+        let mut buffer = HeadTailBuffer::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => buffer.write_bytes(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        buffer
+    })
+}
+
+/// Classification of a completed gate command: status, exit code, summary, agent
+/// instruction, cited failures, metric, and constraint IDs derived from its output.
+struct ClassifiedGateOutput {
+    status: GateStatus,
+    exit_code: i32,
+    summary: String,
+    agent_instruction: Option<String>,
+    failures: Vec<GateFailure>,
+    metric: Option<f64>,
+    constraint_ids: Vec<String>,
+}
+
+/// Classifies the captured output of a completed gate command according to its
+/// declared `output_adapter`.
+fn classify_gate_output(
+    workspace_root: &Path,
+    gate_config: &GateConfig,
+    raw_exit_code: i32,
+    stdout_str: &str,
+    stderr_str: &str,
+    result_file_path: &Path,
+) -> Result<ClassifiedGateOutput, QdevError> {
+    let (status, exit_code, summary, agent_instruction, failures, metric, constraint_ids) =
+        match gate_config.output_adapter.as_deref() {
             Some("json") => {
                 // If output_adapter = "json" is declared, require a valid result document.
                 let mut parsed_doc = None;
                 let mut schema_err = None;
 
                 if result_file_path.exists() {
-                    let content = std::fs::read_to_string(&result_file_path).unwrap_or_default();
+                    let content = std::fs::read_to_string(result_file_path).unwrap_or_default();
                     if !content.trim().is_empty() {
                         match GateResultDocument::from_json_str(&content) {
                             Ok(doc) => parsed_doc = Some(doc),
@@ -905,11 +812,7 @@ pub fn execute_gate(
                     let (ec, instr) = match doc.status {
                         GateStatus::Pass => (0, Some("continue".to_string())),
                         GateStatus::Fail => {
-                            let code = if raw_exit_code != 0 {
-                                raw_exit_code
-                            } else {
-                                1
-                            };
+                            let code = if raw_exit_code != 0 { raw_exit_code } else { 1 };
                             (code, Some("fix_cited_failures".to_string()))
                         }
                         GateStatus::Infra => (4, Some("halt_and_alert".to_string())),
@@ -953,8 +856,8 @@ pub fn execute_gate(
             Some("cargo") => {
                 let parsed = parse_with_adapter(
                     "cargo",
-                    &stdout_str,
-                    &stderr_str,
+                    stdout_str,
+                    stderr_str,
                     raw_exit_code,
                     Some(workspace_root),
                 )?;
@@ -989,8 +892,8 @@ pub fn execute_gate(
             Some("xcodebuild") => {
                 let parsed = parse_with_adapter(
                     "xcodebuild",
-                    &stdout_str,
-                    &stderr_str,
+                    stdout_str,
+                    stderr_str,
                     raw_exit_code,
                     Some(workspace_root),
                 )?;
@@ -1026,7 +929,7 @@ pub fn execute_gate(
                 // No adapter declared: check if valid result document exists on $QDEV_RESULT_FILE or stdout
                 let mut maybe_doc = None;
                 if result_file_path.exists() {
-                    let content = std::fs::read_to_string(&result_file_path).unwrap_or_default();
+                    let content = std::fs::read_to_string(result_file_path).unwrap_or_default();
                     if !content.trim().is_empty() {
                         maybe_doc = GateResultDocument::from_json_str(&content).ok();
                     }
@@ -1039,11 +942,7 @@ pub fn execute_gate(
                     let (ec, instr) = match doc.status {
                         GateStatus::Pass => (0, Some("continue".to_string())),
                         GateStatus::Fail => {
-                            let code = if raw_exit_code != 0 {
-                                raw_exit_code
-                            } else {
-                                1
-                            };
+                            let code = if raw_exit_code != 0 { raw_exit_code } else { 1 };
                             (code, Some("fix_cited_failures".to_string()))
                         }
                         GateStatus::Infra => (4, Some("halt_and_alert".to_string())),
@@ -1076,8 +975,8 @@ pub fn execute_gate(
                         Vec::new(),
                     )
                 } else {
-                    let summary = extract_last_lines(&stderr_str, 40)
-                        .or_else(|| extract_last_lines(&stdout_str, 40))
+                    let summary = extract_last_lines(stderr_str, 40)
+                        .or_else(|| extract_last_lines(stdout_str, 40))
                         .unwrap_or_else(|| format!("gate exited with code {}", raw_exit_code));
                     (
                         GateStatus::Fail,
@@ -1092,101 +991,137 @@ pub fn execute_gate(
             }
         };
 
-    // If gate is a ratchet gate, evaluate against branch baseline
-    if gate_config.kind.as_deref() == Some("ratchet") {
-        let direction_str = gate_config.direction.as_deref().unwrap_or("");
-        if direction_str != "must_not_increase" && direction_str != "must_not_decrease" {
-            return Err(QdevError::usage_error(format!(
-                "ratchet gate '{}' requires direction 'must_not_increase' or 'must_not_decrease'",
-                gate_id
-            )));
-        }
-
-        if status != GateStatus::Infra {
-            let metric_name = gate_config.metric.as_deref().unwrap_or("metric");
-            if metric.is_none() {
-                metric = extract_metric_from_text(&stdout_str, metric_name)
-                    .or_else(|| extract_metric_from_text(&stderr_str, metric_name));
-            }
-
-            if let Some(current_metric) = metric {
-                let baseline = crate::gate::read_baseline(
-                    workspace_root,
-                    &config.storage.state_dir,
-                    &config.git.integration_branch,
-                    gate_id,
-                )?;
-
-                let evaluation = crate::gate::evaluate_ratchet(
-                    current_metric,
-                    baseline.as_ref(),
-                    direction_str,
-                    metric_name,
-                    &config.git.integration_branch,
-                )?;
-
-                if evaluation.is_regression {
-                    status = evaluation.status;
-                    exit_code = evaluation.exit_code;
-                    summary = evaluation.summary;
-                    agent_instruction = Some("fix_cited_failures".to_string());
-                    failures.push(GateFailure {
-                        location: gate_id.to_string(),
-                        message: summary.clone(),
-                    });
-                } else if status == GateStatus::Pass {
-                    summary = evaluation.summary;
-                }
-            } else {
-                status = GateStatus::Fail;
-                exit_code = 1;
-                summary = format!("ratchet gate '{}' did not produce a numeric metric", gate_id);
-                agent_instruction = Some("fix_cited_failures".to_string());
-                failures.push(GateFailure {
-                    location: gate_id.to_string(),
-                    message: summary.clone(),
-                });
-            }
-        }
-    }
-
-    let ev_status = match status {
-        GateStatus::Pass => "pass",
-        GateStatus::Fail => "fail",
-        GateStatus::Infra => "infra",
-        GateStatus::Skip => "pass",
-    };
-    let evidence_path = record_gate_evidence(
-        workspace_root,
-        config,
-        gate_config,
-        story_id.as_deref(),
-        commit_sha.as_deref(),
-        ev_status,
-        exit_code,
-        duration_ms,
-        metric,
-        &summary,
-        Some(&stdout_str),
-        Some(&stderr_str),
-        false,
-    )?;
-
-    Ok(GateRunOutcome {
-        gate_id: gate_id.to_string(),
+    Ok(ClassifiedGateOutput {
         status,
         exit_code,
-        duration_ms,
         summary,
-        skipped_locally: false,
-        commit_sha,
-        story_id,
-        stdout: Some(stdout_str),
-        stderr: Some(stderr_str),
         agent_instruction,
         failures,
         metric,
         constraint_ids,
+    })
+}
+
+/// When `gate_config` is a ratchet gate, evaluates the run's metric against the
+/// branch baseline and mutates the classification accordingly.
+fn apply_ratchet_evaluation(
+    workspace_root: &Path,
+    config: &Config,
+    gate_id: &str,
+    gate_config: &GateConfig,
+    stdout_str: &str,
+    stderr_str: &str,
+    output: &mut ClassifiedGateOutput,
+) -> Result<(), QdevError> {
+    if gate_config.kind.as_deref() != Some("ratchet") {
+        return Ok(());
+    }
+
+    let direction_str = gate_config.direction.as_deref().unwrap_or("");
+    if direction_str != "must_not_increase" && direction_str != "must_not_decrease" {
+        return Err(QdevError::usage_error(format!(
+            "ratchet gate '{}' requires direction 'must_not_increase' or 'must_not_decrease'",
+            gate_id
+        )));
+    }
+
+    if output.status != GateStatus::Infra {
+        let metric_name = gate_config.metric.as_deref().unwrap_or("metric");
+        if output.metric.is_none() {
+            output.metric = extract_metric_from_text(stdout_str, metric_name)
+                .or_else(|| extract_metric_from_text(stderr_str, metric_name));
+        }
+
+        if let Some(current_metric) = output.metric {
+            let baseline = crate::gate::read_baseline(
+                workspace_root,
+                &config.storage.state_dir,
+                &config.git.integration_branch,
+                gate_id,
+            )?;
+
+            let evaluation = crate::gate::evaluate_ratchet(
+                current_metric,
+                baseline.as_ref(),
+                direction_str,
+                metric_name,
+                &config.git.integration_branch,
+            )?;
+
+            if evaluation.is_regression {
+                output.status = evaluation.status;
+                output.exit_code = evaluation.exit_code;
+                output.summary = evaluation.summary;
+                output.agent_instruction = Some("fix_cited_failures".to_string());
+                output.failures.push(GateFailure {
+                    location: gate_id.to_string(),
+                    message: output.summary.clone(),
+                });
+            } else if output.status == GateStatus::Pass {
+                output.summary = evaluation.summary;
+            }
+        } else {
+            output.status = GateStatus::Fail;
+            output.exit_code = 1;
+            output.summary = format!(
+                "ratchet gate '{}' did not produce a numeric metric",
+                gate_id
+            );
+            output.agent_instruction = Some("fix_cited_failures".to_string());
+            output.failures.push(GateFailure {
+                location: gate_id.to_string(),
+                message: output.summary.clone(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Records an infra-failure evidence bundle and builds the halt-and-alert outcome.
+#[allow(clippy::too_many_arguments)]
+fn record_infra_outcome(
+    workspace_root: &Path,
+    config: &Config,
+    gate_config: &GateConfig,
+    gate_id: &str,
+    story_id: Option<&str>,
+    commit_sha: Option<&str>,
+    duration_ms: u64,
+    summary: &str,
+    stdout: Option<&str>,
+    stderr: Option<&str>,
+) -> Result<GateRunOutcome, QdevError> {
+    let evidence_path = record_gate_evidence(
+        workspace_root,
+        config,
+        gate_config,
+        story_id,
+        commit_sha,
+        "infra",
+        4,
+        duration_ms,
+        None,
+        summary,
+        stdout,
+        stderr,
+        false,
+    )?;
+    Ok(GateRunOutcome {
+        gate_id: gate_id.to_string(),
+        status: GateStatus::Infra,
+        exit_code: 4,
+        duration_ms,
+        summary: summary.to_string(),
+        skipped_locally: false,
+        commit_sha: commit_sha.map(str::to_string),
+        story_id: story_id.map(str::to_string),
+        stdout: stdout.map(str::to_string),
+        stderr: stderr.map(str::to_string),
+        agent_instruction: Some("halt_and_alert".to_string()),
+        failures: Vec::new(),
+        metric: None,
+        constraint_ids: Vec::new(),
         evidence_path: Some(evidence_path),
     })
 }
@@ -1308,7 +1243,8 @@ pub fn resolve_gate_execution_order(
     // If gate G depends on dep D, D must execute before G.
     // So in-degree(G) = number of dep in G.depends_on where dep is in selected_ids.
     let mut in_degree: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    let mut dependents: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+    let mut dependents: std::collections::HashMap<&str, Vec<&str>> =
+        std::collections::HashMap::new();
 
     for id in &selected_ids {
         let cfg = gate_map[id.as_str()];
@@ -1316,7 +1252,10 @@ pub fn resolve_gate_execution_order(
         for dep in &cfg.depends_on {
             if selected_ids.contains(dep) {
                 deg += 1;
-                dependents.entry(dep.as_str()).or_default().push(id.as_str());
+                dependents
+                    .entry(dep.as_str())
+                    .or_default()
+                    .push(id.as_str());
             }
         }
         in_degree.insert(id.as_str(), deg);
@@ -1345,7 +1284,9 @@ pub fn resolve_gate_execution_order(
             .collect();
 
         if ready.is_empty() {
-            return Err(QdevError::usage_error("cycle detected in gate dependencies"));
+            return Err(QdevError::usage_error(
+                "cycle detected in gate dependencies",
+            ));
         }
 
         ready.sort_by_key(|id| order_index.get(id).copied().unwrap_or(usize::MAX));
@@ -1384,11 +1325,8 @@ pub fn execute_gate_set(
     let commit_sha = resolve_commit_sha(workspace_root);
     let story_id = resolve_story_id(workspace_root, config, options);
 
-    let gate_configs: std::collections::HashMap<&str, &crate::config::GateConfig> = config
-        .gates
-        .iter()
-        .map(|g| (g.id.as_str(), g))
-        .collect();
+    let gate_configs: std::collections::HashMap<&str, &crate::config::GateConfig> =
+        config.gates.iter().map(|g| (g.id.as_str(), g)).collect();
 
     for gate_id in gate_ids {
         let fallback_gate;
@@ -1582,1124 +1520,4 @@ pub fn get_gate_list(
     }
 
     Ok(items)
-}
-
-/// Scans source content for Rust `use` statements, returning (line_number, root_imported_crate).
-pub fn scan_rust_imports(content: &str) -> Vec<(usize, String)> {
-    let mut results = Vec::new();
-    let mut in_block_comment = false;
-
-    for (idx, raw_line) in content.lines().enumerate() {
-        let line_no = idx + 1;
-        let mut line = raw_line.trim().to_string();
-
-        // Handle multi-line block comment continuation
-        if in_block_comment {
-            if let Some(pos) = line.find("*/") {
-                line = line[pos + 2..].trim().to_string();
-                in_block_comment = false;
-            } else {
-                continue;
-            }
-        }
-
-        // If line comment // appears before /*, strip it first so // ... /* does not trigger block comment
-        if !in_block_comment {
-            if let Some(slash_slash) = line.find("//") {
-                if let Some(slash_star) = line.find("/*") {
-                    if slash_slash < slash_star {
-                        line = line[..slash_slash].trim().to_string();
-                    }
-                } else {
-                    line = line[..slash_slash].trim().to_string();
-                }
-            }
-        }
-
-        // Strip single-line block comments within the line
-        while let Some(start_pos) = line.find("/*") {
-            if let Some(end_pos) = line[start_pos + 2..].find("*/") {
-                let actual_end = start_pos + 2 + end_pos + 2;
-                line = format!("{}{}", &line[..start_pos], &line[actual_end..]);
-            } else {
-                line = line[..start_pos].trim().to_string();
-                in_block_comment = true;
-                break;
-            }
-        }
-
-        // Strip trailing line comment
-        if let Some(pos) = line.find("//") {
-            line = line[..pos].trim().to_string();
-        }
-
-        let trimmed_line = line.trim();
-        if trimmed_line.is_empty() {
-            continue;
-        }
-
-        // Strip visibility modifiers: pub, pub(crate), pub(...)
-        let mut rest = trimmed_line;
-        if rest.starts_with("pub") {
-            rest = rest[3..].trim_start();
-            if rest.starts_with('(') {
-                if let Some(close_paren) = rest.find(')') {
-                    rest = rest[close_paren + 1..].trim_start();
-                }
-            }
-        }
-
-        if let Some(stripped) = rest.strip_prefix("use ") {
-            let after_use = stripped.trim_start().trim_start_matches(':');
-            let token: String = after_use
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            if !token.is_empty()
-                && token != "crate"
-                && token != "super"
-                && token != "self"
-                && token != "std"
-                && token != "core"
-                && token != "alloc"
-            {
-                results.push((line_no, token));
-            }
-        }
-    }
-    results
-}
-
-/// Scans source content for Swift `import` statements, returning (line_number, root_imported_module).
-pub fn scan_swift_imports(content: &str) -> Vec<(usize, String)> {
-    let mut results = Vec::new();
-    let mut in_block_comment = false;
-
-    for (idx, raw_line) in content.lines().enumerate() {
-        let line_no = idx + 1;
-        let mut line = raw_line.trim().to_string();
-
-        if in_block_comment {
-            if let Some(pos) = line.find("*/") {
-                line = line[pos + 2..].trim().to_string();
-                in_block_comment = false;
-            } else {
-                continue;
-            }
-        }
-
-        // If line comment // appears before /*, strip it first so // ... /* does not trigger block comment
-        if !in_block_comment {
-            if let Some(slash_slash) = line.find("//") {
-                if let Some(slash_star) = line.find("/*") {
-                    if slash_slash < slash_star {
-                        line = line[..slash_slash].trim().to_string();
-                    }
-                } else {
-                    line = line[..slash_slash].trim().to_string();
-                }
-            }
-        }
-
-        while let Some(start_pos) = line.find("/*") {
-            if let Some(end_pos) = line[start_pos + 2..].find("*/") {
-                let actual_end = start_pos + 2 + end_pos + 2;
-                line = format!("{}{}", &line[..start_pos], &line[actual_end..]);
-            } else {
-                line = line[..start_pos].trim().to_string();
-                in_block_comment = true;
-                break;
-            }
-        }
-
-        if let Some(pos) = line.find("//") {
-            line = line[..pos].trim().to_string();
-        }
-
-        let trimmed_line = line.trim();
-        if trimmed_line.is_empty() {
-            continue;
-        }
-
-        let mut rest = trimmed_line;
-        // Strip attributes (e.g. @_exported, @testable, @preconcurrency) and access modifiers
-        loop {
-            if rest.starts_with('@') {
-                if let Some(space_pos) = rest.find(char::is_whitespace) {
-                    rest = rest[space_pos..].trim_start();
-                    continue;
-                } else {
-                    break;
-                }
-            }
-            if let Some(stripped) = rest.strip_prefix("public ")
-                .or_else(|| rest.strip_prefix("internal "))
-                .or_else(|| rest.strip_prefix("fileprivate "))
-                .or_else(|| rest.strip_prefix("private "))
-                .or_else(|| rest.strip_prefix("open "))
-            {
-                rest = stripped.trim_start();
-                continue;
-            }
-            break;
-        }
-
-        if let Some(stripped) = rest.strip_prefix("import ") {
-            let after_import = stripped.trim_start();
-            let mut parts = after_import.split_whitespace();
-            if let Some(first) = parts.next() {
-                let module_cand = match first {
-                    "class" | "struct" | "enum" | "protocol" | "typealias" | "func" | "let" | "var" => {
-                        parts.next()
-                    }
-                    other => Some(other),
-                };
-                if let Some(cand) = module_cand {
-                    let root_mod: String = cand
-                        .chars()
-                        .take_while(|c| c.is_alphanumeric() || *c == '_')
-                        .collect();
-                    if !root_mod.is_empty() {
-                        results.push((line_no, root_mod));
-                    }
-                }
-            }
-        }
-    }
-    results
-}
-
-fn matches_word_boundary(text: &str, kw: &str) -> bool {
-    let kw_len = kw.len();
-    for (start_idx, _) in text.match_indices(kw) {
-        let before_ok = if start_idx == 0 {
-            true
-        } else {
-            let prev_char = text[..start_idx].chars().next_back().unwrap();
-            !prev_char.is_alphanumeric() && prev_char != '_'
-        };
-        let end_idx = start_idx + kw_len;
-        let after_ok = if end_idx >= text.len() {
-            true
-        } else {
-            let next_char = text[end_idx..].chars().next().unwrap();
-            !next_char.is_alphanumeric() && next_char != '_'
-        };
-        if before_ok && after_ok {
-            return true;
-        }
-    }
-    false
-}
-
-fn find_matching_no_go<'a>(
-    path: &str,
-    registry: &ModuleRegistry,
-    no_gos: &'a [(String, String)],
-) -> Option<(&'a String, &'a String)> {
-    let path_obj = Path::new(path);
-    let file_name = path_obj.file_name().and_then(|f| f.to_str()).unwrap_or("");
-    let file_stem = path_obj.file_stem().and_then(|f| f.to_str()).unwrap_or("");
-    let matching_modules = registry.resolve_path(path);
-
-    let mut keywords = Vec::new();
-    for m in &matching_modules {
-        keywords.push(m.to_lowercase());
-    }
-    if !file_name.is_empty() {
-        keywords.push(file_name.to_lowercase());
-    }
-    if !file_stem.is_empty() && file_stem != file_name {
-        keywords.push(file_stem.to_lowercase());
-    }
-    keywords.push(path.to_lowercase());
-    for comp in path_obj.components() {
-        let c_str = comp.as_os_str().to_string_lossy().to_lowercase();
-        if c_str != "crates" && c_str != "src" && c_str != "tests" && c_str != "lib" && c_str != "pkg" && c_str != "packages" {
-            keywords.push(c_str);
-        }
-    }
-
-    for (cid, text) in no_gos {
-        let lower_text = text.to_lowercase();
-        for kw in &keywords {
-            if kw.len() >= 3 && matches_word_boundary(&lower_text, kw) {
-                return Some((cid, text));
-            }
-        }
-    }
-    None
-}
-
-/// Returns the changed-file set, or the reason the diff baseline could not be established.
-///
-/// Fails closed on purpose: when the baseline is unresolvable, returning an empty set would
-/// let the scope gate pass while committed out-of-scope work stays invisible to the check.
-pub(crate) fn get_git_diff_files(
-    workspace_root: &Path,
-    integration_branch: &str,
-) -> Result<std::collections::HashSet<String>, String> {
-    let is_git = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(workspace_root)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if !is_git {
-        return Err(format!(
-            "workspace is not a git work tree; the diff baseline against '{integration_branch}' is unavailable"
-        ));
-    }
-
-    let mut changed = std::collections::HashSet::new();
-
-    // 1. Try merge-base with integration_branch
-    let mb_output = Command::new("git")
-        .args(["merge-base", "HEAD", integration_branch])
-        .current_dir(workspace_root)
-        .output();
-
-    let mut diff_target = None;
-    if let Ok(ref out) = mb_output {
-        if out.status.success() {
-            let mb = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !mb.is_empty() {
-                diff_target = Some(mb);
-            }
-        }
-    }
-
-    // Fallback: check if integration_branch ref exists directly
-    if diff_target.is_none() {
-        let verify = Command::new("git")
-            .args(["rev-parse", "--verify", "--quiet", integration_branch])
-            .current_dir(workspace_root)
-            .output();
-        if let Ok(ref out) = verify {
-            if out.status.success() {
-                diff_target = Some(integration_branch.to_string());
-            }
-        }
-    }
-
-    let Some(target) = diff_target else {
-        return Err(format!(
-            "integration branch '{integration_branch}' is unresolvable: no merge-base with HEAD and the ref is not found locally"
-        ));
-    };
-
-    match Command::new("git")
-        .args(["-c", "core.quotePath=false", "diff", "--name-only", "--relative", &target])
-        .current_dir(workspace_root)
-        .output()
-    {
-        Ok(diff_out) if diff_out.status.success() => {
-            for line in String::from_utf8_lossy(&diff_out.stdout).lines() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    changed.insert(trimmed.to_string());
-                }
-            }
-        }
-        Ok(diff_out) => {
-            return Err(format!(
-                "git diff against '{target}' failed: {}",
-                String::from_utf8_lossy(&diff_out.stderr).trim()
-            ))
-        }
-        Err(err) => {
-            return Err(format!("git diff against '{target}' could not be executed: {err}"));
-        }
-    }
-
-    // Include uncommitted changes (staged and unstaged + untracked)
-    match Command::new("git")
-        .args(["-c", "core.quotePath=false", "status", "--porcelain=v1", "-uall"])
-        .current_dir(workspace_root)
-        .output()
-    {
-        Ok(status_out) if status_out.status.success() => {
-            for line in String::from_utf8_lossy(&status_out.stdout).lines() {
-                if line.len() >= 3 {
-                    let path = line[3..].trim();
-                    let path = if let Some(idx) = path.find(" -> ") {
-                        &path[idx + 4..]
-                    } else {
-                        path
-                    };
-                    if !path.is_empty() {
-                        changed.insert(path.to_string());
-                    }
-                }
-            }
-        }
-        Ok(status_out) => {
-            return Err(format!(
-                "git status failed: {}",
-                String::from_utf8_lossy(&status_out.stderr).trim()
-            ))
-        }
-        Err(err) => return Err(format!("git status could not be executed: {err}")),
-    }
-
-    Ok(changed)
-}
-
-/// Executes the built-in `qdev-scope` verification gate.
-pub fn execute_scope_gate(
-    workspace_root: &Path,
-    config: &Config,
-    options: &GateRunOptions,
-) -> Result<GateRunOutcome, QdevError> {
-    let start_time = Instant::now();
-    let commit_sha = resolve_commit_sha(workspace_root);
-    let story_id = resolve_story_id(workspace_root, config, options);
-
-    // Check if qdev-scope is configured with skip = true
-    let configured_gate = config.gates.iter().find(|g| g.id == BUILTIN_GATE_SCOPE);
-    if configured_gate.and_then(|g| g.skip) == Some(true) {
-        let gate_cfg = configured_gate.cloned().unwrap_or_else(|| GateConfig {
-            id: BUILTIN_GATE_SCOPE.to_string(),
-            command: None,
-            timeout_ms: None,
-            depends_on: Vec::new(),
-            output_adapter: None,
-            on_transition: vec!["review".to_string()],
-            verifies: Vec::new(),
-            kind: Some("builtin".to_string()),
-            metric: None,
-            direction: None,
-            skip: Some(true),
-        });
-        let evidence_path = record_gate_evidence(
-            workspace_root,
-            config,
-            &gate_cfg,
-            story_id.as_deref(),
-            commit_sha.as_deref(),
-            "pass",
-            0,
-            0,
-            None,
-            "skipped_locally",
-            None,
-            None,
-            true,
-        )?;
-        return Ok(GateRunOutcome {
-            gate_id: BUILTIN_GATE_SCOPE.to_string(),
-            status: GateStatus::Skip,
-            exit_code: 0,
-            duration_ms: 0,
-            summary: "skipped_locally".to_string(),
-            skipped_locally: true,
-            commit_sha,
-            story_id,
-            stdout: None,
-            stderr: None,
-            agent_instruction: None,
-            failures: Vec::new(),
-            metric: None,
-            constraint_ids: Vec::new(),
-            evidence_path: Some(evidence_path),
-        });
-    }
-
-    let mut target_modules = Vec::new();
-    let mut own_no_gos: Vec<(String, String)> = Vec::new();
-    let mut inherited_no_gos: Vec<(String, String)> = Vec::new();
-
-    if let Some(ref sid) = story_id {
-        if let Ok((_, _, story_file)) = resolve_entity_file(
-            workspace_root,
-            Some(EntityKind::Story),
-            sid,
-            Some(&config.storage),
-        ) {
-            if let Ok(content) = std::fs::read_to_string(&story_file) {
-                if let Ok(frontmatter) = crate::schema::extract_frontmatter(&content) {
-                    if let Some(arr) = frontmatter.get("target_modules").and_then(|v| v.as_array()) {
-                        for item in arr {
-                            if let Some(s) = item.as_str() {
-                                let trimmed = s.trim();
-                                if !trimmed.is_empty() && !target_modules.contains(&trimmed.to_string()) {
-                                    target_modules.push(trimmed.to_string());
-                                }
-                            }
-                        }
-                    }
-
-                    let parse_no_gos = |val: &serde_json::Value, prefix: &str, out: &mut Vec<(String, String)>| {
-                        if let Some(arr) = val.as_array() {
-                            for c in arr {
-                                if c.get("kind").and_then(|v| v.as_str()) == Some("no_go") {
-                                    let cid = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                    let text = c.get("text").and_then(|v| v.as_str())
-                                        .or_else(|| c.get("statement").and_then(|v| v.as_str()))
-                                        .unwrap_or("");
-                                    let full_id = if cid.contains('/') {
-                                        cid.to_string()
-                                    } else {
-                                        format!("{}/{}", prefix, cid)
-                                    };
-                                    out.push((full_id, text.to_string()));
-                                }
-                            }
-                        } else if let Some(obj) = val.as_object() {
-                            if let Some(arr) = obj.get("no_go").and_then(|v| v.as_array()) {
-                                for c in arr {
-                                    let cid = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                    let text = c.get("text").and_then(|v| v.as_str())
-                                        .or_else(|| c.get("statement").and_then(|v| v.as_str()))
-                                        .unwrap_or("");
-                                    let full_id = if cid.contains('/') {
-                                        cid.to_string()
-                                    } else {
-                                        format!("{}/{}", prefix, cid)
-                                    };
-                                    out.push((full_id, text.to_string()));
-                                }
-                            }
-                        }
-                    };
-
-                    if let Some(c_val) = frontmatter.get("constraints") {
-                        parse_no_gos(c_val, sid, &mut own_no_gos);
-                    }
-
-                    if let Some(epic_id) = frontmatter
-                        .get("epic_id")
-                        .and_then(|v| v.as_str())
-                        .filter(|e| !e.is_empty())
-                    {
-                        if let Ok((_, _, epic_file)) = resolve_entity_file(
-                            workspace_root,
-                            Some(EntityKind::Epic),
-                            epic_id,
-                            Some(&config.storage),
-                        ) {
-                            if let Ok(epic_content) = std::fs::read_to_string(&epic_file) {
-                                if let Ok(epic_fm) = crate::schema::extract_frontmatter(&epic_content) {
-                                    if let Some(c_val) = epic_fm.get("constraints") {
-                                        parse_no_gos(c_val, epic_id, &mut inherited_no_gos);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let diff_files = match get_git_diff_files(workspace_root, &config.git.integration_branch) {
-        Ok(files) => files,
-        Err(reason) => {
-            // Fail closed: an unresolvable baseline cannot be treated as "nothing changed",
-            // or committed out-of-scope work would sail through the gate.
-            let scope_gate_config = GateConfig {
-                id: BUILTIN_GATE_SCOPE.to_string(),
-                command: None,
-                timeout_ms: None,
-                depends_on: Vec::new(),
-                output_adapter: None,
-                on_transition: vec!["review".to_string()],
-                verifies: Vec::new(),
-                kind: Some("builtin".to_string()),
-                metric: None,
-                direction: None,
-                skip: None,
-            };
-            let duration_ms = start_time.elapsed().as_millis() as u64;
-            let summary = format!("scope baseline unresolvable: {reason}");
-            let evidence_path = record_gate_evidence(
-                workspace_root,
-                config,
-                &scope_gate_config,
-                story_id.as_deref(),
-                commit_sha.as_deref(),
-                "infra",
-                4,
-                duration_ms,
-                None,
-                &summary,
-                None,
-                None,
-                false,
-            )?;
-            return Ok(GateRunOutcome {
-                gate_id: BUILTIN_GATE_SCOPE.to_string(),
-                status: GateStatus::Infra,
-                exit_code: 4,
-                duration_ms,
-                summary: summary.clone(),
-                skipped_locally: false,
-                commit_sha,
-                story_id,
-                stdout: None,
-                stderr: None,
-                agent_instruction: Some("halt_and_alert".to_string()),
-                failures: vec![GateFailure {
-                    location: "git".to_string(),
-                    message: summary,
-                }],
-                metric: None,
-                constraint_ids: Vec::new(),
-                evidence_path: Some(evidence_path),
-            });
-        }
-    };
-    let registry = ModuleRegistry::from_config(config);
-    let mut failures = Vec::new();
-    let mut constraint_ids = Vec::new();
-
-    let specs_prefix = format!("{}/", config.storage.specs_dir.trim_end_matches('/'));
-    let state_prefix = format!("{}/", config.storage.state_dir.trim_end_matches('/'));
-    let cache_prefix = format!("{}/", config.storage.cache_dir.trim_end_matches('/'));
-
-    let mut sorted_files: Vec<String> = diff_files.into_iter().collect();
-    sorted_files.sort();
-
-    for path_str in sorted_files {
-        let norm = path_str.replace('\\', "/");
-        let norm = norm.strip_prefix("./").unwrap_or(&norm);
-        let norm = norm.strip_prefix('/').unwrap_or(norm);
-
-        if norm.starts_with(".qdev/")
-            || norm.starts_with(".git/")
-            || norm == ".gitignore"
-            || norm == "qdev.toml"
-            || norm == ".qdev.local.toml"
-            || norm.starts_with("docs/")
-            || norm.starts_with(&specs_prefix)
-            || norm.starts_with(&state_prefix)
-            || norm.starts_with(&cache_prefix)
-        {
-            continue;
-        }
-
-        let mut in_scope = false;
-        for tm in &target_modules {
-            if let Some(m_cfg) = registry.get(tm) {
-                if m_cfg.paths.iter().any(|pattern| crate::validate::glob_match(pattern, norm)) {
-                    in_scope = true;
-                    break;
-                }
-            }
-        }
-
-        if !in_scope {
-            let matching_no_go = find_matching_no_go(norm, &registry, &own_no_gos)
-                .or_else(|| find_matching_no_go(norm, &registry, &inherited_no_gos));
-
-            if let Some((cid, text)) = matching_no_go {
-                if !constraint_ids.contains(cid) {
-                    constraint_ids.push(cid.clone());
-                }
-                failures.push(GateFailure {
-                    location: norm.to_string(),
-                    message: format!("Path outside target_modules; violates {}: {}", cid, text),
-                });
-            } else {
-                failures.push(GateFailure {
-                    location: norm.to_string(),
-                    message: "Path outside target_modules; policy: target_modules".to_string(),
-                });
-            }
-        }
-    }
-
-    let duration_ms = start_time.elapsed().as_millis() as u64;
-    let (status, exit_code, summary, agent_instruction) = if failures.is_empty() {
-        (
-            GateStatus::Pass,
-            0,
-            "scope check passed: all changed files within target_modules".to_string(),
-            Some("continue".to_string()),
-        )
-    } else {
-        (
-            GateStatus::Fail,
-            1,
-            format!("scope check failed: {} path(s) outside target_modules", failures.len()),
-            Some("fix_cited_failures".to_string()),
-        )
-    };
-
-    let scope_gate_config = GateConfig {
-        id: BUILTIN_GATE_SCOPE.to_string(),
-        command: None,
-        timeout_ms: None,
-        depends_on: Vec::new(),
-        output_adapter: None,
-        on_transition: vec!["review".to_string()],
-        verifies: Vec::new(),
-        kind: Some("builtin".to_string()),
-        metric: None,
-        direction: None,
-        skip: None,
-    };
-    let ev_status = match status {
-        GateStatus::Pass => "pass",
-        GateStatus::Fail => "fail",
-        GateStatus::Infra => "infra",
-        GateStatus::Skip => "pass",
-    };
-    let output_text = if failures.is_empty() {
-        summary.clone()
-    } else {
-        let failure_lines: Vec<String> = failures.iter().map(|f| format!("{}: {}", f.location, f.message)).collect();
-        format!("{}\n{}", summary, failure_lines.join("\n"))
-    };
-    let evidence_path = record_gate_evidence(
-        workspace_root,
-        config,
-        &scope_gate_config,
-        story_id.as_deref(),
-        commit_sha.as_deref(),
-        ev_status,
-        exit_code,
-        duration_ms,
-        None,
-        &summary,
-        Some(&output_text),
-        None,
-        false,
-    )?;
-
-    Ok(GateRunOutcome {
-        gate_id: BUILTIN_GATE_SCOPE.to_string(),
-        status,
-        exit_code,
-        duration_ms,
-        summary,
-        skipped_locally: false,
-        commit_sha,
-        story_id,
-        stdout: None,
-        stderr: None,
-        agent_instruction,
-        failures,
-        metric: None,
-        constraint_ids,
-        evidence_path: Some(evidence_path),
-    })
-}
-
-fn find_source_files(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let p = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if p.is_dir() && !p.is_symlink() {
-            if name_str.starts_with('.')
-                || name_str == "target"
-                || name_str == "build"
-                || name_str == ".build"
-                || name_str == "node_modules"
-                || name_str == "docs"
-            {
-                continue;
-            }
-            find_source_files(&p, files);
-        } else if p.is_file() {
-            if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                if ext == "rs" || ext == "swift" {
-                    files.push(p);
-                }
-            }
-        }
-    }
-}
-
-/// Executes the built-in `qdev-deps` verification gate.
-pub fn execute_deps_gate(
-    workspace_root: &Path,
-    config: &Config,
-    options: &GateRunOptions,
-) -> Result<GateRunOutcome, QdevError> {
-    let start_time = Instant::now();
-    let commit_sha = resolve_commit_sha(workspace_root);
-    let story_id = resolve_story_id(workspace_root, config, options);
-
-    let configured_gate = config.gates.iter().find(|g| g.id == BUILTIN_GATE_DEPS);
-    if configured_gate.and_then(|g| g.skip) == Some(true) {
-        let gate_cfg = configured_gate.cloned().unwrap_or_else(|| GateConfig {
-            id: BUILTIN_GATE_DEPS.to_string(),
-            command: None,
-            timeout_ms: None,
-            depends_on: Vec::new(),
-            output_adapter: None,
-            on_transition: vec!["review".to_string()],
-            verifies: Vec::new(),
-            kind: Some("builtin".to_string()),
-            metric: None,
-            direction: None,
-            skip: Some(true),
-        });
-        let evidence_path = record_gate_evidence(
-            workspace_root,
-            config,
-            &gate_cfg,
-            story_id.as_deref(),
-            commit_sha.as_deref(),
-            "pass",
-            0,
-            0,
-            None,
-            "skipped_locally",
-            None,
-            None,
-            true,
-        )?;
-        return Ok(GateRunOutcome {
-            gate_id: BUILTIN_GATE_DEPS.to_string(),
-            status: GateStatus::Skip,
-            exit_code: 0,
-            duration_ms: 0,
-            summary: "skipped_locally".to_string(),
-            skipped_locally: true,
-            commit_sha,
-            story_id,
-            stdout: None,
-            stderr: None,
-            agent_instruction: None,
-            failures: Vec::new(),
-            metric: None,
-            constraint_ids: Vec::new(),
-            evidence_path: Some(evidence_path),
-        });
-    }
-
-    let registry = ModuleRegistry::from_config(config);
-    let mut module_map: std::collections::HashMap<String, &ModuleConfig> =
-        std::collections::HashMap::new();
-    for m in &config.modules {
-        module_map.insert(m.id.clone(), m);
-    }
-
-    let mut source_files = Vec::new();
-    find_source_files(workspace_root, &mut source_files);
-    source_files.sort();
-
-    let mut failures = Vec::new();
-
-    for file_path in source_files {
-        let Ok(rel_path) = file_path.strip_prefix(workspace_root) else {
-            continue;
-        };
-        let norm_rel = rel_path.to_string_lossy().replace('\\', "/");
-        let matched_modules = registry.resolve_path(&norm_rel);
-        if matched_modules.is_empty() {
-            continue;
-        }
-
-        let Ok(content) = std::fs::read_to_string(&file_path) else {
-            continue;
-        };
-
-        let is_rust = file_path.extension().and_then(|s| s.to_str()) == Some("rs");
-        let imports = if is_rust {
-            scan_rust_imports(&content)
-        } else {
-            scan_swift_imports(&content)
-        };
-
-        for (line_no, imported_name) in imports {
-            let target_mod = config.modules.iter().find(|m| {
-                m.id == imported_name
-                    || m.id.replace('-', "_") == imported_name
-                    || m.id.eq_ignore_ascii_case(&imported_name)
-            });
-
-            if let Some(target_m) = target_mod {
-                for src_mod_id in &matched_modules {
-                    if src_mod_id == &target_m.id {
-                        continue;
-                    }
-                    let src_m = module_map[src_mod_id];
-
-                    // Check 1: may_depend_on (with hyphen/underscore normalization)
-                    let is_declared_dep = src_m.may_depend_on.iter().any(|dep| {
-                        dep == &target_m.id
-                            || dep.replace('-', "_") == target_m.id.replace('-', "_")
-                            || dep.eq_ignore_ascii_case(&target_m.id)
-                    });
-                    if !is_declared_dep {
-                        let failure = GateFailure {
-                            location: format!("{}:{}", norm_rel, line_no),
-                            message: format!(
-                                "module '{}' imports undeclared dependency '{}' (not in may_depend_on)",
-                                src_m.id, target_m.id
-                            ),
-                        };
-                        if !failures.contains(&failure) {
-                            failures.push(failure);
-                        }
-                    }
-
-                    // Check 2: layer hierarchy (target_layer > source_layer)
-                    if let (Some(la), Some(lb)) = (src_m.layer, target_m.layer) {
-                        if lb > la {
-                            let failure = GateFailure {
-                                location: format!("{}:{}", norm_rel, line_no),
-                                message: format!(
-                                    "module '{}' (layer {}) imports higher layer module '{}' (layer {}) [layer inversion]",
-                                    src_m.id, la, target_m.id, lb
-                                ),
-                            };
-                            if !failures.contains(&failure) {
-                                failures.push(failure);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let duration_ms = start_time.elapsed().as_millis() as u64;
-    let (status, exit_code, summary, agent_instruction) = if failures.is_empty() {
-        (
-            GateStatus::Pass,
-            0,
-            "dependency check passed: zero undeclared imports or layer inversions".to_string(),
-            Some("continue".to_string()),
-        )
-    } else {
-        (
-            GateStatus::Fail,
-            1,
-            format!("dependency check failed with {} violation(s)", failures.len()),
-            Some("fix_cited_failures".to_string()),
-        )
-    };
-
-    let deps_gate_config = GateConfig {
-        id: BUILTIN_GATE_DEPS.to_string(),
-        command: None,
-        timeout_ms: None,
-        depends_on: Vec::new(),
-        output_adapter: None,
-        on_transition: vec!["review".to_string()],
-        verifies: Vec::new(),
-        kind: Some("builtin".to_string()),
-        metric: None,
-        direction: None,
-        skip: None,
-    };
-    let ev_status = match status {
-        GateStatus::Pass => "pass",
-        GateStatus::Fail => "fail",
-        GateStatus::Infra => "infra",
-        GateStatus::Skip => "pass",
-    };
-    let output_text = if failures.is_empty() {
-        summary.clone()
-    } else {
-        let failure_lines: Vec<String> = failures.iter().map(|f| format!("{}: {}", f.location, f.message)).collect();
-        format!("{}\n{}", summary, failure_lines.join("\n"))
-    };
-    let evidence_path = record_gate_evidence(
-        workspace_root,
-        config,
-        &deps_gate_config,
-        story_id.as_deref(),
-        commit_sha.as_deref(),
-        ev_status,
-        exit_code,
-        duration_ms,
-        None,
-        &summary,
-        Some(&output_text),
-        None,
-        false,
-    )?;
-
-    Ok(GateRunOutcome {
-        gate_id: BUILTIN_GATE_DEPS.to_string(),
-        status,
-        exit_code,
-        duration_ms,
-        summary,
-        skipped_locally: false,
-        commit_sha,
-        story_id,
-        stdout: None,
-        stderr: None,
-        agent_instruction,
-        failures,
-        metric: None,
-        constraint_ids: Vec::new(),
-        evidence_path: Some(evidence_path),
-    })
-}
-
-/// Executes the built-in `qdev-hygiene` verification gate.
-pub fn execute_hygiene_gate(
-    workspace_root: &Path,
-    config: &Config,
-    options: &GateRunOptions,
-) -> Result<GateRunOutcome, QdevError> {
-    let start_time = Instant::now();
-    let commit_sha = resolve_commit_sha(workspace_root);
-    let story_id = resolve_story_id(workspace_root, config, options);
-
-    let configured_gate = config.gates.iter().find(|g| g.id == BUILTIN_GATE_HYGIENE);
-    if configured_gate.and_then(|g| g.skip) == Some(true) {
-        let gate_cfg = configured_gate.cloned().unwrap_or_else(|| GateConfig {
-            id: BUILTIN_GATE_HYGIENE.to_string(),
-            command: None,
-            timeout_ms: None,
-            depends_on: Vec::new(),
-            output_adapter: None,
-            on_transition: vec!["review".to_string()],
-            verifies: Vec::new(),
-            kind: Some("builtin".to_string()),
-            metric: None,
-            direction: None,
-            skip: Some(true),
-        });
-        let evidence_path = record_gate_evidence(
-            workspace_root,
-            config,
-            &gate_cfg,
-            story_id.as_deref(),
-            commit_sha.as_deref(),
-            "pass",
-            0,
-            0,
-            None,
-            "skipped_locally",
-            None,
-            None,
-            true,
-        )?;
-        return Ok(GateRunOutcome {
-            gate_id: BUILTIN_GATE_HYGIENE.to_string(),
-            status: GateStatus::Skip,
-            exit_code: 0,
-            duration_ms: 0,
-            summary: "skipped_locally".to_string(),
-            skipped_locally: true,
-            commit_sha,
-            story_id,
-            stdout: None,
-            stderr: None,
-            agent_instruction: None,
-            failures: Vec::new(),
-            metric: None,
-            constraint_ids: Vec::new(),
-            evidence_path: Some(evidence_path),
-        });
-    }
-
-    let is_git = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(workspace_root)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    let hygiene_options = crate::hygiene::HygieneCheckOptions {
-        diff: is_git,
-        paths: Vec::new(),
-    };
-    let hygiene_outcome = crate::hygiene::check_hygiene(workspace_root, config, &hygiene_options)?;
-
-    let duration_ms = start_time.elapsed().as_millis() as u64;
-
-    let failures: Vec<GateFailure> = hygiene_outcome
-        .findings
-        .iter()
-        .map(|f| GateFailure {
-            location: f.location.clone(),
-            message: format!("[{}] {}", f.rule_id, f.excerpt),
-        })
-        .collect();
-
-    let (status, exit_code, summary, agent_instruction) = if failures.is_empty() {
-        (
-            GateStatus::Pass,
-            0,
-            "hygiene check passed: 0 findings".to_string(),
-            None,
-        )
-    } else {
-        (
-            GateStatus::Fail,
-            1,
-            format!("hygiene check failed with {} finding(s)", failures.len()),
-            Some("fix_cited_failures".to_string()),
-        )
-    };
-
-    let hygiene_gate_config = configured_gate.cloned().unwrap_or_else(|| GateConfig {
-        id: BUILTIN_GATE_HYGIENE.to_string(),
-        command: None,
-        timeout_ms: None,
-        depends_on: Vec::new(),
-        output_adapter: None,
-        on_transition: vec!["review".to_string()],
-        verifies: Vec::new(),
-        kind: Some("builtin".to_string()),
-        metric: None,
-        direction: None,
-        skip: None,
-    });
-
-    let ev_status = match status {
-        GateStatus::Pass => "pass",
-        GateStatus::Fail => "fail",
-        GateStatus::Infra => "infra",
-        GateStatus::Skip => "pass",
-    };
-
-    let output_text = if failures.is_empty() {
-        summary.clone()
-    } else {
-        let failure_lines: Vec<String> = failures
-            .iter()
-            .map(|f| format!("{}: {}", f.location, f.message))
-            .collect();
-        format!("{}\n{}", summary, failure_lines.join("\n"))
-    };
-
-    let evidence_path = record_gate_evidence(
-        workspace_root,
-        config,
-        &hygiene_gate_config,
-        story_id.as_deref(),
-        commit_sha.as_deref(),
-        ev_status,
-        exit_code,
-        duration_ms,
-        None,
-        &summary,
-        Some(&output_text),
-        None,
-        false,
-    )?;
-
-    Ok(GateRunOutcome {
-        gate_id: BUILTIN_GATE_HYGIENE.to_string(),
-        status,
-        exit_code,
-        duration_ms,
-        summary,
-        skipped_locally: false,
-        commit_sha,
-        story_id,
-        stdout: None,
-        stderr: None,
-        agent_instruction,
-        failures,
-        metric: None,
-        constraint_ids: Vec::new(),
-        evidence_path: Some(evidence_path),
-    })
 }

@@ -69,7 +69,10 @@ pub fn relativize_path(path_str: &str, workspace_root: Option<&Path>) -> String 
 
 /// Parses the target portion following `panicked at ` in Cargo output.
 /// Returns (location, optional_inline_message).
-fn parse_cargo_panic_target(after_panic: &str, workspace_root: Option<&Path>) -> (String, Option<String>) {
+fn parse_cargo_panic_target(
+    after_panic: &str,
+    workspace_root: Option<&Path>,
+) -> (String, Option<String>) {
     let trimmed = after_panic.trim();
     if trimmed.starts_with('\'') {
         // e.g. 'assertion failed: left == right', crates/foo/bar.rs:55:13
@@ -196,18 +199,18 @@ pub fn parse_cargo_output(
         format!("cargo test exited with code {}", exit_code)
     } else if found_summary {
         if total_failed > 0 {
-            format!("{} of {} tests failed", total_failed, total_passed + total_failed)
+            format!(
+                "{} of {} tests failed",
+                total_failed,
+                total_passed + total_failed
+            )
         } else if total_passed > 0 {
             format!("{} tests passed", total_passed)
         } else {
             "tests passed".to_string()
         }
     } else if !failures.is_empty() {
-        format!(
-            "{} of {} tests failed",
-            failures.len(),
-            failures.len()
-        )
+        format!("{} of {} tests failed", failures.len(), failures.len())
     } else if exit_code == 0 {
         "tests passed".to_string()
     } else {

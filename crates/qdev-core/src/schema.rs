@@ -576,9 +576,7 @@ pub fn evidence_bundle_schema_json() -> serde_json::Value {
 
 /// Validates a parsed JSON evidence bundle value against the evidence schema,
 /// returning structured `ValidationError` items.
-pub fn validate_evidence_detailed(
-    value: &serde_json::Value,
-) -> Result<(), Vec<ValidationError>> {
+pub fn validate_evidence_detailed(value: &serde_json::Value) -> Result<(), Vec<ValidationError>> {
     let schema_json = evidence_bundle_schema_json();
     let validator = jsonschema::validator_for(&schema_json).map_err(|e| {
         vec![ValidationError {
@@ -609,4 +607,3 @@ pub fn validate_evidence(value: &serde_json::Value) -> Result<(), Vec<String>> {
     validate_evidence_detailed(value)
         .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect())
 }
-

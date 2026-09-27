@@ -67,6 +67,9 @@ pub fn review_epic_with_gates(
     epic_id: &str,
     required_gate_ids: &[String],
 ) -> Result<EpicReview, QdevError> {
+    // `qdev review epic` is a reporting path: it must surface retained (stale) rows and flag
+    // them, the same class of use `qdev get`/`qdev list` document.
+    #[allow(clippy::disallowed_methods)]
     let stories = store.list_entities(&EntityFilter {
         kind: Some(EntityKind::Story),
         epic_id: Some(epic_id.to_string()),

@@ -1237,9 +1237,7 @@ pub fn close_sprint(options: &SprintCloseOptions) -> Result<SprintCloseResult, Q
     drop(_lock_guard);
     // A reason implies an attributed decision, for any requested terminal status — a
     // completed close with a reason is equally a recorded ruling.
-    let decision_id = if alternate_reason.is_none() {
-        None
-    } else {
+    let decision_id = if let Some(reason) = alternate_reason {
         let decision = crate::decision::log_decision_with_store(
             options.workspace_root,
             Some(options.storage),
@@ -1254,7 +1252,7 @@ pub fn close_sprint(options: &SprintCloseOptions) -> Result<SprintCloseResult, Q
                 },
                 topic: Some(format!("Sprint {} {}", options.sprint, status)),
                 context: None,
-                ruling: alternate_reason.unwrap().to_string(),
+                ruling: reason.to_string(),
                 author: options.author.clone(),
                 title: None,
                 timestamp: None,
@@ -1276,6 +1274,8 @@ pub fn close_sprint(options: &SprintCloseOptions) -> Result<SprintCloseResult, Q
                 ));
             }
         }
+    } else {
+        None
     };
 
     Ok(SprintCloseResult {

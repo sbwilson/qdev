@@ -4,9 +4,11 @@
 //! allowlists), integration branch remote freshness, merge-base staleness limits, and zero
 //! blocking validation errors, providing exact Git remediation commands on refusal (exit 3).
 
+use crate::gate::git::{
+    merge_base, ref_exists, run_git, status_porcelain_untracked_all, verify_ref,
+};
 use std::collections::HashSet;
 use std::path::Path;
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -128,15 +130,18 @@ pub fn is_metadata_exempt(rel_path: &str, storage: &StorageConfig) -> bool {
     };
 
     let specs = normalize_dir(&storage.specs_dir);
-    if !specs.is_empty() && (normalized == specs || normalized.starts_with(&format!("{}/", specs))) {
+    if !specs.is_empty() && (normalized == specs || normalized.starts_with(&format!("{}/", specs)))
+    {
         return true;
     }
     let state = normalize_dir(&storage.state_dir);
-    if !state.is_empty() && (normalized == state || normalized.starts_with(&format!("{}/", state))) {
+    if !state.is_empty() && (normalized == state || normalized.starts_with(&format!("{}/", state)))
+    {
         return true;
     }
     let cache = normalize_dir(&storage.cache_dir);
-    if !cache.is_empty() && (normalized == cache || normalized.starts_with(&format!("{}/", cache))) {
+    if !cache.is_empty() && (normalized == cache || normalized.starts_with(&format!("{}/", cache)))
+    {
         return true;
     }
 
@@ -165,21 +170,28 @@ pub fn resolve_story_target_modules(
         Some(EntityKind::Story),
         story_id,
         Some(&config.storage),
-    ).map_err(|_| {
-        QdevError::usage_error(format!("Story '{}' not found", story_id))
-    })?;
+    )
+    .map_err(|_| QdevError::usage_error(format!("Story '{}' not found", story_id)))?;
 
     let content = std::fs::read_to_string(&story_file).map_err(|e| {
         QdevError::infrastructure_failure(
             "io_error",
-            format!("Failed to read story file '{}': {}", story_file.display(), e),
+            format!(
+                "Failed to read story file '{}': {}",
+                story_file.display(),
+                e
+            ),
         )
     })?;
 
     let frontmatter = extract_frontmatter(&content).map_err(|e| {
         QdevError::logical_failure(
             "schema_error",
-            format!("Failed to parse story frontmatter in '{}': {}", story_file.display(), e),
+            format!(
+                "Failed to parse story frontmatter in '{}': {}",
+                story_file.display(),
+                e
+            ),
         )
     })?;
 
@@ -209,16 +221,12 @@ pub fn check_working_tree_scope(
         return Ok(None);
     }
 
-    let status_output = Command::new("git")
-        .args(["-c", "core.quotePath=false", "status", "--porcelain=v1", "-uall"])
-        .current_dir(workspace_root)
-        .output()
-        .map_err(|e| {
-            QdevError::infrastructure_failure(
-                "git_unavailable",
-                format!("Failed to run 'git status': {}", e),
-            )
-        })?;
+    let status_output = status_porcelain_untracked_all(workspace_root).map_err(|e| {
+        QdevError::infrastructure_failure(
+            "git_unavailable",
+            format!("Failed to run 'git status': {}", e),
+        )
+    })?;
 
     if !status_output.status.success() {
         return Err(QdevError::infrastructure_failure(
@@ -264,7 +272,12 @@ pub fn check_working_tree_scope(
     } else {
         match find_active_lease_with_storage(workspace_root, Some(&config.storage)) {
             Ok(lease) => {
-                let modules = resolve_story_target_modules(workspace_root, config, opt_store, &lease.story_id)?;
+                let modules = resolve_story_target_modules(
+                    workspace_root,
+                    config,
+                    opt_store,
+                    &lease.story_id,
+                )?;
                 ActiveScope::Story(lease.story_id, modules)
             }
             Err(e) => {
@@ -378,23 +391,16 @@ pub fn check_branch_freshness(
         "trunk" => {
             // Verify current branch is not behind upstream tracking ref
             let tracking_ref = format!("refs/remotes/{}/{}", remote, current_branch);
-            let verify = Command::new("git")
-                .args(["rev-parse", "--verify", "--quiet", &tracking_ref])
-                .current_dir(workspace_root)
-                .output()
-                .map_err(|e| {
-                    QdevError::infrastructure_failure(
-                        "git_unavailable",
-                        format!("Failed to verify remote tracking ref: {}", e),
-                    )
-                })?;
+            let verify = verify_ref(workspace_root, &tracking_ref).map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "git_unavailable",
+                    format!("Failed to verify remote tracking ref: {}", e),
+                )
+            })?;
 
             if verify.status.success() {
                 let rev_spec = format!("HEAD..{}/{}", remote, current_branch);
-                let count_out = Command::new("git")
-                    .args(["rev-list", "--count", &rev_spec])
-                    .current_dir(workspace_root)
-                    .output()
+                let count_out = run_git(workspace_root, &["rev-list", "--count", &rev_spec])
                     .map_err(|e| {
                         QdevError::infrastructure_failure(
                             "git_unavailable",
@@ -403,7 +409,9 @@ pub fn check_branch_freshness(
                     })?;
 
                 if count_out.status.success() {
-                    let count_str = String::from_utf8_lossy(&count_out.stdout).trim().to_string();
+                    let count_str = String::from_utf8_lossy(&count_out.stdout)
+                        .trim()
+                        .to_string();
                     let behind_count: u32 = count_str.parse().unwrap_or(0);
                     if behind_count > 0 {
                         let remediation = format!("git pull {} {}", remote, current_branch);
@@ -425,20 +433,10 @@ pub fn check_branch_freshness(
             // "story-branch" mode
             let integration_branch = &config.git.integration_branch;
 
-            let local_exists = Command::new("git")
-                .args(["rev-parse", "--verify", "--quiet", integration_branch])
-                .current_dir(workspace_root)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
+            let local_exists = ref_exists(workspace_root, integration_branch);
 
             let remote_ref = format!("refs/remotes/{}/{}", remote, integration_branch);
-            let remote_exists = Command::new("git")
-                .args(["rev-parse", "--verify", "--quiet", &remote_ref])
-                .current_dir(workspace_root)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
+            let remote_exists = ref_exists(workspace_root, &remote_ref);
 
             if !local_exists && !remote_exists {
                 diagnostics.push(PreflightDiagnostic {
@@ -457,10 +455,7 @@ pub fn check_branch_freshness(
             // 1. Check if remote tracking ref exists and local integration branch is behind
             if remote_exists && local_exists {
                 let rev_spec = format!("{}..{}/{}", integration_branch, remote, integration_branch);
-                let count_out = Command::new("git")
-                    .args(["rev-list", "--count", &rev_spec])
-                    .current_dir(workspace_root)
-                    .output()
+                let count_out = run_git(workspace_root, &["rev-list", "--count", &rev_spec])
                     .map_err(|e| {
                         QdevError::infrastructure_failure(
                             "git_unavailable",
@@ -469,7 +464,9 @@ pub fn check_branch_freshness(
                     })?;
 
                 if count_out.status.success() {
-                    let count_str = String::from_utf8_lossy(&count_out.stdout).trim().to_string();
+                    let count_str = String::from_utf8_lossy(&count_out.stdout)
+                        .trim()
+                        .to_string();
                     let behind_count: u32 = count_str.parse().unwrap_or(0);
                     if behind_count > 0 {
                         let remediation = if current_branch == *integration_branch {
@@ -509,46 +506,40 @@ pub fn check_branch_freshness(
             }
 
             // 2. Check merge-base staleness against local integration branch
-            let verify_local_ib = Command::new("git")
-                .args(["rev-parse", "--verify", "--quiet", integration_branch])
-                .current_dir(workspace_root)
-                .output()
-                .map_err(|e| {
+            let verify_local_ib = verify_ref(workspace_root, integration_branch).map_err(|e| {
+                QdevError::infrastructure_failure(
+                    "git_unavailable",
+                    format!("Failed to check integration branch: {}", e),
+                )
+            })?;
+
+            if verify_local_ib.status.success() {
+                let mb_output = merge_base(workspace_root, integration_branch).map_err(|e| {
                     QdevError::infrastructure_failure(
                         "git_unavailable",
-                        format!("Failed to check integration branch: {}", e),
+                        format!("Failed to compute merge-base: {}", e),
                     )
                 })?;
 
-            if verify_local_ib.status.success() {
-                let mb_output = Command::new("git")
-                    .args(["merge-base", "HEAD", integration_branch])
-                    .current_dir(workspace_root)
-                    .output()
-                    .map_err(|e| {
-                        QdevError::infrastructure_failure(
-                            "git_unavailable",
-                            format!("Failed to compute merge-base: {}", e),
-                        )
-                    })?;
-
                 if mb_output.status.success() {
-                    let mb = String::from_utf8_lossy(&mb_output.stdout).trim().to_string();
+                    let mb = String::from_utf8_lossy(&mb_output.stdout)
+                        .trim()
+                        .to_string();
                     if !mb.is_empty() {
                         let staleness_spec = format!("{}..{}", mb, integration_branch);
-                        let count_out = Command::new("git")
-                            .args(["rev-list", "--count", &staleness_spec])
-                            .current_dir(workspace_root)
-                            .output()
-                            .map_err(|e| {
-                                QdevError::infrastructure_failure(
-                                    "git_unavailable",
-                                    format!("Failed to count staleness commits: {}", e),
-                                )
-                            })?;
+                        let count_out =
+                            run_git(workspace_root, &["rev-list", "--count", &staleness_spec])
+                                .map_err(|e| {
+                                    QdevError::infrastructure_failure(
+                                        "git_unavailable",
+                                        format!("Failed to count staleness commits: {}", e),
+                                    )
+                                })?;
 
                         if count_out.status.success() {
-                            let count_str = String::from_utf8_lossy(&count_out.stdout).trim().to_string();
+                            let count_str = String::from_utf8_lossy(&count_out.stdout)
+                                .trim()
+                                .to_string();
                             let staleness: u32 = count_str.parse().unwrap_or(0);
                             let max_staleness = config.git.max_integration_staleness_commits;
                             if staleness > max_staleness {
@@ -589,7 +580,9 @@ pub fn check_validation_health(
     let findings: Vec<FindingRecord> = if let Some(store) = opt_store {
         run_validation(store, workspace_root, config)?
     } else {
-        let db_path = workspace_root.join(&config.storage.cache_dir).join("cache.sqlite");
+        let db_path = workspace_root
+            .join(&config.storage.cache_dir)
+            .join("cache.sqlite");
         if db_path.is_file() {
             if let Ok(store) = crate::store::SqliteStore::open(&db_path) {
                 run_validation(&store, workspace_root, config)?
@@ -603,7 +596,8 @@ pub fn check_validation_health(
         }
     };
 
-    let error_findings: Vec<&FindingRecord> = findings.iter().filter(|f| f.severity == "error").collect();
+    let error_findings: Vec<&FindingRecord> =
+        findings.iter().filter(|f| f.severity == "error").collect();
     if error_findings.is_empty() {
         return Ok(None);
     }
@@ -620,7 +614,11 @@ pub fn check_validation_health(
     let message = format!(
         "workspace has {} blocking validation error(s):\n{}",
         error_findings.len(),
-        details.iter().map(|d| format!("    {}", d)).collect::<Vec<_>>().join("\n")
+        details
+            .iter()
+            .map(|d| format!("    {}", d))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     Ok(Some(PreflightDiagnostic {
@@ -640,14 +638,12 @@ pub fn run_preflight(
     opt_store: Option<&dyn Store>,
 ) -> Result<PreflightOutcome, QdevError> {
     // 0. Verify git repository existence
-    let is_git_repo = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(workspace_root)
-        .output();
+    let is_git_repo = run_git(workspace_root, &["rev-parse", "--is-inside-work-tree"]);
 
     match is_git_repo {
         Ok(output) => {
-            if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "true" {
+            if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "true"
+            {
                 return Err(QdevError::infrastructure_failure(
                     "not_a_git_repository",
                     "Workspace is not a git repository",
@@ -666,7 +662,8 @@ pub fn run_preflight(
     let mut remediation_commands = Vec::new();
 
     // 1. Working tree scope check
-    if let Some(scope_diag) = check_working_tree_scope(workspace_root, config, opt_store, options)? {
+    if let Some(scope_diag) = check_working_tree_scope(workspace_root, config, opt_store, options)?
+    {
         if let Some(ref cmd) = scope_diag.remediation {
             if !remediation_commands.contains(cmd) {
                 remediation_commands.push(cmd.clone());
@@ -709,14 +706,18 @@ pub fn run_preflight(
     if diagnostics.is_empty() {
         Ok(PreflightOutcome {
             status: PreflightStatus::Pass,
-            summary: "working tree in scope, integration branch fresh, zero blocking findings".to_string(),
+            summary: "working tree in scope, integration branch fresh, zero blocking findings"
+                .to_string(),
             diagnostics: Vec::new(),
             remediation_commands: Vec::new(),
         })
     } else {
         Ok(PreflightOutcome {
             status: PreflightStatus::Refusal,
-            summary: format!("preflight checks failed with {} issue(s)", diagnostics.len()),
+            summary: format!(
+                "preflight checks failed with {} issue(s)",
+                diagnostics.len()
+            ),
             diagnostics,
             remediation_commands,
         })

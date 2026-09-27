@@ -1,6 +1,8 @@
 //! Module root for gate execution models, options, outcomes, and runner.
 
 pub mod adapter;
+pub mod builtin;
+pub mod git;
 pub mod process;
 pub mod result;
 pub mod ring_buffer;
@@ -18,10 +20,11 @@ pub use adapter::{parse_with_adapter, validate_adapter_name, VALID_ADAPTERS};
 pub use result::GateResultDocument;
 pub use ring_buffer::HeadTailBuffer;
 pub use runner::{
-    execute_configured_command, execute_deps_gate, execute_gate, execute_gate_set, execute_hygiene_gate, execute_scope_gate,
-    get_gate_list, resolve_commit_sha, resolve_gate_execution_order, scan_rust_imports,
-    scan_swift_imports, validate_gate_dependencies, GateRunOptions, BUILTIN_GATE_DEPS,
-    BUILTIN_GATE_HYGIENE, BUILTIN_GATE_SCOPE,
+    execute_configured_command, execute_deps_gate, execute_gate, execute_gate_set,
+    execute_hygiene_gate, execute_scope_gate, get_gate_list, resolve_commit_sha,
+    resolve_gate_execution_order, scan_rust_imports, scan_swift_imports,
+    validate_gate_dependencies, GateRunOptions, BUILTIN_GATE_DEPS, BUILTIN_GATE_HYGIENE,
+    BUILTIN_GATE_SCOPE,
 };
 
 /// Gate execution status taxonomy conforming to AD-5 and compliance & safety specification.
@@ -149,7 +152,11 @@ impl GateRunOutcome {
 
     /// Console receipt conforming to docs/compliance-and-safety.md §2.
     pub fn receipt(&self) -> String {
-        let clean_summary = self.summary.split_whitespace().collect::<Vec<_>>().join(" ");
+        let clean_summary = self
+            .summary
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         match self.status {
             GateStatus::Pass => {
                 let sha = self
@@ -207,7 +214,10 @@ impl GateRunOutcome {
                 }
             }
             GateStatus::Infra => {
-                format!("[INFRA] {} | {} | halt and alert", self.gate_id, clean_summary)
+                format!(
+                    "[INFRA] {} | {} | halt and alert",
+                    self.gate_id, clean_summary
+                )
             }
             GateStatus::Skip => {
                 if clean_summary.is_empty() {
@@ -424,7 +434,8 @@ pub fn read_baseline(
     integration_branch: &str,
     gate_id: &str,
 ) -> Result<Option<RatchetBaseline>, QdevError> {
-    let baseline_path = resolve_baseline_path(workspace_root, state_dir, integration_branch, gate_id);
+    let baseline_path =
+        resolve_baseline_path(workspace_root, state_dir, integration_branch, gate_id);
     if !baseline_path.exists() {
         return Ok(None);
     }
@@ -545,7 +556,9 @@ pub fn evaluate_ratchet(
 
             if is_regression {
                 let delta_str = match dir {
-                    RatchetDirection::MustNotIncrease => format!("+{}", format_metric_number(delta)),
+                    RatchetDirection::MustNotIncrease => {
+                        format!("+{}", format_metric_number(delta))
+                    }
                     RatchetDirection::MustNotDecrease => format_metric_number(delta),
                 };
                 let action = match dir {
@@ -637,7 +650,10 @@ pub fn resolve_collision_free_evidence_path(
         .filter(|s| !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains(".."))
         .unwrap_or("_workspace");
     let clean_state = state_dir.trim_matches('/').replace('\\', "/");
-    let dir = workspace_root.join(&clean_state).join("evidence").join(target);
+    let dir = workspace_root
+        .join(&clean_state)
+        .join("evidence")
+        .join(target);
     let base_name = format!("{}-{}", short_sha, gate_id);
 
     let first_cand = format!("{}.json", base_name);
@@ -670,7 +686,10 @@ pub fn write_evidence_bundle(
     bundle.validate().map_err(|errs| {
         QdevError::logical_failure(
             "invalid_evidence_bundle",
-            format!("Evidence bundle failed schema validation: {}", errs.join("; ")),
+            format!(
+                "Evidence bundle failed schema validation: {}",
+                errs.join("; ")
+            ),
         )
     })?;
 

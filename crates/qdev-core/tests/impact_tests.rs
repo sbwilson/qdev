@@ -2,7 +2,9 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use qdev_core::config::{Config, GateConfig, GitConfig, HygieneConfig, ModuleConfig, StorageConfig};
+use qdev_core::config::{
+    Config, GateConfig, GitConfig, HygieneConfig, ModuleConfig, StorageConfig,
+};
 use qdev_core::impact::{format_impact_text, run_impact, ImpactOptions};
 use qdev_core::lease::claim_story;
 use qdev_core::schema::EntityKind;
@@ -42,7 +44,9 @@ fn setup_repo(root: &Path) -> (Config, SqliteStore) {
 
     let cache_path = root.join(".qdev/cache/cache.sqlite");
     let store = SqliteStore::open(&cache_path).unwrap();
-    store.with_conn_mut(|conn| qdev_core::create_schema(conn)).unwrap();
+    store
+        .with_conn_mut(|conn| qdev_core::create_schema(conn))
+        .unwrap();
 
     let config = Config {
         storage: StorageConfig {
@@ -326,7 +330,10 @@ fn test_impact_by_story_id_with_relations_and_gates() {
     assert_eq!(outcome.dependents.len(), 2);
     assert_eq!(outcome.dependents[0].id, "E12S8");
     assert_eq!(outcome.dependents[0].depth, 1);
-    assert_eq!(outcome.dependents[0].relation, Some("depends_on".to_string()));
+    assert_eq!(
+        outcome.dependents[0].relation,
+        Some("depends_on".to_string())
+    );
 
     assert_eq!(outcome.dependents[1].id, "E12S9");
     assert_eq!(outcome.dependents[1].depth, 2);
@@ -448,7 +455,14 @@ fn test_impact_lease_fallback() {
         .unwrap();
 
     // Claim lease for E12S4
-    claim_story(root, "E12S4", &author(), Some(&config.storage), Some(&store)).unwrap();
+    claim_story(
+        root,
+        "E12S4",
+        &author(),
+        Some(&config.storage),
+        Some(&store),
+    )
+    .unwrap();
 
     let options = ImpactOptions {
         story: None,
@@ -671,7 +685,11 @@ target_modules:
     fs::write(root.join("docs/specs/stories/E12S4.md"), story_yaml).unwrap();
 
     // Create a binary/unreadable file in bridge
-    fs::write(root.join("crates/bridge/src/binary.dat"), [0xFF, 0xFE, 0x00, 0xFD]).unwrap();
+    fs::write(
+        root.join("crates/bridge/src/binary.dat"),
+        [0xFF, 0xFE, 0x00, 0xFD],
+    )
+    .unwrap();
 
     let options = ImpactOptions {
         story: Some("E12S4".to_string()),

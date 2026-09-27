@@ -1,7 +1,7 @@
+use crate::gate::git::run_git;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -50,11 +50,7 @@ pub struct ReleasePayload {
 /// Discovers the git common directory for a repository or linked worktree.
 /// Resolves via `git rev-parse --git-common-dir` or parses `.git` file (`gitdir: ...` / `commondir`).
 pub fn discover_git_common_dir(workspace_root: &Path) -> PathBuf {
-    if let Ok(output) = Command::new("git")
-        .args(["rev-parse", "--git-common-dir"])
-        .current_dir(workspace_root)
-        .output()
-    {
+    if let Ok(output) = run_git(workspace_root, &["rev-parse", "--git-common-dir"]) {
         if output.status.success() {
             let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path_str.is_empty() {
@@ -118,11 +114,7 @@ pub fn discover_git_common_dir(workspace_root: &Path) -> PathBuf {
 
 /// Discovers current git branch.
 pub fn discover_git_branch(workspace_root: &Path) -> String {
-    if let Ok(output) = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(workspace_root)
-        .output()
-    {
+    if let Ok(output) = run_git(workspace_root, &["rev-parse", "--abbrev-ref", "HEAD"]) {
         if output.status.success() {
             let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !s.is_empty() {

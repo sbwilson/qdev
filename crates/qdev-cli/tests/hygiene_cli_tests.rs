@@ -129,7 +129,10 @@ fn test_cli_memoir_banner_comment_finding() {
     assert_eq!(findings[0]["file"], "src/banner.rs");
     assert_eq!(findings[0]["line"], 1);
     assert_eq!(findings[0]["rule_id"], "story_banner");
-    assert_eq!(findings[0]["excerpt"], "// ⭐ **STORY 2.10 — FIRST import**");
+    assert_eq!(
+        findings[0]["excerpt"],
+        "// ⭐ **STORY 2.10 — FIRST import**"
+    );
 }
 
 #[test]
@@ -407,11 +410,7 @@ fn test_cli_bare_workspace_traversal_multi_language() {
     // Create a Swift file with an epic banner
     let swift_file = root.join("Sources/App/main.swift");
     fs::create_dir_all(swift_file.parent().unwrap()).unwrap();
-    fs::write(
-        &swift_file,
-        "// ⭐ EPIC 3 - core setup\nfunc run() {}\n",
-    )
-    .unwrap();
+    fs::write(&swift_file, "// ⭐ EPIC 3 - core setup\nfunc run() {}\n").unwrap();
 
     // Create a Python file with a review round
     let py_file = root.join("scripts/tool.py");
@@ -431,9 +430,21 @@ fn test_cli_bare_workspace_traversal_multi_language() {
         .code(1);
 
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
-    assert!(stdout.contains("main.swift"), "stdout must contain main.swift: {}", stdout);
-    assert!(stdout.contains("tool.py"), "stdout must contain tool.py: {}", stdout);
-    assert!(stdout.contains("Hygiene check: 2 findings"), "stdout must report 2 findings: {}", stdout);
+    assert!(
+        stdout.contains("main.swift"),
+        "stdout must contain main.swift: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("tool.py"),
+        "stdout must contain tool.py: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Hygiene check: 2 findings"),
+        "stdout must report 2 findings: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -468,4 +479,3 @@ fn test_cli_diff_with_explicit_paths() {
     assert!(!stdout.contains("dirty2.rs"));
     assert!(stdout.contains("Hygiene check: 1 finding"));
 }
-

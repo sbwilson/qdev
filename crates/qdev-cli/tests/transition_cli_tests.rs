@@ -1302,7 +1302,10 @@ updated_by:
     assert!(evidence_dir.exists(), "Evidence directory must exist");
     let file_names: Vec<String> = fs::read_dir(evidence_dir)
         .unwrap()
-        .filter_map(|e| e.ok().map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .filter_map(|e| {
+            e.ok()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        })
         .collect();
     assert!(!file_names.is_empty(), "Evidence bundle must be written");
     assert!(
@@ -1316,7 +1319,9 @@ updated_by:
         file_names
     );
     assert!(
-        file_names.iter().any(|f| f.ends_with("-cli-bound-gate.json")),
+        file_names
+            .iter()
+            .any(|f| f.ends_with("-cli-bound-gate.json")),
         "Evidence bundle must contain custom gate evidence: {:?}",
         file_names
     );
@@ -1438,7 +1443,9 @@ updated_by:
         ])
         .assert()
         .code(3)
-        .stdout(predicate::str::contains("\"code\": \"needs_justification\""));
+        .stdout(predicate::str::contains(
+            "\"code\": \"needs_justification\"",
+        ));
 
     // 3. Non-interactive with agent: still fails with exit 3 (tty_required checked first on non-TTY pipe)
     let mut cmd_agent = Command::cargo_bin("qdev").unwrap();

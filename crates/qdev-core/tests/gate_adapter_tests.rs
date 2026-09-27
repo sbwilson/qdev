@@ -12,7 +12,9 @@ fn test_adapter_name_validation() {
 
     let err = validate_adapter_name("unsupported").unwrap_err();
     assert_eq!(err.exit_code(), qdev_core::ExitCode::UsageError);
-    assert!(err.to_string().contains("Unknown output adapter 'unsupported'"));
+    assert!(err
+        .to_string()
+        .contains("Unknown output adapter 'unsupported'"));
     assert_eq!(VALID_ADAPTERS, &["json", "cargo", "xcodebuild"]);
 }
 
@@ -80,7 +82,9 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
     assert_eq!(parsed.status, GateStatus::Fail);
     assert_eq!(parsed.failures.len(), 1);
     assert_eq!(parsed.failures[0].location, "tests/profile.rs:25");
-    assert!(parsed.failures[0].message.contains("can\\'t find user\\'s profile"));
+    assert!(parsed.failures[0]
+        .message
+        .contains("can\\'t find user\\'s profile"));
 }
 
 #[test]
@@ -120,7 +124,10 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 fn test_relativize_path_boundary_check() {
     let root = Path::new("/app");
     // /app_lib/src.rs should NOT be relativized against /app because it is not a boundary match
-    assert_eq!(relativize_path("/app_lib/src.rs", Some(root)), "/app_lib/src.rs");
+    assert_eq!(
+        relativize_path("/app_lib/src.rs", Some(root)),
+        "/app_lib/src.rs"
+    );
     // /app/src.rs SHOULD be relativized to src.rs
     assert_eq!(relativize_path("/app/src.rs", Some(root)), "src.rs");
 }

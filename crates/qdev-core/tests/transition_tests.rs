@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use qdev_core::store::{SqliteStore, Store};
 use qdev_core::{
-    acquire_write_lock, classify_transition, Author, EntityKind, EntityRecord, ExitCode, QdevError,
-    Interactivity, StoryState, TransitionContext, TransitionEngine, TransitionGateHook, TransitionKind, TransitionOptions,
+    acquire_write_lock, classify_transition, Author, EntityKind, EntityRecord, ExitCode,
+    Interactivity, QdevError, StoryState, TransitionContext, TransitionEngine, TransitionGateHook,
+    TransitionKind, TransitionOptions,
 };
 use tempfile::TempDir;
 
@@ -2528,16 +2529,25 @@ updated_by:
 
     // Verify lease is STILL active
     let active_lease = qdev_core::lease::get_lease(tmp.path(), "E12S4");
-    assert!(active_lease.is_some(), "Active lease must NOT be auto-released when pre-hook aborts");
+    assert!(
+        active_lease.is_some(),
+        "Active lease must NOT be auto-released when pre-hook aborts"
+    );
     assert_eq!(active_lease.unwrap().holder, "simon");
 
     // Verify DW is STILL open
     let dw_content = fs::read_to_string(tmp.path().join("docs/state/dw/DW-0001.md")).unwrap();
-    assert!(dw_content.contains("status: open"), "DW must NOT be closed when pre-hook aborts");
+    assert!(
+        dw_content.contains("status: open"),
+        "DW must NOT be closed when pre-hook aborts"
+    );
 
     // Verify story is STILL in review
     let story_content = fs::read_to_string(tmp.path().join("docs/specs/stories/E12S4.md")).unwrap();
-    assert!(story_content.contains("status: review"), "Story must remain in review");
+    assert!(
+        story_content.contains("status: review"),
+        "Story must remain in review"
+    );
 }
 
 #[test]
@@ -2915,10 +2925,14 @@ updated_by:
     };
     let payload = engine.transition(&opts_ok).unwrap();
     assert_eq!(payload.to_status, "review");
-    let dec_id = payload.decision_id.expect("must return decision_id on gate skip");
+    let dec_id = payload
+        .decision_id
+        .expect("must return decision_id on gate skip");
     assert!(dec_id.starts_with("DEC-"));
 
-    let dec_file = tmp.path().join(format!("docs/state/decisions/{}.md", dec_id));
+    let dec_file = tmp
+        .path()
+        .join(format!("docs/state/decisions/{}.md", dec_id));
     assert!(dec_file.exists());
     let dec_content = fs::read_to_string(&dec_file).unwrap();
     assert!(dec_content.contains("decision_type: human_ruling"));

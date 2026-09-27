@@ -150,10 +150,7 @@ fn test_cli_install_hooks_json_validates_schema() {
         "hook_install output must conform to its schema"
     );
 
-    assert_eq!(
-        payload["installed_hooks"].as_array().unwrap().len(),
-        3
-    );
+    assert_eq!(payload["installed_hooks"].as_array().unwrap().len(), 3);
 }
 
 #[test]
@@ -185,10 +182,7 @@ fn test_cli_install_hooks_preserves_legacy() {
     assert_eq!(legacy_content, "#!/bin/sh\necho 'custom legacy'\n");
 
     let new_content = fs::read_to_string(hooks_dir.join("pre-commit")).unwrap();
-    assert_eq!(
-        new_content,
-        "#!/bin/sh\nexec qdev hook pre-commit \"$@\"\n"
-    );
+    assert_eq!(new_content, "#!/bin/sh\nexec qdev hook pre-commit \"$@\"\n");
 }
 
 #[test]
@@ -323,10 +317,7 @@ fn test_cli_doctor_reports_hooks_and_fix() {
 
     assert_eq!(hooks_section["status"], "mismatch");
     assert_eq!(hooks_section["all_installed"], false);
-    assert_eq!(
-        hooks_section["missing_hooks"].as_array().unwrap().len(),
-        3
-    );
+    assert_eq!(hooks_section["missing_hooks"].as_array().unwrap().len(), 3);
 
     // Run doctor --fix: rewrites shims and reports all_installed = true
     let mut fix_cmd = Command::cargo_bin("qdev").unwrap();
@@ -418,7 +409,8 @@ paths = ["crates/bridge/**"]
 
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains("preflight") && (stderr.contains("stash") || stderr.contains("out of scope")),
+        stderr.contains("preflight")
+            && (stderr.contains("stash") || stderr.contains("out of scope")),
         "stderr must report preflight refusal: {}",
         stderr
     );
@@ -602,7 +594,10 @@ fn test_cli_hook_prepare_commit_msg_draft_chains_legacy_hook() {
         .args(["hook", "prepare-commit-msg", ".git/COMMIT_EDITMSG"])
         .assert()
         .code(73);
-    assert_eq!(fs::read_to_string(message).unwrap(), "E12S4: No scratchpad title\n");
+    assert_eq!(
+        fs::read_to_string(message).unwrap(),
+        "E12S4: No scratchpad title\n"
+    );
 }
 
 #[test]
@@ -749,7 +744,11 @@ fn test_cli_hook_pre_push_stdin_forwarded_to_legacy() {
     let hooks_dir = root.join(".git").join("hooks");
     fs::create_dir_all(&hooks_dir).unwrap();
     let legacy_file = hooks_dir.join("pre-push.legacy");
-    fs::write(&legacy_file, "#!/bin/sh\ncat > stdin_captured.txt\nexit 0\n").unwrap();
+    fs::write(
+        &legacy_file,
+        "#!/bin/sh\ncat > stdin_captured.txt\nexit 0\n",
+    )
+    .unwrap();
 
     #[cfg(unix)]
     {
@@ -785,11 +784,7 @@ fn test_cli_hook_pre_commit_fails_on_hygiene_violation() {
     // Create a staged Rust file with hygiene violation (story banner)
     let dirty_file = root.join("src/dirty.rs");
     fs::create_dir_all(dirty_file.parent().unwrap()).unwrap();
-    fs::write(
-        &dirty_file,
-        "// ⭐ STORY 2.10 - bad comment\nfn run() {}\n",
-    )
-    .unwrap();
+    fs::write(&dirty_file, "// ⭐ STORY 2.10 - bad comment\nfn run() {}\n").unwrap();
 
     git(root, &["add", "src/dirty.rs"]);
 
