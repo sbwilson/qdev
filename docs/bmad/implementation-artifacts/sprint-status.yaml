@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-27-2026 21:26
+last_updated: 09-28-2026 00:20
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -191,7 +191,7 @@ action_items:
       uncommitted sprint-status.yaml; the done-marked story exists only in the working
       tree"
     owner: "Simon"
-    status: open
+    status: done
     ref: "docs/bmad/implementation-artifacts/epic-3-retro-2026-09-27.md"
   - id: "epic-3-retro-item-13-process-advance-the-12-epic-3-story-keys"
     epic: 3
@@ -199,7 +199,7 @@ action_items:
       to done (third recurrence of the stale-key failure); add an automated check
       that blocks epic close while any story key is below done"
     owner: "Simon"
-    status: open
+    status: done
     ref: "docs/bmad/implementation-artifacts/epic-3-retro-2026-09-27.md"
   - id: "epic-3-retro-item-14-make-qdev-review-sprint-reports-pass-val"
     epic: 3
@@ -207,7 +207,7 @@ action_items:
       rtm.md/anomalies.md or exclude generated report paths from the validate scan;
       acceptance: pre-push passes after a sprint review"
     owner: "Simon"
-    status: open
+    status: done
     ref: "docs/bmad/implementation-artifacts/epic-3-retro-2026-09-27.md"
   - id: "epic-3-retro-item-15-attribute-soup-audit-sbom-runs-to-the-wo"
     epic: 3
@@ -215,14 +215,14 @@ action_items:
       in handlers/soup.rs) and surface an unparseable-output note when audit output
       yields zero findings"
     owner: "Simon"
-    status: open
+    status: done
     ref: "docs/bmad/implementation-artifacts/epic-3-retro-2026-09-27.md"
   - id: "epic-3-retro-item-16-make-qdev-scope-fail-closed-when-the-int"
     epic: 3
     action: "Make qdev-scope fail closed when the integration-branch diff baseline
       is unresolvable instead of silently evaluating uncommitted files only"
     owner: "Simon"
-    status: open
+    status: done
     ref: "docs/bmad/implementation-artifacts/epic-3-retro-2026-09-27.md"
   - id: "epic-3-retro-item-17-process-ledger-pass-at-epic-close-resolv"
     epic: 3
@@ -231,7 +231,7 @@ action_items:
       parsed=0, parse_error split, architecture_tests walk, doctor unreadable-dir,
       gate-fail severity)"
     owner: "Simon"
-    status: open
+    status: done
     ref: "docs/bmad/implementation-artifacts/epic-3-retro-2026-09-27.md"
   - id: "epic-3-retro-item-18-refactor-split-gate-runner-rs-built-in-v"
     epic: 3
