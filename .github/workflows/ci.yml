@@ -18,6 +18,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      - name: Check sprint status file invariants
+        # The status file is the only place sprint progress is legible; a key left below
+        # `done` under a closed epic (or an open epic over fully done stories) is a wrong
+        # answer, not a missing one. Fail the build on either drift.
+        run: python3 scripts/check_sprint_status.py
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

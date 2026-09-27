@@ -78,19 +78,19 @@ development_status:
   2-13-module-registry: done
   epic-2-retrospective: done
 
-  epic-3: in-progress
-  3-1-gate-runner-subprocess-environment-timeouts: review
-  3-2-gate-result-contract-failure-taxonomy: review
-  3-3-gate-dependencies-all: review
-  3-4-ratchets-baselines: review
-  3-5-evidence-bundles: review
-  3-6-transition-bound-gates: review
-  3-7-git-preflight-guard: review
-  3-8-git-hook-shims-qdev-hook: review
-  3-9-hygiene-linter-lint-and-report: review
-  3-10-impact-analysis: review
-  3-11-opt-in-commit-messages: review
-  3-12-soup-audit-sbom: review
+  epic-3: done
+  3-1-gate-runner-subprocess-environment-timeouts: done
+  3-2-gate-result-contract-failure-taxonomy: done
+  3-3-gate-dependencies-all: done
+  3-4-ratchets-baselines: done
+  3-5-evidence-bundles: done
+  3-6-transition-bound-gates: done
+  3-7-git-preflight-guard: done
+  3-8-git-hook-shims-qdev-hook: done
+  3-9-hygiene-linter-lint-and-report: done
+  3-10-impact-analysis: done
+  3-11-opt-in-commit-messages: done
+  3-12-soup-audit-sbom: done
   3-13-epic-sprint-reviews-sprint-close: done
   epic-3-retrospective: done
 
