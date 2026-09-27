@@ -438,6 +438,11 @@ impl SqliteStore {
         // where one contains the other), and a file collected twice would be hydrated twice and
         // double-counted. The duplicate-id scan dedups the same way, so all three walks agree.
         entity_files.dedup();
+        // Generated release reports are sweep outputs, not entities: drop them before the
+        // hydration pass so qdev's own report files never produce schema findings.
+        entity_files.retain(|f| {
+            !is_generated_release_report(f, workspace_root, &storage.state_dir)
+        });
 
         // Also collect scratchpad (.jsonl) and evidence (.json) files
         let scratch_dir = state_dir.join("scratch");
@@ -3103,6 +3108,11 @@ ON CONFLICT(path, code, message_key) DO UPDATE SET
         // Deduped for the same reason as the rebuild's walk: an overlapping
         // `specs_dir`/`state_dir` layout would otherwise sweep a file twice.
         entity_files.dedup_by(|a, b| a.0 == b.0);
+        // Generated release reports are sweep outputs, not entities: drop them before role
+        // assignment so the hydration pass never tries to parse qdev's own report files.
+        entity_files.retain(|(f, _)| {
+            !is_generated_release_report(f, workspace_root, &storage.state_dir)
+        });
 
         let mut scratch_files: Vec<(PathBuf, (i64, u64))> = Vec::new();
         collect_files_with_ext_and_stamp(
@@ -5912,6 +5922,33 @@ ON CONFLICT(id) DO UPDATE SET
         }
     }
     Ok(())
+}
+
+/// True for a generated release report file: one of [`crate::review::RELEASE_REPORT_FILENAMES`]
+/// located in a per-release subdirectory of `<state_dir>/releases/`.
+///
+/// Release *entities* live directly under `releases/` (one file per release, e.g.
+/// `releases/0.1.0.md`) and stay entity candidates. The report names only ever appear one
+/// level deeper (`releases/0.1.0/rtm.md`) as the outputs of `qdev review sprint`. Those files
+/// carry no frontmatter by design: hydrating them as entities emitted `schema_violation`
+/// findings against files qdev itself wrote, and the findings then made `qdev validate` and
+/// `qdev hook pre-push` refuse every workspace that had just run a sprint review.
+pub(crate) fn is_generated_release_report(file: &Path, workspace_root: &Path, state_dir: &str) -> bool {
+    let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if !crate::review::RELEASE_REPORT_FILENAMES.contains(&name) {
+        return false;
+    }
+    let Ok(rel) = file.strip_prefix(workspace_root) else {
+        return false;
+    };
+    let rel = rel.to_string_lossy();
+    let releases_prefix = format!("{}/releases/", state_dir.trim_end_matches('/'));
+    let Some(rest) = rel.strip_prefix(releases_prefix.as_str()) else {
+        return false;
+    };
+    // `releases/rtm.md` (a hand-placed file wearing a report name at entity depth) is not a
+    // generated report; only the nested `releases/<version>/…` form is.
+    rest.contains('/')
 }
 
 pub(crate) fn collect_markdown_files_with_stamp(

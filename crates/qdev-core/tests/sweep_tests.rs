@@ -3892,3 +3892,158 @@ fn test_unreadable_scratch_and_evidence_dir_records_finding_and_preserves_entrie
             .is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Generated release reports (rtm.md / anomalies.md under releases/<version>/)
+// are sweep outputs, not entities: they must never be hydrated, and a workspace
+// already polluted with findings against them heals on the next sweep.
+// ---------------------------------------------------------------------------
+
+fn release_md(id: &str) -> String {
+    format!(
+        r#"---
+id: {id}
+title: "Release {id}"
+status: open
+version: 1
+created_by:
+  type: human
+  id: alice
+updated_by:
+  type: human
+  id: alice
+---
+Body for release {id}
+"#
+    )
+}
+
+#[test]
+fn test_generated_release_reports_are_never_hydrated_as_entities() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &[]);
+    let storage = storage();
+
+    let releases = root.join("docs/state/releases");
+    fs::create_dir_all(&releases).unwrap();
+    fs::write(releases.join("0.1.0.md"), release_md("0.1.0")).unwrap();
+    let report_dir = releases.join("0.1.0");
+    fs::create_dir_all(&report_dir).unwrap();
+    fs::write(
+        report_dir.join("rtm.md"),
+        "# Requirements Traceability Matrix\n\n(no rows)\n",
+    )
+    .unwrap();
+    fs::write(
+        report_dir.join("anomalies.md"),
+        "# Residual Anomalies\n\n_(no open deferred work)_\n",
+    )
+    .unwrap();
+
+    // Full rebuild: the release entity hydrates; the reports must not even be attempted.
+    let store = ensure_cache(root, &storage).unwrap();
+    assert!(
+        store.get_entity("0.1.0").unwrap().is_some(),
+        "release entity at entity depth must still hydrate"
+    );
+    assert!(
+        store
+            .get_findings_for_path("docs/state/releases/0.1.0/rtm.md")
+            .unwrap()
+            .is_empty(),
+        "generated rtm.md must produce no finding"
+    );
+    assert!(
+        store
+            .get_findings_for_path("docs/state/releases/0.1.0/anomalies.md")
+            .unwrap()
+            .is_empty(),
+        "generated anomalies.md must produce no finding"
+    );
+
+    // Warm sweep over the same tree stays clean too.
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert_eq!(
+        summary.findings, 0,
+        "warm sweep must not flag generated reports: {summary:?}"
+    );
+    assert!(
+        store
+            .get_findings_for_path("docs/state/releases/0.1.0/rtm.md")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn test_preexisting_report_findings_heal_on_sweep() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    make_workspace(root, &[]);
+    let storage = storage();
+
+    let releases = root.join("docs/state/releases");
+    fs::create_dir_all(&releases).unwrap();
+    let report_dir = releases.join("0.1.0");
+    fs::create_dir_all(&report_dir).unwrap();
+    let rtm_path = "docs/state/releases/0.1.0/rtm.md";
+    fs::write(
+        report_dir.join("rtm.md"),
+        "# Requirements Traceability Matrix\n\n(no rows)\n",
+    )
+    .unwrap();
+
+    let mut store = ensure_cache(root, &storage).unwrap();
+    // Simulate a cache polluted by an older binary that still hydrated the report:
+    // a sync_state row plus a schema_violation finding against the generated file.
+    {
+        let conn = rusqlite::Connection::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_state (path, mtime, size, content_hash) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                rtm_path,
+                1_700_000_000_000i64,
+                100i64,
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO findings (path, code, severity, message, message_key, found_at) VALUES (?1, 'schema_violation', 'error', ?2, 'frontmatter', '2026-09-27T00:00:00Z')",
+            rusqlite::params![
+                rtm_path,
+                "Invalid frontmatter: frontmatter must be a YAML mapping (object)".to_string()
+            ],
+        )
+        .unwrap();
+        drop(conn);
+    }
+    assert_eq!(
+        store.get_findings_for_path(rtm_path).unwrap().len(),
+        1,
+        "precondition: pollution visible"
+    );
+
+    // The file content is untouched but no longer an entity candidate: the sweep must
+    // purge the stale sync_state row and clear the finding (self-healing).
+    let summary = store.sweep_workspace(root, &storage).unwrap();
+    assert!(
+        store.get_findings_for_path(rtm_path).unwrap().is_empty(),
+        "pre-existing report finding must be cleared: {summary:?}"
+    );
+    let db = root.join(".qdev/cache/cache.sqlite");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let row: Option<i64> = conn
+        .query_row(
+            "SELECT count(*) FROM sync_state WHERE path = ?1",
+            rusqlite::params![rtm_path],
+            |r| r.get::<_, i64>(0),
+        )
+        .ok();
+    assert_eq!(
+        row,
+        Some(0),
+        "sync_state row for the report must be purged"
+    );
+}

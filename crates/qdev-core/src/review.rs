@@ -5,6 +5,14 @@
 //! run under the advisory workspace write lock, and the gate runs are attributed to the
 //! workspace (never to an unrelated leased story).
 
+/// File names of the generated release reports written under `releases/<version>/`.
+///
+/// These are sweep *outputs*, not entities: they carry no frontmatter by design, so the
+/// hydration walks drop them (see `is_generated_release_report` in `store::sqlite`) and
+/// never parse them. Keeping the names here — next to the code that writes them — is what
+/// keeps the two sides from drifting apart.
+pub const RELEASE_REPORT_FILENAMES: &[&str] = &["rtm.md", "anomalies.md"];
+
 use std::fs;
 use std::path::Path;
 
@@ -360,8 +368,8 @@ pub fn review_sprint(
         .join(&release);
     fs::create_dir_all(&report_dir)
         .map_err(|e| QdevError::infrastructure_failure("io_error", e.to_string()))?;
-    let rtm_path = report_dir.join("rtm.md");
-    let anomalies_path = report_dir.join("anomalies.md");
+    let rtm_path = report_dir.join(RELEASE_REPORT_FILENAMES[0]);
+    let anomalies_path = report_dir.join(RELEASE_REPORT_FILENAMES[1]);
     write_file_atomic(&rtm_path, &rtm_report)?;
     write_file_atomic(&anomalies_path, &anomalies_report)?;
     let open_deferred_work = open
