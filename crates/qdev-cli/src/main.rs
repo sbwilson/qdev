@@ -253,19 +253,24 @@ fn run(raw_args: &[String]) -> i32 {
     // requires the default command and its `status` alias to be genuinely read-only: an
     // unsynced workspace is *reported* as stale cache, never repaired, so neither command may
     // trigger the boot rebuild or sweep. Everything else keeps its boot behaviour untouched.
+    let mut boot_summary: Option<qdev_core::SweepSummary> = None;
     if root.join("qdev.toml").is_file() && !matches!(cli.command, None | Some(Commands::Status)) {
-        if let Err(e) = qdev_core::ensure_cache(&root, &annotated_config.config.storage) {
+        match qdev_core::ensure_cache_with_summary(&root, &annotated_config.config.storage) {
+            Ok((_, summary)) => boot_summary = Some(summary),
+            Err(e) => {
             // A cache stamped by a newer binary is refused on boot for every command — except
             // `qdev sync --rebuild`, the documented recovery path the refusal itself names.
             // That command drops and repopulates every table from the Markdown files, so it is
             // the one caller that does not need to read the newer cache first. Every other
             // command, `qdev doctor` included, still exits 5 here — the pulse included too,
             // which performs this check itself in `handle_pulse`.
-            let recoverable_by_this_command = e.code() == "schema_version_mismatch"
-                && matches!(cli.command, Some(Commands::Sync(ref args)) if args.rebuild);
-            if !recoverable_by_this_command {
-                let _ = output.emit_error(&e);
-                return e.exit_code().as_i32();
+                let recoverable_by_this_command =
+                    e.code() == "schema_version_mismatch"
+                        && matches!(cli.command, Some(Commands::Sync(ref args)) if args.rebuild);
+                if !recoverable_by_this_command {
+                    let _ = output.emit_error(&e);
+                    return e.exit_code().as_i32();
+                }
             }
         }
     }
@@ -371,7 +376,15 @@ fn run(raw_args: &[String]) -> i32 {
         )
         .as_i32(),
         Some(Commands::Sync(ref sync_args)) => {
-            handle_sync(sync_args, &annotated_config, &cli, &output, &current_dir).as_i32()
+            handle_sync(
+                sync_args,
+                &annotated_config,
+                &cli,
+                &output,
+                &current_dir,
+                boot_summary.as_ref(),
+            )
+            .as_i32()
         }
         Some(Commands::Doctor(ref doctor_args)) => {
             handle_doctor(doctor_args, &annotated_config, &cli, &output, &current_dir).as_i32()
@@ -2868,6 +2881,7 @@ fn handle_sync(
     cli: &Cli,
     output: &OutputEmitter,
     current_dir: &std::path::Path,
+    boot_summary: Option<&qdev_core::SweepSummary>,
 ) -> ExitCode {
     let root = qdev_core::find_workspace_root(current_dir);
 
@@ -2892,6 +2906,12 @@ fn handle_sync(
             Ok(_guard) => store.reset_and_rebuild(&root, storage),
             Err(e) => Err(e),
         }
+    } else if let Some(boot) = boot_summary {
+        // The boot-time sweep already ran against this workspace in this process. Sweeping a
+        // second time here would find everything settled and report `parsed: 0`, making sync
+        // look like a no-op in exactly the invocation where real hydration happened (at
+        // boot). Report the boot pass instead.
+        Ok(*boot)
     } else {
         store.sweep_workspace(&root, storage)
     };

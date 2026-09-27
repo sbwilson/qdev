@@ -32,7 +32,7 @@ fn test_qdev_core_manifest_has_no_forbidden_dependencies() {
 }
 
 #[test]
-fn test_qdev_core_cargo_metadata_has_no_forbidden_dependencies() {
+fn test_qdev_core_resolved_graph_has_no_forbidden_dependencies() {
     let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let output = Command::new("cargo")
         .args([
@@ -51,25 +51,66 @@ fn test_qdev_core_cargo_metadata_has_no_forbidden_dependencies() {
     let metadata: serde_json::Value =
         serde_json::from_str(&metadata_str).expect("failed to parse cargo metadata JSON");
 
+    // Resolve package ids to names. The check walks the *resolved* graph (`resolve.nodes`),
+    // not the manifest's declared `dependencies` array: a declaration that never resolves
+    // (feature-gated, platform-specific) is exactly the shape a manifest text/declaration
+    // scan would miss.
+    let mut names_by_id: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut qdev_core_id: Option<String> = None;
+    let mut nodes: Vec<serde_json::Value> = Vec::new();
+
     if let Some(packages) = metadata.get("packages").and_then(|p| p.as_array()) {
         for pkg in packages {
-            if pkg.get("name").and_then(|n| n.as_str()) == Some("qdev-core") {
-                if let Some(deps) = pkg.get("dependencies").and_then(|d| d.as_array()) {
+            if let (Some(id), Some(name)) = (
+                pkg.get("id").and_then(|v| v.as_str()),
+                pkg.get("name").and_then(|n| n.as_str()),
+            ) {
+                names_by_id.insert(id.to_string(), name.to_string());
+                if name == "qdev-core" {
+                    qdev_core_id = Some(id.to_string());
+                }
+            }
+        }
+    }
+    if let Some(resolve_nodes) = metadata.get("resolve").and_then(|r| r.get("nodes")) {
+        nodes.extend(resolve_nodes.as_array().cloned().unwrap_or_default());
+    }
+
+    let start = qdev_core_id.expect("qdev-core package missing from cargo metadata");
+    let mut visited = std::collections::HashSet::new();
+    let mut queue = vec![start];
+    while let Some(id) = queue.pop() {
+        if !visited.insert(id.clone()) {
+            continue;
+        }
+        let name = names_by_id
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| id.clone());
+        for &forbidden in FORBIDDEN_DEPENDENCIES {
+            assert_ne!(
+                name, forbidden,
+                "qdev-core's resolved dependency graph contains '{forbidden}' violating AD-1 (via {id})"
+            );
+        }
+        for node in &nodes {
+            if node.get("id").and_then(|v| v.as_str()) == Some(id.as_str()) {
+                if let Some(deps) = node.get("deps").and_then(|d| d.as_array()) {
                     for dep in deps {
-                        if let Some(dep_name) = dep.get("name").and_then(|n| n.as_str()) {
-                            for &forbidden in FORBIDDEN_DEPENDENCIES {
-                                assert_ne!(
-                                    dep_name, forbidden,
-                                    "qdev-core resolved dependency contains '{}' violating AD-1",
-                                    forbidden
-                                );
-                            }
+                        if let Some(dep_pkg) = dep.get("pkg").and_then(|v| v.as_str()) {
+                            queue.push(dep_pkg.to_string());
                         }
                     }
                 }
             }
         }
     }
+
+    assert!(
+        visited.len() > 1,
+        "the resolved graph walk visited only the qdev-core node itself; the metadata resolve section looks malformed"
+    );
 }
 
 fn collect_rs_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {

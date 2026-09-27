@@ -4043,6 +4043,19 @@ pub fn ensure_cache(
     workspace_root: &Path,
     storage: &StorageConfig,
 ) -> Result<SqliteStore, QdevError> {
+    ensure_cache_with_summary(workspace_root, storage).map(|(store, _)| store)
+}
+
+/// Like [`ensure_cache`], but also returns the tally of the hydration pass this boot ran
+/// (the rebuild or the incremental sweep).
+///
+/// Callers that report on cache work — `qdev sync` — need it: the boot pass is the work the
+/// process actually did, and a second sweep in the same process would find everything already
+/// settled and underreport it.
+pub fn ensure_cache_with_summary(
+    workspace_root: &Path,
+    storage: &StorageConfig,
+) -> Result<(SqliteStore, SweepSummary), QdevError> {
     let cache_dir = workspace_root.join(&storage.cache_dir);
     if !cache_dir.exists() {
         fs::create_dir_all(&cache_dir).map_err(|e| {
@@ -4105,13 +4118,16 @@ pub fn ensure_cache(
             Err(e) => return Err(e),
         };
         if still_needs_rebuild {
-            store.reset_and_rebuild(workspace_root, storage)?;
+            let summary = store.reset_and_rebuild(workspace_root, storage)?;
+            return Ok((store, summary));
         }
-        Ok(store)
+        // Re-checked under the write lock and found valid: another process rebuilt the cache
+        // between the first inspection and this one, so this process did no hydration.
+        Ok((store, SweepSummary::default()))
     } else {
         let store = SqliteStore::open(&cache_db_path)?;
-        store.sweep_workspace(workspace_root, storage)?;
-        Ok(store)
+        let summary = store.sweep_workspace(workspace_root, storage)?;
+        Ok((store, summary))
     }
 }
 

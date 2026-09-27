@@ -79,13 +79,14 @@ fn test_sync_json_shape_and_exit_0() {
 }
 
 #[test]
-fn test_sync_settles_to_all_unchanged_once_the_boot_time_sweep_has_run() {
+fn test_sync_reports_the_boot_time_hydration_pass() {
     // Every `qdev` invocation against an initialized workspace runs the boot-time hydration
-    // sweep (spec-1-6/1-7) before any command dispatches, `sync` included. So by the time
-    // `handle_sync`'s own `sweep_workspace` call runs, that same process's boot sweep has
-    // already absorbed any on-disk changes; the explicit sync settles to `unchanged` for
-    // everything and `parsed`/`purged` at 0. This is the plain-sync counterpart to
-    // `test_sync_rebuild_reparses_everything`, which forces real work via `--rebuild` instead.
+    // sweep (spec-1-6/1-7) before any command dispatches, `sync` included. The sync command
+    // reports the tally of the pass its own process ran: the hydration happened at boot in
+    // this very invocation, so a second no-op sweep reporting `parsed: 0` would make sync
+    // look like it did nothing in exactly the invocation where it did. This is the
+    // plain-sync counterpart to `test_sync_rebuild_reparses_everything`, which forces real
+    // work via `--rebuild` instead.
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     setup_workspace(root);
@@ -94,16 +95,20 @@ fn test_sync_settles_to_all_unchanged_once_the_boot_time_sweep_has_run() {
     write_story(&stories_dir, "E1S1", "One");
     write_story(&stories_dir, "E1S2", "Two");
 
-    // First sync: the boot-time sweep for this very invocation parses both new files before
-    // `sync`'s own sweep runs, which then finds nothing left outstanding.
+    // First sync on a fresh workspace: this invocation's boot pass rebuilds the cache from
+    // the two new story files (plus qdev.toml), and the sync reports that work.
     let mut cmd = Command::cargo_bin("qdev").unwrap();
-    cmd.current_dir(root)
+    let assert = cmd
+        .current_dir(root)
         .args(["sync", "--json"])
         .assert()
-        .success();
+        .success()
+        .code(0);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["parsed"], 3, "first sync must report the boot rebuild: {val}");
 
-    // Modify one file, then sync again: same story, the modification is caught by this
-    // invocation's own boot sweep first.
+    // Modify one file, then sync again: the modification is hydrated by this invocation's
+    // own boot sweep, and the sync reports that one re-parse — not a misleading zero.
     write_story(&stories_dir, "E1S1", "One modified");
     let mut cmd2 = Command::cargo_bin("qdev").unwrap();
     let assert = cmd2
@@ -114,13 +119,28 @@ fn test_sync_settles_to_all_unchanged_once_the_boot_time_sweep_has_run() {
         .code(0);
 
     let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
-    assert_eq!(val["parsed"], 0);
+    assert_eq!(
+        val["parsed"], 1,
+        "the modified file must be reported as hydrated, not hidden behind a no-op resweep: {val}"
+    );
     assert_eq!(val["purged"], 0);
     assert_eq!(
-        val["unchanged"], 3,
-        "both story files plus qdev.toml must all be settled unchanged: {}",
+        val["unchanged"], 2,
+        "the untouched story plus qdev.toml are the settled files: {}",
         val
     );
+
+    // And once the tree is quiet, a sync genuinely reports a quiet pass.
+    let mut cmd3 = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd3
+        .current_dir(root)
+        .args(["sync", "--json"])
+        .assert()
+        .success()
+        .code(0);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(val["parsed"], 0);
+    assert_eq!(val["unchanged"], 3, "a settled workspace reports all-unchanged: {val}");
 }
 
 #[test]

@@ -119,7 +119,8 @@ pub use review::{
 };
 
 pub use store::{
-    create_schema, determine_entity_kind, drop_all_user_tables, ensure_cache, inspect_cache_schema,
+    create_schema, determine_entity_kind, drop_all_user_tables, ensure_cache,
+    ensure_cache_with_summary, inspect_cache_schema,
     newer_cache_conflict, stamp_cache_version, CacheSchemaStatus, ConstraintRecord, DecisionRecord,
     DeferredWorkRecord, DirtyEntityRecord, EntityFilter, EntityPresence, EntityRecord,
     FindingRecord, GateRecord, GateRunRecord, RelationRecord, ScratchpadRecord, SoupRecord,

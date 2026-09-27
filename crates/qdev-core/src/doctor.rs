@@ -210,11 +210,12 @@ impl DoctorSection for ValidationDoctorSection {
         // `unavailable_reason`: the `cache` section's `schema_status` explains a cache-shaped
         // failure, but nothing else in the payload would explain any other kind.
         //
-        // This does *not* cover a check that completes while reading less than the whole
-        // workspace: the duplicate-id scan skips a file or directory it cannot read and returns
-        // what it found, so an unreadable specs directory reports `ok` with a count of zero.
-        // `qdev validate` is blind the same way (they share the check), so the two commands
-        // still agree — see `deferred-work.md`, filed against the check itself.
+        // The duplicate-id scan still skips a file or directory it cannot read and returns
+        // what it found, but the hydration sweep records a `read_error` finding for every
+        // unreadable directory it hits (and clears them again once the directory reads) and
+        // this command passes the store to the check, so a `chmod 000`'d specs directory
+        // surfaces in the counts above via the merged cache findings. The residual blind spot
+        // is the cache-unavailable path only — `deferred-work.md` tracks it against the check.
         let (status, unavailable_reason, finding_count, by_code) =
             match run_validation(store, &self.workspace_root, &self.config) {
                 Ok(findings) => {
