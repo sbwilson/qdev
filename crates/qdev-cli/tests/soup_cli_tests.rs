@@ -144,12 +144,25 @@ fn failed_or_unparseable_audit_never_creates_soup_records_but_keeps_evidence() {
         let audit = root.join("audit.sh");
         executable(&audit, body);
         configure_soup(root, &format!("audit_command = \"{}\"\n", audit.display()));
-        Command::cargo_bin("qdev")
+        let out = Command::cargo_bin("qdev")
             .unwrap()
             .current_dir(root)
             .args(["soup", "audit"])
-            .assert()
-            .code(expected_code);
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(expected_code as i32));
+        // A successful audit whose output is uninterpretable must say so: a silent zero of
+        // findings would read as a clean audit. A failed audit already signals failure and
+        // is not double-reported.
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if expected_code == 0 {
+            assert!(
+                stdout.contains("warning:") && stdout.contains("no findings recorded"),
+                "a succeeded-but-unparseable audit must warn, got: {stdout}"
+            );
+        } else {
+            assert!(!stdout.contains("no findings recorded"), "failed audit: {stdout}");
+        }
         assert!(
             !root.join("docs/state/soup/example-1.0.md").exists(),
             "{name}"
@@ -302,4 +315,41 @@ fn sbom_requires_config_and_unambiguous_existing_release() {
         .failure()
         .code(2);
     assert!(!root.join("bom.json").exists());
+}
+
+#[test]
+fn workspace_level_soup_runs_never_inherit_an_unrelated_lease() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup(root);
+    // An unrelated story holds the workspace lease.
+    fs::create_dir_all(root.join(".qdev/leases")).unwrap();
+    fs::write(
+        root.join(".qdev/leases/3-1.json"),
+        r#"{"story_id":"3-1","holder":"tester"}"#,
+    )
+    .unwrap();
+    let audit = root.join("audit.sh");
+    executable(
+        &audit,
+        "#!/bin/sh\necho '{\"vulnerabilities\":{\"list\":[]}}'\n",
+    );
+    configure_soup(root, &format!("audit_command = \"{}\"\n", audit.display()));
+
+    let out = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["soup", "audit", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        !stdout.contains("\"story\":"),
+        "a workspace-level soup run must not be attributed to the leased story: {stdout}"
+    );
+    assert!(
+        stdout.contains("_workspace"),
+        "evidence must land in the workspace bucket: {stdout}"
+    );
 }

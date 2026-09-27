@@ -39,17 +39,51 @@ struct PreparedSoupRecord {
 }
 
 /// Reads only the stable cargo-audit vulnerability shape. Unknown or malformed output is ignored.
-pub fn parse_cargo_audit_json(output: &str) -> Vec<SoupAuditFinding> {
+/// Result of parsing `cargo audit` JSON output.
+pub struct SoupAuditParse {
+    pub findings: Vec<SoupAuditFinding>,
+    /// Set when the command succeeded but its output could not be interpreted as a current
+    /// `cargo audit` JSON document. Such a run still exits 0, so without this note an audit
+    /// that printed a legacy or otherwise unexpected format would record zero findings and
+    /// look clean. Consumers surface it; the findings list stays authoritative either way.
+    pub warning: Option<String>,
+}
+
+/// Parses `cargo audit` JSON output, reporting when the output is non-empty but uninterpretable.
+///
+/// Two failure shapes are reported separately because their remediation differs: output that is
+/// not JSON at all (wrong command, wrapped output) versus JSON that simply lacks the
+/// `/vulnerabilities/list` section (legacy format, `--no-vulnerabilities`, a vendored variant).
+/// Empty output is neither: an audit with no findings legitimately produces an empty list.
+pub fn parse_cargo_audit_json_reported(output: &str) -> SoupAuditParse {
+    if output.trim().is_empty() {
+        return SoupAuditParse {
+            findings: Vec::new(),
+            warning: None,
+        };
+    }
     let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
-        return Vec::new();
+        return SoupAuditParse {
+            findings: Vec::new(),
+            warning: Some(
+                "audit output was not valid JSON; no findings recorded (audit output unparseable)"
+                    .to_string(),
+            ),
+        };
     };
     let Some(entries) = value
         .pointer("/vulnerabilities/list")
         .and_then(|v| v.as_array())
     else {
-        return Vec::new();
+        return SoupAuditParse {
+            findings: Vec::new(),
+            warning: Some(
+                "audit JSON had no vulnerabilities/list section; no findings recorded (legacy or unexpected format)"
+                    .to_string(),
+            ),
+        };
     };
-    let raw: Vec<_> = entries
+    let findings: Vec<_> = entries
         .iter()
         .filter_map(|entry| {
             let package = entry.get("package")?;
@@ -85,7 +119,7 @@ pub fn parse_cargo_audit_json(output: &str) -> Vec<SoupAuditFinding> {
         })
         .collect();
     let mut merged: BTreeMap<(String, String), SoupAuditFinding> = BTreeMap::new();
-    for finding in raw {
+    for finding in findings {
         let key = (finding.name.clone(), finding.version.clone());
         match merged.entry(key) {
             std::collections::btree_map::Entry::Vacant(entry) => {
@@ -113,7 +147,16 @@ pub fn parse_cargo_audit_json(output: &str) -> Vec<SoupAuditFinding> {
             }
         }
     }
-    merged.into_values().collect()
+    SoupAuditParse {
+        findings: merged.into_values().collect(),
+        warning: None,
+    }
+}
+
+/// Convenience wrapper over [`parse_cargo_audit_json_reported`] for callers that only need the
+/// findings. Use the `_reported` variant when a silent zero can be mistaken for a clean audit.
+pub fn parse_cargo_audit_json(output: &str) -> Vec<SoupAuditFinding> {
+    parse_cargo_audit_json_reported(output).findings
 }
 
 fn record_id(finding: &SoupAuditFinding) -> String {

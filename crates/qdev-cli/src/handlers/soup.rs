@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use qdev_core::{
-    execute_configured_command, parse_cargo_audit_json, persist_soup_records, record_sbom_artifact,
-    ExitCode, GateRunOptions, GateStatus, JsonEnvelope, QdevError,
+    execute_configured_command, parse_cargo_audit_json_reported, persist_soup_records,
+    record_sbom_artifact, ExitCode, GateRunOptions, GateStatus, JsonEnvelope, QdevError,
 };
 use serde::Serialize;
 
@@ -13,6 +13,7 @@ use crate::output::OutputEmitter;
 struct SoupPayload {
     runs: Vec<qdev_core::GateRunPayload>,
     findings: usize,
+    warnings: Vec<String>,
 }
 
 pub fn handle_soup(
@@ -54,8 +55,11 @@ pub fn handle_soup(
                 &config.config,
                 "qdev-soup-audit",
                 audit_command,
+                // Workspace-level command: the run must never be attributed to an unrelated
+                // story that happens to hold a lease in this workspace.
                 &GateRunOptions {
                     story: None,
+                    workspace_level: true,
                     timeout_ms: None,
                     ..Default::default()
                 },
@@ -75,17 +79,26 @@ pub fn handle_soup(
                     &config.config,
                     "qdev-soup-deny",
                     command,
-                    &GateRunOptions::default(),
+                    &GateRunOptions {
+                        workspace_level: true,
+                        ..Default::default()
+                    },
                 ) {
                     Ok(run) => runs.push(run),
                     Err(err) => return emit_error(output, err),
                 }
             }
             let exit = aggregate(&runs);
-            let findings = if exit == ExitCode::Success {
-                parse_cargo_audit_json(runs[0].stdout.as_deref().unwrap_or(""))
+            let (findings, warnings) = if exit == ExitCode::Success {
+                let parsed =
+                    parse_cargo_audit_json_reported(runs[0].stdout.as_deref().unwrap_or(""));
+                let mut warnings = Vec::new();
+                if let Some(w) = parsed.warning {
+                    warnings.push(w);
+                }
+                (parsed.findings, warnings)
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             };
             if exit == ExitCode::Success {
                 if let Err(err) = persist_soup_records(
@@ -97,7 +110,7 @@ pub fn handle_soup(
                     return emit_error(output, err);
                 }
             }
-            emit_runs(cli, output, runs, findings.len());
+            emit_runs(cli, output, runs, findings.len(), warnings);
             exit
         }
         SoupCommands::Sbom(sbom) => {
@@ -130,7 +143,10 @@ pub fn handle_soup(
                 &config.config,
                 "qdev-soup-sbom",
                 command,
-                &GateRunOptions::default(),
+                &GateRunOptions {
+                    workspace_level: true,
+                    ..Default::default()
+                },
             ) {
                 Ok(run) => run,
                 Err(err) => return emit_error(output, err),
@@ -158,7 +174,7 @@ pub fn handle_soup(
                     ),
                 }
             }
-            emit_runs(cli, output, vec![run], 0);
+            emit_runs(cli, output, vec![run], 0, Vec::new());
             exit
         }
     }
@@ -179,20 +195,18 @@ fn emit_runs(
     output: &OutputEmitter,
     runs: Vec<qdev_core::GateRunOutcome>,
     findings: usize,
+    warnings: Vec<String>,
 ) {
     if cli.json {
         let _ = output.emit_envelope(&JsonEnvelope::new(SoupPayload {
             runs: runs.into_iter().map(|r| r.to_payload()).collect(),
             findings,
+            warnings,
         }));
     } else {
-        let _ = output.emit_text(
-            &runs
-                .iter()
-                .map(|r| r.receipt())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
+        let mut lines = runs.iter().map(|r| r.receipt()).collect::<Vec<_>>();
+        lines.extend(warnings.iter().map(|w| format!("warning: {w}")));
+        let _ = output.emit_text(&lines.join("\n"));
     }
 }
 

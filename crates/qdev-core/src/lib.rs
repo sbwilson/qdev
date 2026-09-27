@@ -60,8 +60,8 @@ pub use gate::{
     BUILTIN_GATE_SCOPE, VALID_ADAPTERS,
 };
 pub use soup::{
-    parse_cargo_audit_json, persist_soup_records, record_sbom_artifact, SoupAuditFinding,
-    SoupSummary,
+    parse_cargo_audit_json, parse_cargo_audit_json_reported, persist_soup_records,
+    record_sbom_artifact, SoupAuditFinding, SoupAuditParse, SoupSummary,
 };
 
 pub use chore::{

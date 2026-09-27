@@ -70,3 +70,43 @@ fn sbom_artifact_is_persisted_only_on_a_resolved_release() {
         .unwrap()
         .contains("sbom_artifact_path: bom.json"));
 }
+
+#[test]
+fn reported_parser_warns_on_uninterpretable_output_but_never_hides_findings() {
+    use qdev_core::parse_cargo_audit_json_reported;
+
+    // Non-JSON output (wrong command, wrapped output).
+    let p = parse_cargo_audit_json_reported("audit completed successfully");
+    assert!(p.findings.is_empty());
+    assert!(
+        p.warning.as_deref().unwrap().contains("not valid JSON"),
+        "non-JSON output must be reported, got: {:?}",
+        p.warning
+    );
+
+    // JSON without the v2 list section (legacy / unexpected format).
+    let p = parse_cargo_audit_json_reported(r#"{"vulnerabilities": {}}"#);
+    assert!(p.findings.is_empty());
+    assert!(
+        p.warning.as_deref().unwrap().contains("vulnerabilities/list"),
+        "list-less JSON must be reported, got: {:?}",
+        p.warning
+    );
+
+    // Valid v2 document with an empty list: a genuinely clean audit, no warning.
+    let p = parse_cargo_audit_json_reported(r#"{"vulnerabilities": {"list": []}}"#);
+    assert!(p.findings.is_empty());
+    assert!(p.warning.is_none(), "clean audit must not warn: {:?}", p.warning);
+
+    // Valid v2 document with findings: no warning.
+    let p = parse_cargo_audit_json_reported(
+        r#"{"vulnerabilities":{"list":[{"package":{"name":"example","version":"1.2.3"}}]}}"#,
+    );
+    assert_eq!(p.findings.len(), 1);
+    assert!(p.warning.is_none());
+
+    // Empty output: neither shape, no warning.
+    let p = parse_cargo_audit_json_reported("");
+    assert!(p.findings.is_empty());
+    assert!(p.warning.is_none());
+}
