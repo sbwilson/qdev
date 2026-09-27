@@ -28,6 +28,22 @@ fn setup_workspace(root: &Path) {
         "\n[[modules]]\nid = \"bridge\"\npaths = [\"crates/bridge/**\"]\n\n[[modules]]\nid = \"foundation\"\npaths = [\"crates/foundation/**\"]\n",
     );
     fs::write(toml_path, toml).unwrap();
+
+    // The workspace must be a git work tree whose integration branch exists: the built-in
+    // qdev-scope gate fails closed without a resolvable diff baseline.
+    for args in [
+        vec!["init", "-q", "-b", "develop"],
+        vec!["config", "user.name", "Test User"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "commit.gpgsign", "false"],
+        vec!["add", "."],
+        vec!["commit", "-q", "-m", "initial"],
+    ] {
+        let _ = std::process::Command::new("git")
+            .current_dir(root)
+            .args(&args)
+            .output();
+    }
 }
 
 fn write_story_file(root: &Path, id: &str, content: &str) {

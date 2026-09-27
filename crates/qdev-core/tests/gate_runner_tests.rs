@@ -1877,3 +1877,40 @@ target_modules:
 
 
 
+
+#[test]
+fn test_scope_gate_fails_closed_when_integration_branch_unresolvable() {
+    let temp = setup_test_workspace();
+    let mut config = Config::default();
+    // The repo's real branch is main; point the gate at one that does not exist.
+    config.git.integration_branch = "no-such-branch".to_string();
+    let opts = GateRunOptions::default();
+
+    let outcome = execute_scope_gate(temp.path(), &config, &opts).unwrap();
+    assert_eq!(
+        outcome.status,
+        GateStatus::Infra,
+        "an unresolvable baseline must fail closed, not pass vacuously: {}",
+        outcome.summary
+    );
+    assert_eq!(outcome.exit_code, 4);
+    assert!(
+        outcome.summary.contains("unresolvable"),
+        "summary should name the cause: {}",
+        outcome.summary
+    );
+    assert_eq!(outcome.agent_instruction.as_deref(), Some("halt_and_alert"));
+    assert!(!outcome.evidence_path.is_none(), "infra outcome must record evidence");
+}
+
+#[test]
+fn test_scope_gate_fails_closed_outside_a_git_work_tree() {
+    // A plain directory is not a git work tree: the gate cannot compute any baseline.
+    let temp = TempDir::new().unwrap();
+    let config = Config::default();
+    let opts = GateRunOptions::default();
+
+    let outcome = execute_scope_gate(temp.path(), &config, &opts).unwrap();
+    assert_eq!(outcome.status, GateStatus::Infra, "{}", outcome.summary);
+    assert_eq!(outcome.exit_code, 4);
+}

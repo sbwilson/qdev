@@ -1831,10 +1831,14 @@ fn find_matching_no_go<'a>(
     None
 }
 
-fn get_git_diff_files(
+/// Returns the changed-file set, or the reason the diff baseline could not be established.
+///
+/// Fails closed on purpose: when the baseline is unresolvable, returning an empty set would
+/// let the scope gate pass while committed out-of-scope work stays invisible to the check.
+pub(crate) fn get_git_diff_files(
     workspace_root: &Path,
     integration_branch: &str,
-) -> std::collections::HashSet<String> {
+) -> Result<std::collections::HashSet<String>, String> {
     let is_git = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(workspace_root)
@@ -1843,7 +1847,9 @@ fn get_git_diff_files(
         .unwrap_or(false);
 
     if !is_git {
-        return std::collections::HashSet::new();
+        return Err(format!(
+            "workspace is not a git work tree; the diff baseline against '{integration_branch}' is unavailable"
+        ));
     }
 
     let mut changed = std::collections::HashSet::new();
@@ -1877,30 +1883,43 @@ fn get_git_diff_files(
         }
     }
 
-    if let Some(target) = diff_target {
-        if let Ok(diff_out) = Command::new("git")
-            .args(["-c", "core.quotePath=false", "diff", "--name-only", "--relative", &target])
-            .current_dir(workspace_root)
-            .output()
-        {
-            if diff_out.status.success() {
-                for line in String::from_utf8_lossy(&diff_out.stdout).lines() {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        changed.insert(trimmed.to_string());
-                    }
+    let Some(target) = diff_target else {
+        return Err(format!(
+            "integration branch '{integration_branch}' is unresolvable: no merge-base with HEAD and the ref is not found locally"
+        ));
+    };
+
+    match Command::new("git")
+        .args(["-c", "core.quotePath=false", "diff", "--name-only", "--relative", &target])
+        .current_dir(workspace_root)
+        .output()
+    {
+        Ok(diff_out) if diff_out.status.success() => {
+            for line in String::from_utf8_lossy(&diff_out.stdout).lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    changed.insert(trimmed.to_string());
                 }
             }
+        }
+        Ok(diff_out) => {
+            return Err(format!(
+                "git diff against '{target}' failed: {}",
+                String::from_utf8_lossy(&diff_out.stderr).trim()
+            ))
+        }
+        Err(err) => {
+            return Err(format!("git diff against '{target}' could not be executed: {err}"));
         }
     }
 
     // Include uncommitted changes (staged and unstaged + untracked)
-    if let Ok(status_out) = Command::new("git")
+    match Command::new("git")
         .args(["-c", "core.quotePath=false", "status", "--porcelain=v1", "-uall"])
         .current_dir(workspace_root)
         .output()
     {
-        if status_out.status.success() {
+        Ok(status_out) if status_out.status.success() => {
             for line in String::from_utf8_lossy(&status_out.stdout).lines() {
                 if line.len() >= 3 {
                     let path = line[3..].trim();
@@ -1915,9 +1934,16 @@ fn get_git_diff_files(
                 }
             }
         }
+        Ok(status_out) => {
+            return Err(format!(
+                "git status failed: {}",
+                String::from_utf8_lossy(&status_out.stderr).trim()
+            ))
+        }
+        Err(err) => return Err(format!("git status could not be executed: {err}")),
     }
 
-    changed
+    Ok(changed)
 }
 
 /// Executes the built-in `qdev-scope` verification gate.
@@ -2067,7 +2093,63 @@ pub fn execute_scope_gate(
         }
     }
 
-    let diff_files = get_git_diff_files(workspace_root, &config.git.integration_branch);
+    let diff_files = match get_git_diff_files(workspace_root, &config.git.integration_branch) {
+        Ok(files) => files,
+        Err(reason) => {
+            // Fail closed: an unresolvable baseline cannot be treated as "nothing changed",
+            // or committed out-of-scope work would sail through the gate.
+            let scope_gate_config = GateConfig {
+                id: BUILTIN_GATE_SCOPE.to_string(),
+                command: None,
+                timeout_ms: None,
+                depends_on: Vec::new(),
+                output_adapter: None,
+                on_transition: vec!["review".to_string()],
+                verifies: Vec::new(),
+                kind: Some("builtin".to_string()),
+                metric: None,
+                direction: None,
+                skip: None,
+            };
+            let duration_ms = start_time.elapsed().as_millis() as u64;
+            let summary = format!("scope baseline unresolvable: {reason}");
+            let evidence_path = record_gate_evidence(
+                workspace_root,
+                config,
+                &scope_gate_config,
+                story_id.as_deref(),
+                commit_sha.as_deref(),
+                "infra",
+                4,
+                duration_ms,
+                None,
+                &summary,
+                None,
+                None,
+                false,
+            )?;
+            return Ok(GateRunOutcome {
+                gate_id: BUILTIN_GATE_SCOPE.to_string(),
+                status: GateStatus::Infra,
+                exit_code: 4,
+                duration_ms,
+                summary: summary.clone(),
+                skipped_locally: false,
+                commit_sha,
+                story_id,
+                stdout: None,
+                stderr: None,
+                agent_instruction: Some("halt_and_alert".to_string()),
+                failures: vec![GateFailure {
+                    location: "git".to_string(),
+                    message: summary,
+                }],
+                metric: None,
+                constraint_ids: Vec::new(),
+                evidence_path: Some(evidence_path),
+            });
+        }
+    };
     let registry = ModuleRegistry::from_config(config);
     let mut failures = Vec::new();
     let mut constraint_ids = Vec::new();

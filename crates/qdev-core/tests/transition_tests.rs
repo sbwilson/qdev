@@ -15,6 +15,21 @@ use qdev_core::{
 use tempfile::TempDir;
 
 fn setup_story_workspace(root: &Path) {
+    // The workspace must be a git work tree whose integration branch exists: the built-in
+    // qdev-scope gate fails closed without a resolvable diff baseline, so review-transition
+    // tests must model a real (git) workspace.
+    for args in [
+        vec!["init", "-q", "-b", "develop"],
+        vec!["config", "user.name", "Test User"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "commit.gpgsign", "false"],
+    ] {
+        let _ = std::process::Command::new("git")
+            .current_dir(root)
+            .args(&args)
+            .output();
+    }
+
     let qdev_toml = root.join("qdev.toml");
     fs::write(
         qdev_toml,
@@ -47,6 +62,17 @@ paths = ["crates/foundation/**"]
     fs::create_dir_all(&dw_dir).unwrap();
     let cache_dir = root.join(".qdev/cache");
     fs::create_dir_all(&cache_dir).unwrap();
+
+    // Commit the fixture so the scope gate has a baseline; files written later by tests
+    // appear as untracked changes, which is what the diff-based checks are meant to see.
+    let _ = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["add", "."])
+        .output();
+    let _ = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["commit", "-q", "-m", "initial"])
+        .output();
 }
 
 fn write_story_file(root: &Path, id: &str, content: &str) {
@@ -2519,7 +2545,11 @@ fn test_transition_gate_hook_executes_on_review_transition() {
     let tmp = TempDir::new().unwrap();
     setup_story_workspace(tmp.path());
 
-    let script_path = tmp.path().join("check_story.sh");
+    // Under .qdev/: the scope gate excludes that prefix, so the gate's own script does not
+    // count as an out-of-scope change for this test.
+    let qdev_dir = tmp.path().join(".qdev");
+    fs::create_dir_all(&qdev_dir).unwrap();
+    let script_path = qdev_dir.join("check_story.sh");
     fs::write(
         &script_path,
         "#!/bin/sh\n[ \"$QDEV_STORY\" = \"E12S4\" ] || exit 1\nexit 0\n",
