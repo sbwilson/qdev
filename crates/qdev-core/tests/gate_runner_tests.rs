@@ -101,6 +101,7 @@ echo "QDEV_MODULE_PATHS=$QDEV_MODULE_PATHS"
     let options = GateRunOptions {
         story: Some("E12S4".to_string()),
         timeout_ms: None,
+        ..Default::default()
     };
 
     let outcome = execute_gate(temp.path(), &config, "env-gate", &options).unwrap();

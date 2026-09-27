@@ -76,6 +76,7 @@ pub fn handle_gate(
             let options = GateRunOptions {
                 story: run_args.story.clone(),
                 timeout_ms: None,
+                ..Default::default()
             };
 
             let target_ids: Option<Vec<String>> = if let Some(ref gate_id) = run_args.id {

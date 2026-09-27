@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-27-2026 09:51
+last_updated: 09-27-2026 21:26
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -91,8 +91,8 @@ development_status:
   3-10-impact-analysis: review
   3-11-opt-in-commit-messages: review
   3-12-soup-audit-sbom: review
-  3-13-epic-sprint-reviews-sprint-close: backlog
-  epic-3-retrospective: optional
+  3-13-epic-sprint-reviews-sprint-close: done
+  epic-3-retrospective: done
 
   epic-4: backlog
   4-1-qdev-context-projection: backlog
@@ -185,3 +185,59 @@ action_items:
     owner: "Simon"
     status: done
     ref: "docs/bmad/implementation-artifacts/epic-1-retro-2026-09-09.md"
+  - id: "epic-3-retro-item-12-commit-story-3-13-review-rs-sprint-rs-re"
+    epic: 3
+    action: "Commit story 3-13 (review.rs, sprint.rs rewrite, tests, spec) and the
+      uncommitted sprint-status.yaml; the done-marked story exists only in the working
+      tree"
+    owner: "Simon"
+    status: open
+    ref: "docs/bmad/implementation-artifacts/epic-3-retro-2026-09-27.md"
+  - id: "epic-3-retro-item-13-process-advance-the-12-epic-3-story-keys"
+    epic: 3
+    action: "Process: advance the 12 epic-3 story keys from review to done and epic-3
+      to done (third recurrence of the stale-key failure); add an automated check
+      that blocks epic close while any story key is below done"
+    owner: "Simon"
+    status: open
+    ref: "docs/bmad/implementation-artifacts/epic-3-retro-2026-09-27.md"
+  - id: "epic-3-retro-item-14-make-qdev-review-sprint-reports-pass-val"
+    epic: 3
+    action: "Make qdev review sprint reports pass validation: emit frontmatter on
+      rtm.md/anomalies.md or exclude generated report paths from the validate scan;
+      acceptance: pre-push passes after a sprint review"
+    owner: "Simon"
+    status: open
+    ref: "docs/bmad/implementation-artifacts/epic-3-retro-2026-09-27.md"
+  - id: "epic-3-retro-item-15-attribute-soup-audit-sbom-runs-to-the-wo"
+    epic: 3
+    action: "Attribute SOUP audit/sbom runs to the workspace (set workspace_level
+      in handlers/soup.rs) and surface an unparseable-output note when audit output
+      yields zero findings"
+    owner: "Simon"
+    status: open
+    ref: "docs/bmad/implementation-artifacts/epic-3-retro-2026-09-27.md"
+  - id: "epic-3-retro-item-16-make-qdev-scope-fail-closed-when-the-int"
+    epic: 3
+    action: "Make qdev-scope fail closed when the integration-branch diff baseline
+      is unresolvable instead of silently evaluating uncommitted files only"
+    owner: "Simon"
+    status: open
+    ref: "docs/bmad/implementation-artifacts/epic-3-retro-2026-09-27.md"
+  - id: "epic-3-retro-item-17-process-ledger-pass-at-epic-close-resolv"
+    epic: 3
+    action: "Process: ledger pass at epic close - resolve or record decisions for
+      the five deferred-work entries whose review-by point was an epic-3 story (sync
+      parsed=0, parse_error split, architecture_tests walk, doctor unreadable-dir,
+      gate-fail severity)"
+    owner: "Simon"
+    status: open
+    ref: "docs/bmad/implementation-artifacts/epic-3-retro-2026-09-27.md"
+  - id: "epic-3-retro-item-18-refactor-split-gate-runner-rs-built-in-v"
+    epic: 3
+    action: "Refactor: split gate/runner.rs built-in verifiers into gate/builtin/
+      and extract the duplicated git plumbing (29 invocations across 5 modules) into
+      a shared helper, ahead of epic 4"
+    owner: "Simon"
+    status: open
+    ref: "docs/bmad/implementation-artifacts/epic-3-retro-2026-09-27.md"

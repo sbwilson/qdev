@@ -519,7 +519,7 @@ updated_by:
     // Verify release validates against schema
     let fm: Value = qdev_core::extract_frontmatter(&release_content).unwrap();
     assert!(fm["baseline_snapshot"].is_object());
-    assert_eq!(fm["baseline_snapshot"]["warning-count"], 10.0);
+    assert_eq!(fm["baseline_snapshot"]["ratchets"]["warning-count"], 10.0);
     qdev_core::validate_value_detailed(qdev_core::EntityKind::Release, &fm)
         .expect("release frontmatter must pass schema validation");
 }

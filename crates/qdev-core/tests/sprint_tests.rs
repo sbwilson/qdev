@@ -12,7 +12,7 @@ use qdev_core::sprint::{
 };
 use qdev_core::store::{ensure_cache, SqliteStore, Store};
 use qdev_core::validate::find_duplicate_active_sprint_assignments;
-use qdev_core::{Author, EntityKind};
+use qdev_core::{Author, DeferredWorkRecord, EntityKind, SoupRecord};
 use tempfile::TempDir;
 
 fn setup_test_workspace(root: &Path) {
@@ -93,6 +93,203 @@ updated_by:
         target_modules: None,
     };
     store.upsert_entity(&entity_rec).unwrap();
+}
+
+fn write_release(root: &Path, store: &SqliteStore, id: &str) {
+    let path = root.join(format!("docs/state/releases/{id}.md"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let content = format!("---\nid: {id}\ntitle: Release\nstatus: active\nversion: 1\ncreated_by:\n  type: human\n  id: simon\nupdated_by:\n  type: human\n  id: simon\n---\n");
+    fs::write(&path, &content).unwrap();
+    store
+        .upsert_entity(&qdev_core::EntityRecord {
+            id: id.into(),
+            kind: EntityKind::Release,
+            title: Some("Release".into()),
+            status: Some("active".into()),
+            owners: None,
+            source_path: format!("docs/state/releases/{id}.md"),
+            content_hash: qdev_core::sha256_digest(content.as_bytes()),
+            version: 1,
+            created_by: Some(test_author()),
+            updated_by: Some(test_author()),
+            updated_at: "now".into(),
+            stale: false,
+            epic_id: None,
+            seq: None,
+            appetite: None,
+            safety_class: None,
+            target_modules: None,
+        })
+        .unwrap();
+}
+
+#[test]
+fn completed_release_close_snapshots_counts_ratchets_commit_and_soup() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_test_workspace(root);
+    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let storage = StorageConfig::default();
+    let author = test_author();
+    write_release(root, &store, "0.1.0");
+    open_sprint(&SprintOpenOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        title: "One",
+        release: Some("0.1.0"),
+        author: &author,
+    })
+    .unwrap();
+    open_sprint(&SprintOpenOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 2,
+        title: "Two",
+        release: None,
+        author: &author,
+    })
+    .unwrap();
+    write_story(root, &store, "E12S1", "Done", "done");
+    write_story(root, &store, "E12S2", "Open", "ready");
+    assign_to_sprint(&SprintAssignOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        stories: &["E12S1".into(), "E12S2".into()],
+        author: &author,
+    })
+    .unwrap();
+    store
+        .upsert_soup(&SoupRecord {
+            id: "dep-1".into(),
+            name: Some("dep".into()),
+            version: Some("1".into()),
+            cve_status: Some("CVE-1".into()),
+            evaluated_for_release: Some("0.1.0".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let baseline = qdev_core::RatchetBaseline {
+        gate: "coverage".into(),
+        metric: "coverage".into(),
+        direction: "must_not_decrease".into(),
+        value: 90.0,
+        commit: "abc".into(),
+        author: author.clone(),
+        timestamp: "now".into(),
+    };
+    qdev_core::write_baseline(root, &storage, "main", &baseline).unwrap();
+    let gates = vec![qdev_core::GateConfig {
+        id: "coverage".into(),
+        command: None,
+        timeout_ms: None,
+        depends_on: Vec::new(),
+        output_adapter: None,
+        on_transition: Vec::new(),
+        verifies: Vec::new(),
+        kind: Some("ratchet".into()),
+        metric: None,
+        direction: None,
+        skip: None,
+    }];
+    close_sprint(&SprintCloseOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        carry_over_target: Some(2),
+        author: &author,
+        gates: Some(&gates),
+        integration_branch: Some("main"),
+        status: "completed",
+        reason: None,
+    })
+    .unwrap();
+    let release = fs::read_to_string(root.join("docs/state/releases/0.1.0.md")).unwrap();
+    assert!(release.contains("story_counts:"));
+    assert!(release.contains("ratchets:"));
+    assert!(release.contains("commit_sha:"));
+    assert!(release.contains("vulnerable: 1"));
+    assert!(release.contains("coverage: 90.0"));
+    assert_eq!(
+        store.get_sprint_assignments(2).unwrap()[0].carried_from,
+        Some(1)
+    );
+}
+
+#[test]
+fn close_refusals_leave_sprint_unchanged() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_test_workspace(root);
+    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let storage = StorageConfig::default();
+    let author = test_author();
+    open_sprint(&SprintOpenOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        title: "One",
+        release: None,
+        author: &author,
+    })
+    .unwrap();
+    write_story(root, &store, "E12S1", "Active", "in-progress");
+    assign_to_sprint(&SprintAssignOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        stories: &["E12S1".into()],
+        author: &author,
+    })
+    .unwrap();
+    store
+        .upsert_deferred_work(&DeferredWorkRecord {
+            id: "DW-1".into(),
+            status: Some("open".into()),
+            safety_risk: Some("unacceptable".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let options = SprintCloseOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        carry_over_target: None,
+        author: &author,
+        gates: None,
+        integration_branch: None,
+        status: "completed",
+        reason: None,
+    };
+    assert_eq!(
+        close_sprint(&options).unwrap_err().exit_code(),
+        ExitCode::PolicyRefusal
+    );
+    assert!(
+        fs::read_to_string(root.join("docs/state/sprints/sprint-1.md"))
+            .unwrap()
+            .contains("status: active")
+    );
+    store.delete_deferred_work("DW-1").unwrap();
+    fs::create_dir_all(root.join(".qdev/leases")).unwrap();
+    fs::write(root.join(".qdev/leases/E12S1.json"), r#"{"story_id":"E12S1","holder":"other","author_type":"human","worktree_path":"/other","branch":"feature/other","started_at":"now","session_token":"token"}"#).unwrap();
+    assert_eq!(
+        close_sprint(&options).unwrap_err().exit_code(),
+        ExitCode::PolicyRefusal
+    );
+    assert!(
+        fs::read_to_string(root.join("docs/state/sprints/sprint-1.md"))
+            .unwrap()
+            .contains("status: active")
+    );
 }
 
 #[test]
@@ -406,6 +603,8 @@ fn test_close_sprint_carry_over() {
         author: &author,
         gates: None,
         integration_branch: None,
+        status: "completed",
+        reason: None,
     };
 
     let result = close_sprint(&close_opts).expect("close should succeed");
@@ -587,6 +786,8 @@ fn test_duplicate_active_sprint_validation() {
         author: &author,
         gates: None,
         integration_branch: None,
+        status: "completed",
+        reason: None,
     })
     .unwrap();
 
@@ -659,4 +860,462 @@ fn test_query_sprint_projection() {
         }
         _ => panic!("Expected entity projection"),
     }
+}
+
+#[test]
+fn close_refuses_terminal_and_non_active_sprints() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_test_workspace(root);
+    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let storage = StorageConfig::default();
+    let author = test_author();
+    open_sprint(&SprintOpenOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        title: "One",
+        release: None,
+        author: &author,
+    })
+    .unwrap();
+    close_sprint(&SprintCloseOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        carry_over_target: None,
+        author: &author,
+        gates: None,
+        integration_branch: None,
+        status: "completed",
+        reason: None,
+    })
+    .unwrap();
+    let before = fs::read_to_string(root.join("docs/state/sprints/sprint-1.md")).unwrap();
+
+    // Re-closing a terminal sprint is a policy refusal, not a mutation.
+    let error = close_sprint(&SprintCloseOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        carry_over_target: None,
+        author: &author,
+        gates: None,
+        integration_branch: None,
+        status: "completed",
+        reason: None,
+    })
+    .unwrap_err();
+    assert_eq!(error.exit_code(), ExitCode::PolicyRefusal);
+    assert_eq!(error.code(), "sprint_already_closed");
+    let after = fs::read_to_string(root.join("docs/state/sprints/sprint-1.md")).unwrap();
+    assert_eq!(
+        before, after,
+        "refused re-close must not touch the sprint file"
+    );
+
+    // A `planning` sprint is not closable either.
+    let planning = r#"---
+id: sprint-9
+title: Nine
+status: planning
+version: 1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+"#;
+    fs::write(root.join("docs/state/sprints/sprint-9.md"), planning).unwrap();
+    let error = close_sprint(&SprintCloseOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 9,
+        carry_over_target: None,
+        author: &author,
+        gates: None,
+        integration_branch: None,
+        status: "paused",
+        reason: Some("Trying early"),
+    })
+    .unwrap_err();
+    assert_eq!(error.code(), "sprint_not_active");
+    assert!(
+        fs::read_to_string(root.join("docs/state/sprints/sprint-9.md"))
+            .unwrap()
+            .contains("status: planning")
+    );
+}
+
+#[test]
+fn paused_close_refuses_safety_violations_and_resolved_dw_unblocks() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_test_workspace(root);
+    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let storage = StorageConfig::default();
+    let author = test_author();
+    open_sprint(&SprintOpenOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        title: "One",
+        release: None,
+        author: &author,
+    })
+    .unwrap();
+    store
+        .upsert_deferred_work(&DeferredWorkRecord {
+            id: "DW-1".into(),
+            status: Some("open".into()),
+            safety_risk: Some("unacceptable".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    // The safety refusal applies to EVERY requested terminal status, not just completed.
+    let error = close_sprint(&SprintCloseOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        carry_over_target: None,
+        author: &author,
+        gates: None,
+        integration_branch: None,
+        status: "paused",
+        reason: Some("Shrinking scope"),
+    })
+    .unwrap_err();
+    assert_eq!(error.code(), "unacceptable_deferred_work");
+    assert_eq!(error.exit_code(), ExitCode::PolicyRefusal);
+    assert!(
+        fs::read_to_string(root.join("docs/state/sprints/sprint-1.md"))
+            .unwrap()
+            .contains("status: active")
+    );
+
+    // Resolving the DW (done, rationale never set) must lift the block: the "open"
+    // predicate must not treat `done`/`wont_fix` as open.
+    store
+        .upsert_deferred_work(&DeferredWorkRecord {
+            id: "DW-1".into(),
+            status: Some("done".into()),
+            safety_risk: Some("unacceptable".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let result = close_sprint(&SprintCloseOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        carry_over_target: None,
+        author: &author,
+        gates: None,
+        integration_branch: None,
+        status: "paused",
+        reason: Some("Shrinking scope"),
+    })
+    .unwrap();
+    assert_eq!(result.status, "paused");
+    assert!(result.decision_id.is_some());
+}
+
+#[test]
+fn paused_close_with_carry_over_is_refused() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_test_workspace(root);
+    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let storage = StorageConfig::default();
+    let author = test_author();
+    open_sprint(&SprintOpenOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        title: "One",
+        release: None,
+        author: &author,
+    })
+    .unwrap();
+    open_sprint(&SprintOpenOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 2,
+        title: "Two",
+        release: None,
+        author: &author,
+    })
+    .unwrap();
+    let target_before = fs::read_to_string(root.join("docs/state/sprints/sprint-2.md")).unwrap();
+    let error = close_sprint(&SprintCloseOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        carry_over_target: Some(2),
+        author: &author,
+        gates: None,
+        integration_branch: None,
+        status: "paused",
+        reason: Some("Holding"),
+    })
+    .unwrap_err();
+    assert_eq!(error.code(), "carry_over_not_allowed");
+    assert_eq!(error.exit_code(), ExitCode::PolicyRefusal);
+    let target_after = fs::read_to_string(root.join("docs/state/sprints/sprint-2.md")).unwrap();
+    assert_eq!(
+        target_before, target_after,
+        "refused carry-over must not touch the target"
+    );
+    assert!(
+        fs::read_to_string(root.join("docs/state/sprints/sprint-1.md"))
+            .unwrap()
+            .contains("status: active")
+    );
+}
+
+#[test]
+fn completed_close_missing_or_malformed_release_refused_before_mutation() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_test_workspace(root);
+    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let storage = StorageConfig::default();
+    let author = test_author();
+    write_release(root, &store, "0.1.0");
+    open_sprint(&SprintOpenOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        title: "One",
+        release: Some("0.1.0"),
+        author: &author,
+    })
+    .unwrap();
+
+    // Missing release file: refused before any mutation.
+    fs::remove_file(root.join("docs/state/releases/0.1.0.md")).unwrap();
+    let error = close_sprint(&SprintCloseOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        carry_over_target: None,
+        author: &author,
+        gates: None,
+        integration_branch: None,
+        status: "completed",
+        reason: None,
+    })
+    .unwrap_err();
+    assert_eq!(error.code(), "release_not_found");
+    let sprint_file = fs::read_to_string(root.join("docs/state/sprints/sprint-1.md")).unwrap();
+    assert!(sprint_file.contains("status: active"));
+    assert!(!sprint_file.contains("completed_at"));
+
+    // Malformed release file (missing required fields): likewise refused pre-mutation.
+    fs::write(
+        root.join("docs/state/releases/0.1.0.md"),
+        "---\nid: 0.1.0\nversion: 1\ncreated_by:\n  type: human\n  id: simon\nupdated_by:\n  type: human\n  id: simon\n---\n",
+    )
+    .unwrap();
+    let error = close_sprint(&SprintCloseOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        carry_over_target: None,
+        author: &author,
+        gates: None,
+        integration_branch: None,
+        status: "completed",
+        reason: None,
+    })
+    .unwrap_err();
+    assert_eq!(error.code(), "schema_violation");
+    let sprint_file = fs::read_to_string(root.join("docs/state/sprints/sprint-1.md")).unwrap();
+    assert!(
+        sprint_file.contains("status: active"),
+        "sprint must remain active"
+    );
+}
+
+#[test]
+fn close_completed_with_reason_records_decision() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_test_workspace(root);
+    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let storage = StorageConfig::default();
+    let author = test_author();
+    open_sprint(&SprintOpenOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        title: "One",
+        release: None,
+        author: &author,
+    })
+    .unwrap();
+    let result = close_sprint(&SprintCloseOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        carry_over_target: None,
+        author: &author,
+        gates: None,
+        integration_branch: None,
+        status: "completed",
+        reason: Some("Shipped early"),
+    })
+    .unwrap();
+    let decision_id = result.decision_id.unwrap();
+    assert!(decision_id.starts_with("DEC-"));
+    // A reason implies an attributed decision even for a completed close, and the
+    // ruling text is durably recorded.
+    let decisions_dir = root.join("docs/state/decisions");
+    let mut found = false;
+    if decisions_dir.is_dir() {
+        for entry in fs::read_dir(&decisions_dir).unwrap() {
+            let entry = entry.unwrap();
+            let content = fs::read_to_string(entry.path()).unwrap_or_default();
+            if content.contains("Shipped early") {
+                found = true;
+            }
+        }
+    }
+    assert!(found, "decision record must contain the ruling");
+}
+
+#[test]
+fn baseline_counts_only_this_release_soup() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_test_workspace(root);
+    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let storage = StorageConfig::default();
+    let author = test_author();
+    write_release(root, &store, "0.1.0");
+    open_sprint(&SprintOpenOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        title: "One",
+        release: Some("0.1.0"),
+        author: &author,
+    })
+    .unwrap();
+    store
+        .upsert_soup(&SoupRecord {
+            id: "dep-1".into(),
+            cve_status: Some("CVE-1".into()),
+            evaluated_for_release: Some("0.1.0".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    store
+        .upsert_soup(&SoupRecord {
+            id: "dep-2".into(),
+            cve_status: Some("CVE-2".into()),
+            evaluated_for_release: Some("0.2.0".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    store
+        .upsert_soup(&SoupRecord {
+            id: "dep-3".into(),
+            cve_status: Some("CVE-3".into()),
+            evaluated_for_release: None,
+            ..Default::default()
+        })
+        .unwrap();
+    close_sprint(&SprintCloseOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        carry_over_target: None,
+        author: &author,
+        gates: None,
+        integration_branch: None,
+        status: "completed",
+        reason: None,
+    })
+    .unwrap();
+    let release = fs::read_to_string(root.join("docs/state/releases/0.1.0.md")).unwrap();
+    assert!(
+        release.contains("vulnerable: 1"),
+        "only this release's audits count:\n{release}"
+    );
+    assert!(
+        release.contains("dependencies: 1"),
+        "other releases' audits must not leak in:\n{release}"
+    );
+}
+
+#[test]
+fn baseline_marks_unreadable_ratchet_instead_of_silent_omission() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_test_workspace(root);
+    let store = SqliteStore::open(&root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let storage = StorageConfig::default();
+    let author = test_author();
+    write_release(root, &store, "0.1.0");
+    open_sprint(&SprintOpenOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        title: "One",
+        release: Some("0.1.0"),
+        author: &author,
+    })
+    .unwrap();
+    let baselines_dir = root.join("docs/state/baselines/main");
+    fs::create_dir_all(&baselines_dir).unwrap();
+    fs::write(baselines_dir.join("coverage.json"), "not valid json {").unwrap();
+    let gates = vec![qdev_core::GateConfig {
+        id: "coverage".into(),
+        command: None,
+        timeout_ms: None,
+        depends_on: Vec::new(),
+        output_adapter: None,
+        on_transition: Vec::new(),
+        verifies: Vec::new(),
+        kind: Some("ratchet".into()),
+        metric: None,
+        direction: None,
+        skip: None,
+    }];
+    close_sprint(&SprintCloseOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        carry_over_target: None,
+        author: &author,
+        gates: Some(&gates),
+        integration_branch: Some("main"),
+        status: "completed",
+        reason: None,
+    })
+    .unwrap();
+    let release = fs::read_to_string(root.join("docs/state/releases/0.1.0.md")).unwrap();
+    assert!(release.contains("unreadable baseline"), "{release}");
 }

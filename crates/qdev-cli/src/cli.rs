@@ -79,6 +79,8 @@ pub enum Commands {
     Dw(DwArgs),
     /// Manage sprints and story assignments
     Sprint(SprintArgs),
+    /// Produce epic and sprint release reviews
+    Review(ReviewArgs),
     /// Start and commit path-allowlisted chores
     Chore(ChoreArgs),
     /// Deterministically select the next eligible story
@@ -1023,6 +1025,14 @@ pub struct SprintCloseArgs {
     #[arg(long = "carry-over")]
     pub carry_over: Option<String>,
 
+    /// Terminal status: completed, paused, or abandoned
+    #[arg(long, default_value = "completed")]
+    pub status: String,
+
+    /// Required explanation for paused or abandoned closure
+    #[arg(long)]
+    pub reason: Option<String>,
+
     /// Attribution author type override ('human' or 'agent')
     #[arg(long = "author-type")]
     pub author_type: Option<String>,
@@ -1030,6 +1040,29 @@ pub struct SprintCloseArgs {
     /// Attribution developer/agent ID override
     #[arg(long = "author-id")]
     pub author_id: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct ReviewArgs {
+    #[command(subcommand)]
+    pub command: ReviewCommands,
+}
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum ReviewCommands {
+    /// Audit story evidence and open debt for an epic
+    Epic(ReviewEpicArgs),
+    /// Run `sprint_close`-bound gates (they fire here, not at `qdev sprint close`) and emit release reports
+    Sprint(ReviewSprintArgs),
+}
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct ReviewEpicArgs {
+    pub id: String,
+}
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReviewSprintArgs {
+    pub id: Option<String>,
+    #[arg(long)]
+    pub sprint: Option<String>,
 }
 
 /// Helper to check whether `--json` was passed in raw command-line arguments.

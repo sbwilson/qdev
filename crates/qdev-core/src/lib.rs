@@ -1,5 +1,3 @@
-pub mod hygiene;
-pub mod impact;
 pub mod chore;
 pub mod config;
 pub mod dag;
@@ -8,9 +6,12 @@ pub mod doctor;
 pub mod dw;
 pub mod envelope;
 pub mod errors;
+pub mod gate;
 pub mod governance;
 pub mod hook;
+pub mod hygiene;
 pub mod id;
+pub mod impact;
 pub mod init;
 pub mod interactivity;
 pub mod lease;
@@ -19,11 +20,11 @@ pub mod next;
 pub mod preflight;
 pub mod pulse;
 pub mod query;
+pub mod review;
 pub mod schema;
 pub mod scratch;
-pub mod gate;
-pub mod sprint;
 pub mod soup;
+pub mod sprint;
 pub mod store;
 pub mod transition;
 pub mod validate;
@@ -47,18 +48,21 @@ pub use preflight::{
 };
 
 pub use gate::{
-    evaluate_ratchet, execute_configured_command, execute_deps_gate, execute_gate, execute_gate_set, execute_hygiene_gate,
-    execute_scope_gate, format_duration, format_metric_number, get_gate_list, parse_with_adapter,
-    read_baseline, resolve_baseline_path, resolve_commit_sha,
-    resolve_collision_free_evidence_path, resolve_gate_execution_order, scan_rust_imports,
-    scan_swift_imports, validate_adapter_name, validate_gate_dependencies, write_baseline,
-    write_evidence_bundle, EvidenceBundle, GateBaselinePayload, GateFailure, GateListItem,
-    GateListPayload, GateResultDocument, GateRunOptions, GateRunOutcome, GateRunPayload,
-    GateRunSetOutcome, GateRunSetPayload, GateStatus, HeadTailBuffer, RatchetBaseline,
-    RatchetDirection, RatchetEvaluation, BUILTIN_GATE_DEPS, BUILTIN_GATE_HYGIENE,
+    evaluate_ratchet, execute_configured_command, execute_deps_gate, execute_gate,
+    execute_gate_set, execute_hygiene_gate, execute_scope_gate, format_duration,
+    format_metric_number, get_gate_list, parse_with_adapter, read_baseline, resolve_baseline_path,
+    resolve_collision_free_evidence_path, resolve_commit_sha, resolve_gate_execution_order,
+    scan_rust_imports, scan_swift_imports, validate_adapter_name, validate_gate_dependencies,
+    write_baseline, write_evidence_bundle, EvidenceBundle, GateBaselinePayload, GateFailure,
+    GateListItem, GateListPayload, GateResultDocument, GateRunOptions, GateRunOutcome,
+    GateRunPayload, GateRunSetOutcome, GateRunSetPayload, GateStatus, HeadTailBuffer,
+    RatchetBaseline, RatchetDirection, RatchetEvaluation, BUILTIN_GATE_DEPS, BUILTIN_GATE_HYGIENE,
     BUILTIN_GATE_SCOPE, VALID_ADAPTERS,
 };
-pub use soup::{parse_cargo_audit_json, persist_soup_records, record_sbom_artifact, SoupAuditFinding, SoupSummary};
+pub use soup::{
+    parse_cargo_audit_json, persist_soup_records, record_sbom_artifact, SoupAuditFinding,
+    SoupSummary,
+};
 
 pub use chore::{
     abort_chore, chore_dir, close_chore, commit_chore, derive_chore_id, find_open_chore,
@@ -108,6 +112,10 @@ pub use next::{
 pub use pulse::{
     build_pulse, CacheHealth, DeferredWorkCounts, EnvironmentPulse, GateSummary, IntegrationStatus,
     LeaseInfo, PulseOptions, PulsePayload, SprintPulse, StoryCounters, WorkingTreeStatus,
+};
+pub use review::{
+    review_epic, review_epic_with_gates, review_sprint, EpicReview, ReviewDebt, ReviewStory,
+    SprintReview,
 };
 
 pub use store::{

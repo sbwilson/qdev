@@ -20,7 +20,7 @@
     },
     "status": {
       "type": "string",
-      "minLength": 1
+      "enum": ["planning", "active", "completed", "paused", "abandoned"]
     },
     "version": {
       "type": "integer",
@@ -85,6 +85,10 @@
     },
     "completed_at": {
       "type": "string"
+    },
+    "close_reason": {
+      "type": "string",
+      "minLength": 1
     },
     "assignments": {
       "type": "array"

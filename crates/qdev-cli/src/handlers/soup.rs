@@ -57,6 +57,7 @@ pub fn handle_soup(
                 &GateRunOptions {
                     story: None,
                     timeout_ms: None,
+                    ..Default::default()
                 },
             ) {
                 Ok(run) => run,

@@ -81,10 +81,7 @@
       "type": "string"
     },
     "baseline_snapshot": {
-      "type": [
-        "string",
-        "object"
-      ]
+      "type": ["string", "object"]
     },
     "sbom_artifact_path": {
       "type": "string",

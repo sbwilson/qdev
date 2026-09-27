@@ -294,6 +294,7 @@ impl PreTransitionHook for TransitionGateHook {
         let gate_options = crate::gate::GateRunOptions {
             story: Some(ctx.story_id.clone()),
             timeout_ms: None,
+            ..Default::default()
         };
 
         let review_gate_ids: Vec<String> = self

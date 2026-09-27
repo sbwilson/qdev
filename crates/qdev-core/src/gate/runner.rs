@@ -36,6 +36,10 @@ pub fn is_builtin_gate(gate_id: &str) -> bool {
 pub struct GateRunOptions {
     pub story: Option<String>,
     pub timeout_ms: Option<u64>,
+    /// Attribute this run to the workspace (`_workspace`) instead of falling back to any
+    /// active lease. Used by command-level runs such as `qdev review sprint`, whose evidence
+    /// belongs to the workspace rather than to whichever story happens to be leased.
+    pub workspace_level: bool,
 }
 
 /// Runs a command using the normal gate runner, with a stable synthetic gate identifier.
@@ -212,6 +216,11 @@ fn resolve_story_id(
     config: &Config,
     options: &GateRunOptions,
 ) -> Option<String> {
+    // Workspace-level runs never inherit a lease: falling back to an unrelated leased story
+    // would stamp its evidence against that story and hide it from workspace-level reports.
+    if options.workspace_level {
+        return None;
+    }
     if let Some(ref s) = options.story {
         if !s.is_empty() {
             return Some(s.clone());

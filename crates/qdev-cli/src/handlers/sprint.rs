@@ -1,6 +1,6 @@
 use crate::cli::{self, Cli};
-use crate::output::OutputEmitter;
 use crate::open_query_store;
+use crate::output::OutputEmitter;
 use qdev_core::{resolve_author, ExitCode, JsonEnvelope};
 
 pub fn handle_sprint(
@@ -296,6 +296,8 @@ pub fn handle_sprint_close(
         author: &author,
         gates: Some(&annotated_config.config.gates),
         integration_branch: Some(&annotated_config.config.git.integration_branch),
+        status: &close_args.status,
+        reason: close_args.reason.as_deref(),
     };
 
     let result = match qdev_core::close_sprint(&options) {
