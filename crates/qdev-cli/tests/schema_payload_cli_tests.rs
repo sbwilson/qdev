@@ -229,20 +229,28 @@ fn test_schema_payload_unknown_name_json_mode() {
 }
 
 #[test]
-fn test_schema_payload_deferred_names_are_usage_errors() {
-    // `next` landed with Story 2.11, `gate_run` with Story 3.1, `gate_list` and `gate_set`
-    // with Story 3.3; only `context` remains deferred.
-    let name = "context";
+fn test_schema_payload_context_success() {
+    // `next` landed with Story 2.11, `gate_run` with Story 3.1, `gate_list`/`gate_set` with
+    // Story 3.3, and `context` with Story 4.1 — nothing remains deferred, so the name
+    // resolves to a schema.
     let assert = Command::cargo_bin("qdev")
         .unwrap()
-        .args(["schema", "payload", name])
+        .args(["schema", "payload", "context"])
         .assert()
-        .failure()
-        .code(2);
-    let stderr = std::str::from_utf8(&assert.get_output().stderr).unwrap();
-    assert!(stderr.contains("story"));
-    assert!(stderr.contains("error"));
-    assert!(stderr.contains("validate"));
+        .success()
+        .code(0);
+    let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
+    assert!(stdout.contains("Context Payload Schema"));
+    assert!(stdout.contains("truncated"));
+
+    let json_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "context", "--json"])
+        .assert()
+        .success();
+    let val: Value = serde_json::from_slice(&json_assert.get_output().stdout).unwrap();
+    assert_eq!(val["schema_version"], "1");
+    assert_eq!(val["title"], "Context Payload Schema");
 }
 
 #[test]

@@ -1,5 +1,6 @@
 pub mod chore;
 pub mod config;
+pub mod context;
 pub mod dag;
 pub mod decision;
 pub mod doctor;
@@ -168,6 +169,10 @@ pub use init::{
     STATE_SUBDIRECTORIES,
 };
 pub use interactivity::Interactivity;
+pub use context::{
+    build_context, render_context_markdown, render_context_text, ContextOptions, ContextPayload,
+    ContextPhase, ContextSection, ContextStats, TruncatedSection, HYGIENE_DIRECTIVE,
+};
 pub use query::{
     query_entity, query_list, ConstraintProjection, EntityProjection, EvidenceProjection,
     GetResult, ListEntryProjection, ListQueryOptions, QueryOptions, ScratchEntryProjection,

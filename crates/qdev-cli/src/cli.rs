@@ -85,6 +85,8 @@ pub enum Commands {
     Chore(ChoreArgs),
     /// Deterministically select the next eligible story
     Next(NextArgs),
+    /// Project a token-budgeted, phase-specific agent context for a story
+    Context(ContextArgs),
     /// Run verification gates
     Gate(GateArgs),
     /// Audit third-party dependencies and capture SBOM evidence
@@ -336,6 +338,31 @@ pub struct NextArgs {
     /// identity (config identity, or their teams) via the resolve_author chain
     #[arg(short = 'o', long = "owner")]
     pub owner: Option<String>,
+}
+
+/// Arguments for `qdev context <story-id> --phase <specify|develop|review>` (Story 4.1):
+/// the token-budgeted projection of exactly the context a development phase needs.
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ContextArgs {
+    /// Target story identifier (e.g. "E12S4") — the only accepted entity kind
+    pub id: String,
+
+    /// Development phase to project (specify, develop, or review)
+    #[arg(long)]
+    pub phase: String,
+
+    /// Token budget for the projection; omitted selects the phase default (specify 800,
+    /// develop 1200, review 2500)
+    #[arg(long)]
+    pub budget: Option<u32>,
+
+    /// Report per-section estimated tokens
+    #[arg(long)]
+    pub stats: bool,
+
+    /// Output Markdown instead of the default text rendering (mutually exclusive with --json)
+    #[arg(long)]
+    pub format: Option<String>,
 }
 
 /// Arguments for `qdev chore close` and `qdev chore abort`, which differ only in the outcome

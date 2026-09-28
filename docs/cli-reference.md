@@ -47,10 +47,10 @@ Universal reference resolution: any command that takes an ID accepts any entity 
 | `qdev validate [--changed] [--fix-ids] [--yes]` | Dangling relations, cycles, ID collisions, schema, orphan DW, missing rationale |
 | `qdev sync [--rebuild]` | Force hydration or rebuild the cache |
 | `qdev schema <entity-kind>` | Print JSON Schema for an entity's frontmatter shape (`story`, `epic`, `dw`, ...) |
-| `qdev schema payload <name>` | Print JSON Schema for a command's output payload (`story`, `error`, `validate`, `fix_ids`, `list`, `sync`, `doctor`, `next`, `pulse`, `impact`; `context`/`gate_run` land with their commands) |
+| `qdev schema payload <name>` | Print JSON Schema for a command's output payload (`story`, `error`, `validate`, `fix_ids`, `list`, `sync`, `doctor`, `next`, `pulse`, `impact`, `context`, `gate_run`, …) |
 | `qdev config show` | Effective merged configuration |
 | `qdev next [--sprint N] [--owner me]` | Deterministically select the next unblocked story |
-| `qdev context <id> --phase P [--budget N] [--stats]` | Token-budgeted projection for an agent phase |
+| `qdev context <id> --phase P [--budget N] [--stats] [--format md]` | Token-budgeted projection for an agent phase (see below) |
 | `qdev graph --dot [--epic E12]` | Dependency DAG (`--dot` is required; no other output format yet) |
 | `qdev impact [STORY_ID] [--paths <PATHS...>]` | Affected stories, modules, requirements, and gates to re-run |
 
@@ -686,3 +686,58 @@ checks above are deliberately never written there, so they cannot appear in it. 
 as "how much did hydration flag", not as "is my workspace healthy"; a `finding_count` of `0` in
 the `cache` section is not a clean bill of health. The `validation` section answers the health
 question.
+
+### `qdev context`
+
+```
+qdev context <story-id> --phase specify|develop|review [--budget N] [--stats] [--format md] [--json]
+```
+
+The single source of agent context (architecture §12): `qdev context` projects exactly the
+context a development phase needs, within a token budget, from the hydrated cache plus the
+entity files. Skills and MCP tools call it rather than assembling context themselves. The target
+must be a **story** id — any other entity kind is a usage error (exit 2) naming the kind, and an
+unknown id is a logical error (exit 1).
+
+**Phases and section sets.** Each phase projects a fixed set of sections in a fixed priority
+order (priority 1 = highest). The section set depends only on the phase, never on the data
+shape: an empty section is still present, marked `(none)`.
+
+| Phase | Sections, in priority order | Typical budget |
+| --- | --- | --- |
+| `specify` | `epic_goal`, `epic_constraints`, `sibling_stories`, `adr_summaries`, `requirements` | 800 |
+| `develop` | `story_spec`, `constraints`, `modules`, `adr_excerpts`, `requirements`, `scratchpad`, `gates`, `hygiene` | 1,200 |
+| `review` | everything in `develop`, plus `diff`, `gate_receipts`, `evidence` | 2,500 |
+
+- `story_spec` is the story file's markdown body, frontmatter stripped.
+- `constraints` carries full ids, own first then inherited (tagged `[inherited from <epic>]`).
+- `modules` resolves each `target_modules` id to its configured path globs (an unregistered id is named as such).
+- `adr_excerpts` / `adr_summaries` are the ADRs the story is `governed_by`: the `develop` excerpt carries Rule + Prevents (body `## Rule`/`## Decision`/`## Prevents` sections win over the `decision`/`prevents` frontmatter fields); the `specify` summary is a one-line title + decision. A dangling ADR keeps its id and is marked `(unresolved)` — a dangling reference never fails the payload.
+- `gates` lists the bound gates: the built-ins `qdev-scope`/`qdev-deps`/`qdev-hygiene` in execution order, then configured `[[gates]]` whose `on_transition` includes `review` (the same set the transition engine runs), id-sorted.
+- `hygiene` is the built-in comment-hygiene directive (compliance §1), verbatim.
+- `diff` is the files changed since the merge-base with `[git] integration_branch` (per-file +/- line counts, plus staged, unstaged, and untracked changes); an unresolvable baseline yields an empty section with a reason note.
+- `gate_receipts` / `evidence` are the latest run per gate (id, status, summary) and those runs' evidence paths.
+
+**Budgeting and truncation.** When `--budget` is omitted, the phase's typical budget above
+applies; `--budget 0` is a usage error (exit 2). The budget walk goes highest to lowest
+priority: each section keeps the complete lines that fit the remaining budget (deterministic
+line trimming, never mid-line splits). A section that cannot fit at all is dropped and recorded
+in the payload's `truncated` list (drop order: name + its full pre-trim token count), as is a
+section that is partially trimmed. The **first section is exempt**: when it alone exceeds the
+budget it is kept whole, the payload may then exceed the budget, and `--stats` surfaces the
+overrun.
+
+Token estimates use the documented estimator — `chars/4`, rounded up.
+
+**`--stats`** adds a `stats` object (budget, total, per-section tokens) to the JSON payload and
+a stats table to the text rendering, only when the flag is set.
+
+**Output.** Default text and `--format md` are two deterministic renderings of the one payload
+built in core; `--json` emits the envelope (see `qdev schema payload context`); `--json` and
+`--format` together are a usage error (exit 2). Output is byte-identical across runs: no
+timestamps, ids/seq/path-sorted collections.
+
+**Read-only.** The projection performs no cache writes, no file writes, no git mutations, and
+never prompts — it is safe in non-interactive mode. In particular it does **not** trigger the
+boot-time hydration sweep that most commands run: it reports on the last-synced cache, so run
+`qdev sync` first if you have edited files since the last sync.

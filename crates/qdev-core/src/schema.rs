@@ -144,8 +144,8 @@ impl fmt::Display for EntityKind {
 ///
 /// Every `--json` payload with a live command has a schema here — the invariant is that a
 /// shipped payload is either schematized or recorded in `deferred-work.md`, never neither.
-/// `context` and `gate_run`-as-a-payload have no live command yet and are deferred
-/// (Epic 3 scope); they are intentionally absent here.
+/// (`gate_run` shipped with Story 3.1 and `context` with Story 4.1, each with its command; a
+/// payload that is deferred to a future story is recorded in `deferred-work.md` instead.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PayloadKind {
@@ -170,6 +170,7 @@ pub enum PayloadKind {
     HookInstall,
     Hygiene,
     Impact,
+    Context,
 }
 
 impl PayloadKind {
@@ -197,6 +198,7 @@ impl PayloadKind {
             PayloadKind::HookInstall => include_str!("../schemas/payload-hook-install.json"),
             PayloadKind::Hygiene => include_str!("../schemas/payload-hygiene.json"),
             PayloadKind::Impact => include_str!("../schemas/payload-impact.json"),
+            PayloadKind::Context => include_str!("../schemas/payload-context.json"),
         }
     }
 
@@ -235,11 +237,12 @@ impl PayloadKind {
             PayloadKind::HookInstall => "hook_install",
             PayloadKind::Hygiene => "hygiene",
             PayloadKind::Impact => "impact",
+            PayloadKind::Context => "context",
         }
     }
 
     /// Returns an array of all currently-supported payload kinds.
-    pub const fn all() -> &'static [PayloadKind; 21] {
+    pub const fn all() -> &'static [PayloadKind; 22] {
         &[
             PayloadKind::Story,
             PayloadKind::Error,
@@ -262,6 +265,7 @@ impl PayloadKind {
             PayloadKind::HookInstall,
             PayloadKind::Hygiene,
             PayloadKind::Impact,
+            PayloadKind::Context,
         ]
     }
 
@@ -275,8 +279,8 @@ impl PayloadKind {
     }
 
     /// Resolves a payload name loosely (case-insensitive, hyphens/underscores). Names deferred to
-    /// a future story (`context`) are reported as unknown, same as any other
-    /// unrecognized name, until their command ships.
+    /// a future story are reported as unknown, same as any other unrecognized name, until their
+    /// command ships.
     pub fn from_str_loose(s: &str) -> Result<PayloadKind, QdevError> {
         let normalized = s.trim().to_lowercase().replace('-', "_");
         match normalized.as_str() {
@@ -305,6 +309,7 @@ impl PayloadKind {
             }
             "hygiene" | "hygiene_check" => Ok(PayloadKind::Hygiene),
             "impact" | "impacts" | "impact_analysis" => Ok(PayloadKind::Impact),
+            "context" | "contexts" => Ok(PayloadKind::Context),
             _ => Err(QdevError::usage_error(format!(
                 "Unknown payload name '{}'. Valid payload names: {}",
                 s,

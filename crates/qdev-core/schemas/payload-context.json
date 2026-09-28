@@ -1,0 +1,132 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Context Payload Schema",
+  "description": "Output shape of `qdev context <story-id> --phase <specify|develop|review> --json` (Story 4.1): a deterministic, token-budgeted projection of priority-ordered sections from the hydrated cache plus entity files. Sections use the documented chars/4 token estimator; the budget walk trims or drops lowest-priority sections first and records each in `truncated` (drop order). `stats` is present only when `--stats` is requested. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "phase",
+    "budget",
+    "total_tokens",
+    "sections",
+    "truncated"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The target story id — the only accepted entity kind."
+    },
+    "phase": {
+      "type": "string",
+      "enum": ["specify", "develop", "review"]
+    },
+    "budget": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The effective token budget: `--budget` or the phase default (specify 800, develop 1200, review 2500)."
+    },
+    "total_tokens": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Estimated tokens of the emitted payload (sum of the sections' emitted tokens). May exceed `budget` only via the first-section exemption."
+    },
+    "sections": {
+      "type": "array",
+      "description": "Sections in priority order (priority 1 = highest). The set depends only on the phase; an empty section is still present with `(none)` content. Sections the budget dropped entirely are absent here and named in `truncated`.",
+      "items": {
+        "$ref": "#/definitions/section"
+      }
+    },
+    "truncated": {
+      "type": "array",
+      "description": "Sections trimmed or dropped by the budget walk, in drop order (lowest priority first), with each section's full pre-trim token count.",
+      "items": {
+        "$ref": "#/definitions/truncated"
+      }
+    },
+    "stats": {
+      "description": "Present only when `--stats` is requested; the key is omitted otherwise.",
+      "$ref": "#/definitions/stats"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "section": {
+      "type": "object",
+      "required": ["name", "priority", "tokens", "truncated", "content"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based priority rank within the phase; sections are emitted in ascending order."
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Estimated tokens of the content actually emitted (after any line-trim)."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "True when the budget walk trimmed this section's lines."
+        },
+        "content": {
+          "type": "string",
+          "description": "The section text; `(none)` when the section has no data."
+        }
+      },
+      "additionalProperties": false
+    },
+    "truncated": {
+      "type": "object",
+      "required": ["name", "tokens"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The section's full pre-trim token estimate — what the agent is owed."
+        }
+      },
+      "additionalProperties": false
+    },
+    "stats": {
+      "type": "object",
+      "required": ["budget", "total_tokens", "over_budget", "sections"],
+      "properties": {
+        "budget": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "total_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "over_budget": {
+          "type": "boolean",
+          "description": "True when the total exceeds the budget (possible only via the first-section exemption)."
+        },
+        "sections": {
+          "type": "object",
+          "description": "Per-section emitted tokens, name-sorted.",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

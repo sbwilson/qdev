@@ -252,9 +252,17 @@ fn run(raw_args: &[String]) -> i32 {
     // `sync_meta (id, last_synced_at)` with the current time — a cache mutation. Story 2.12
     // requires the default command and its `status` alias to be genuinely read-only: an
     // unsynced workspace is *reported* as stale cache, never repaired, so neither command may
-    // trigger the boot rebuild or sweep. Everything else keeps its boot behaviour untouched.
+    // trigger the boot rebuild or sweep. `context` (Story 4.1) is excluded for the same
+    // reason: the projection is read-only by contract — no cache writes, no file writes, no
+    // git mutations — so it reports on the last-synced cache and never repairs it.
+    // Everything else keeps its boot behaviour untouched.
     let mut boot_summary: Option<qdev_core::SweepSummary> = None;
-    if root.join("qdev.toml").is_file() && !matches!(cli.command, None | Some(Commands::Status)) {
+    if root.join("qdev.toml").is_file()
+        && !matches!(
+            cli.command,
+            None | Some(Commands::Status) | Some(Commands::Context(_))
+        )
+    {
         match qdev_core::ensure_cache_with_summary(&root, &annotated_config.config.storage) {
             Ok((_, summary)) => boot_summary = Some(summary),
             Err(e) => {
@@ -456,6 +464,16 @@ fn run(raw_args: &[String]) -> i32 {
             handlers::next::handle_next(next_args, &annotated_config, &cli, &output, &current_dir)
                 .as_i32()
         }
+        Some(Commands::Context(ref context_args)) => {
+            handlers::context::handle_context(
+                context_args,
+                &annotated_config,
+                &cli,
+                &output,
+                &current_dir,
+            )
+            .as_i32()
+        }
         Some(Commands::Gate(ref gate_args)) => {
             handlers::gate::handle_gate(gate_args, &annotated_config, &cli, &output, &root).as_i32()
         }
@@ -591,6 +609,7 @@ fn requires_workspace(command: Option<&Commands>) -> bool {
         | Some(Commands::Review(_))
         | Some(Commands::Chore(_))
         | Some(Commands::Next(_))
+        | Some(Commands::Context(_))
         | Some(Commands::Gate(_))
         | Some(Commands::Soup(_))
         | Some(Commands::Impact(_)) => true,
