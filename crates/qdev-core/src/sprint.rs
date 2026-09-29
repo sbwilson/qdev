@@ -567,10 +567,20 @@ pub fn close_sprint(options: &SprintCloseOptions) -> Result<SprintCloseResult, Q
     }
     let alternate_reason = options.reason.map(str::trim).filter(|r| !r.is_empty());
     if status != "completed" && alternate_reason.is_none() {
+        let attribution = crate::errors::RejectionAttribution::new(
+            "Closing a sprint as paused or abandoned requires a non-empty reason",
+        )
+        .with_policy("sprint_lifecycle");
+
         return Err(QdevError::policy_refusal(
             "close_reason_required",
             "Paused or abandoned sprint closure requires a non-empty --reason",
-        ));
+        )
+        .with_details(serde_json::json!({
+            "sprint": options.sprint,
+            "status": status,
+        }))
+        .with_attribution(attribution));
     }
 
     let entity_id = sprint_entity_id(options.sprint);
@@ -624,30 +634,60 @@ pub fn close_sprint(options: &SprintCloseOptions) -> Result<SprintCloseResult, Q
         .unwrap_or("")
         .trim();
     if matches!(current_status, "completed" | "paused" | "abandoned") {
+        let attribution = crate::errors::RejectionAttribution::new(
+            "Terminal sprints cannot be closed again",
+        )
+        .with_policy("sprint_lifecycle");
+
         return Err(QdevError::policy_refusal(
             "sprint_already_closed",
             format!(
                 "Sprint {} is already {} and cannot be closed again",
                 options.sprint, current_status
             ),
-        ));
+        )
+        .with_details(serde_json::json!({
+            "sprint": options.sprint,
+            "status": current_status,
+        }))
+        .with_attribution(attribution));
     }
     if current_status != "active" {
+        let attribution = crate::errors::RejectionAttribution::new(
+            "Only active sprints can be closed",
+        )
+        .with_policy("sprint_lifecycle");
+
         return Err(QdevError::policy_refusal(
             "sprint_not_active",
             format!(
                 "Sprint {} is {:?} and cannot be closed; only active sprints can be closed",
                 options.sprint, current_status
             ),
-        ));
+        )
+        .with_details(serde_json::json!({
+            "sprint": options.sprint,
+            "status": current_status,
+        }))
+        .with_attribution(attribution));
     }
 
     let target_abs_path = if let Some(target_num) = options.carry_over_target {
         if status != "completed" {
+            let attribution = crate::errors::RejectionAttribution::new(
+                "Carry-over is only permitted when completing a sprint",
+            )
+            .with_policy("carry_over_not_allowed");
+
             return Err(QdevError::policy_refusal(
                 "carry_over_not_allowed",
                 "Carry-over is only available when completing a sprint",
-            ));
+            )
+            .with_details(serde_json::json!({
+                "sprint": options.sprint,
+                "target_sprint": target_num,
+            }))
+            .with_attribution(attribution));
         }
         if target_num == options.sprint {
             return Err(QdevError::usage_error(
@@ -733,6 +773,7 @@ pub fn close_sprint(options: &SprintCloseOptions) -> Result<SprintCloseResult, Q
     // for every requested terminal status: an unjustified `unacceptable` risk or a live
     // lease blocks the close whether it lands as `completed`, `paused`, or `abandoned`
     // (the DW vocabulary is `open`/`done`/`wont_fix`; resolved items no longer block).
+    let mut unacceptable_dw = Vec::new();
     for dw in options.store.list_deferred_work()? {
         if dw.status.as_deref().unwrap_or("open") == "open"
             && dw.safety_risk.as_deref() == Some("unacceptable")
@@ -743,15 +784,29 @@ pub fn close_sprint(options: &SprintCloseOptions) -> Result<SprintCloseResult, Q
                 .unwrap_or("")
                 .is_empty()
         {
-            return Err(QdevError::policy_refusal(
-                "unacceptable_deferred_work",
-                format!(
-                    "Deferred work '{}' has unacceptable risk without rationale",
-                    dw.id
-                ),
-            ));
+            unacceptable_dw.push(dw.id.clone());
         }
     }
+    if !unacceptable_dw.is_empty() {
+        let attribution = crate::errors::RejectionAttribution::new(
+            "Open deferred work with unacceptable safety risk requires documented rationale before closing sprint",
+        )
+        .with_blocking_ids(unacceptable_dw.clone())
+        .with_policy("deferred_work_rationale");
+
+        return Err(QdevError::policy_refusal(
+            "unacceptable_deferred_work",
+            format!(
+                "Deferred work '{}' has unacceptable risk without rationale",
+                unacceptable_dw[0]
+            ),
+        )
+        .with_details(serde_json::json!({
+            "blocking_ids": unacceptable_dw,
+        }))
+        .with_attribution(attribution));
+    }
+
     let assignments = options.store.get_sprint_assignments(options.sprint)?;
     let leases =
         crate::lease::list_leases_with_storage(options.workspace_root, Some(options.storage))?;
@@ -762,15 +817,27 @@ pub fn close_sprint(options: &SprintCloseOptions) -> Result<SprintCloseResult, Q
             .and_then(|s| s.status)
             .as_deref()
             == Some("in-progress")
-            && leases.iter().any(|l| l.story_id == assignment.story_id)
         {
-            return Err(QdevError::policy_refusal(
-                "active_story_lease",
-                format!(
-                    "Story '{}' is in progress and has an active lease",
-                    assignment.story_id
-                ),
-            ));
+            if let Some(matching_lease) = leases.iter().find(|l| l.story_id == assignment.story_id) {
+                let attribution = crate::errors::RejectionAttribution::new(
+                    "Stories in progress with active leases must be released or completed before closing sprint",
+                )
+                .with_holder(&matching_lease.holder)
+                .with_policy("lease_lifecycle");
+
+                return Err(QdevError::policy_refusal(
+                    "active_story_lease",
+                    format!(
+                        "Story '{}' is in progress and has an active lease",
+                        assignment.story_id
+                    ),
+                )
+                .with_details(serde_json::json!({
+                    "story_id": assignment.story_id,
+                    "holder": matching_lease.holder,
+                }))
+                .with_attribution(attribution));
+            }
         }
     }
 

@@ -754,7 +754,13 @@ fn handle_init(
                 )
                 .with_details(serde_json::json!({
                     "flag": "--name"
-                }));
+                }))
+                .with_attribution(
+                    qdev_core::RejectionAttribution::new(
+                        "Required initialization flags must be provided in non-interactive mode",
+                    )
+                    .with_policy("init_parameters"),
+                );
                 let _ = output.emit_error(&err);
                 return ExitCode::PolicyRefusal;
             }
@@ -774,7 +780,13 @@ fn handle_init(
                 )
                 .with_details(serde_json::json!({
                     "flag": "--developer"
-                }));
+                }))
+                .with_attribution(
+                    qdev_core::RejectionAttribution::new(
+                        "Required initialization flags must be provided in non-interactive mode",
+                    )
+                    .with_policy("init_parameters"),
+                );
                 let _ = output.emit_error(&err);
                 return ExitCode::PolicyRefusal;
             }
@@ -796,7 +808,13 @@ fn handle_init(
             )
             .with_details(serde_json::json!({
                 "flag": "--team"
-            }));
+            }))
+            .with_attribution(
+                qdev_core::RejectionAttribution::new(
+                    "Required initialization flags must be provided in non-interactive mode",
+                )
+                .with_policy("init_parameters"),
+            );
             let _ = output.emit_error(&err);
             return ExitCode::PolicyRefusal;
         }
@@ -1051,10 +1069,19 @@ pub(crate) fn check_governance_gate(
     if cli.r#override {
         let just = cli.justification.as_deref().unwrap_or("").trim();
         if just.is_empty() {
+            let attribution = qdev_core::RejectionAttribution::new(
+                "Governance override requires non-empty justification",
+            )
+            .with_policy("justification_required");
+
             let err = qdev_core::QdevError::policy_refusal(
                 "needs_justification",
                 "--override requires a non-empty --justification",
-            );
+            )
+            .with_details(serde_json::json!({
+                "target_id": target_id,
+            }))
+            .with_attribution(attribution);
             let _ = output.emit_error(&err);
             return Err(ExitCode::PolicyRefusal);
         }
@@ -1072,23 +1099,56 @@ pub(crate) fn check_governance_gate(
     }
 
     if interactivity.is_non_interactive() {
-        let msg = if classification.is_cross_team && classification.is_out_of_lease {
-            format!(
-                "Mutation on entity '{}' is out-of-lease and cross-team; re-run with --override --justification \"<rationale>\"",
-                target_id
+        let (policy, rule, msg) = if classification.is_cross_team && classification.is_out_of_lease {
+            (
+                "cross_team_governance",
+                "Non-interactive mutations crossing team ownership boundaries and lease scope require override and justification",
+                format!(
+                    "Mutation on entity '{}' is out-of-lease and cross-team; re-run with --override --justification \"<rationale>\"",
+                    target_id
+                ),
             )
         } else if classification.is_cross_team {
-            format!(
-                "Cross-team mutation on entity '{}' requires confirmation; re-run with --override --justification \"<rationale>\"",
-                target_id
+            (
+                "cross_team_governance",
+                "Non-interactive mutations crossing team ownership boundaries require override and justification",
+                format!(
+                    "Cross-team mutation on entity '{}' requires confirmation; re-run with --override --justification \"<rationale>\"",
+                    target_id
+                ),
             )
         } else {
-            format!(
-                "Out-of-lease mutation on entity '{}' requires confirmation; re-run with --override --justification \"<rationale>\"",
-                target_id
+            (
+                "lease_scope",
+                "Non-interactive mutations outside the active lease require override and justification",
+                format!(
+                    "Out-of-lease mutation on entity '{}' requires confirmation; re-run with --override --justification \"<rationale>\"",
+                    target_id
+                ),
             )
         };
-        let err = qdev_core::QdevError::policy_refusal("needs_confirmation", msg);
+
+        let mut attribution = qdev_core::RejectionAttribution::new(rule).with_policy(policy);
+        if let Some(ref l) = classification.active_lease {
+            attribution = attribution.with_holder(&l.holder);
+        }
+
+        let mut details = serde_json::json!({
+            "target_id": target_id,
+            "is_cross_team": classification.is_cross_team,
+            "is_out_of_lease": classification.is_out_of_lease,
+        });
+        if let Some(ref l) = classification.active_lease {
+            details["active_lease"] = serde_json::json!({
+                "story_id": l.story_id,
+                "holder": l.holder,
+                "worktree_path": l.worktree_path,
+            });
+        }
+
+        let err = qdev_core::QdevError::policy_refusal("needs_confirmation", msg)
+            .with_details(details)
+            .with_attribution(attribution);
         let _ = output.emit_error(&err);
         return Err(ExitCode::PolicyRefusal);
     }
@@ -1173,6 +1233,12 @@ pub(crate) fn check_governance_gate(
                         let err = qdev_core::QdevError::policy_refusal(
                             "needs_justification",
                             "--override requires a non-empty --justification",
+                        )
+                        .with_attribution(
+                            qdev_core::RejectionAttribution::new(
+                                "Override requires non-empty justification",
+                            )
+                            .with_policy("justification_required"),
                         );
                         let _ = output.emit_error(&err);
                         return Err(ExitCode::PolicyRefusal);
@@ -1183,6 +1249,12 @@ pub(crate) fn check_governance_gate(
                     let err = qdev_core::QdevError::policy_refusal(
                         "needs_justification",
                         "--override requires a non-empty --justification",
+                    )
+                    .with_attribution(
+                        qdev_core::RejectionAttribution::new(
+                            "Override requires non-empty justification",
+                        )
+                        .with_policy("justification_required"),
                     );
                     let _ = output.emit_error(&err);
                     return Err(ExitCode::PolicyRefusal);
@@ -1203,6 +1275,12 @@ pub(crate) fn check_governance_gate(
                         let err = qdev_core::QdevError::policy_refusal(
                             "needs_justification",
                             "--override requires a non-empty --justification",
+                        )
+                        .with_attribution(
+                            qdev_core::RejectionAttribution::new(
+                                "Override requires non-empty justification",
+                            )
+                            .with_policy("justification_required"),
                         );
                         let _ = output.emit_error(&err);
                         return Err(ExitCode::PolicyRefusal);
@@ -1213,6 +1291,12 @@ pub(crate) fn check_governance_gate(
                     let err = qdev_core::QdevError::policy_refusal(
                         "needs_justification",
                         "--override requires a non-empty --justification",
+                    )
+                    .with_attribution(
+                        qdev_core::RejectionAttribution::new(
+                            "Override requires non-empty justification",
+                        )
+                        .with_policy("justification_required"),
                     );
                     let _ = output.emit_error(&err);
                     return Err(ExitCode::PolicyRefusal);
@@ -1276,6 +1360,12 @@ pub(crate) fn check_governance_gate(
                         let err = qdev_core::QdevError::policy_refusal(
                             "needs_justification",
                             "--override requires a non-empty --justification",
+                        )
+                        .with_attribution(
+                            qdev_core::RejectionAttribution::new(
+                                "Override requires non-empty justification",
+                            )
+                            .with_policy("justification_required"),
                         );
                         let _ = output.emit_error(&err);
                         return Err(ExitCode::PolicyRefusal);
@@ -1286,6 +1376,12 @@ pub(crate) fn check_governance_gate(
                     let err = qdev_core::QdevError::policy_refusal(
                         "needs_justification",
                         "--override requires a non-empty --justification",
+                    )
+                    .with_attribution(
+                        qdev_core::RejectionAttribution::new(
+                            "Override requires non-empty justification",
+                        )
+                        .with_policy("justification_required"),
                     );
                     let _ = output.emit_error(&err);
                     return Err(ExitCode::PolicyRefusal);
@@ -3056,7 +3152,13 @@ fn handle_fix_ids(
             "needs_confirmation",
             "'--fix-ids' requires an interactive terminal or '--yes'; refusing without writing",
         )
-        .with_details(serde_json::json!({ "flag": "--yes" }));
+        .with_details(serde_json::json!({ "flag": "--yes" }))
+        .with_attribution(
+            qdev_core::RejectionAttribution::new(
+                "'--fix-ids' requires confirmation in non-interactive mode",
+            )
+            .with_policy("fix_ids_confirmation"),
+        );
         let _ = output.emit_error(&err);
         return ExitCode::PolicyRefusal;
     }

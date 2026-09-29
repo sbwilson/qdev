@@ -251,12 +251,27 @@ Errors go to stdout in JSON mode, stderr in text mode:
 {
   "schema_version": "1",
   "error": {
-    "code": "constraint_violation",
-    "message": "Change touches crates/video/ which is outside target_modules",
-    "details": {"constraint_id": "E12S4/NG-2", "text": "Do not touch frame buffers", "paths": ["crates/video/frame.rs"]}
+    "code": "gate_failed",
+    "message": "scope check failed: 1 path(s) outside target_modules",
+    "details": {
+      "gate_id": "qdev-scope",
+      "constraint_id": "E12S4/NG-2",
+      "rule": "Paths must not violate active no-go constraints"
+    }
   }
 }
 ```
+
+#### Attributed Rejections
+
+All refusal paths (`gate fail`, `scope violation`, `lease conflict`, `missing justification`, `cross-team edit`, `blocked dependency`, and sprint close refusals) populate structured attribution fields in `details`. Every refusal envelope includes the human-readable text of the rule (`rule`) plus at least one structured attribution key:
+- `constraint_id`: Violated constraint identifier (e.g. `E12S4/NG-2`)
+- `gate_id`: Gate identifier (e.g. `qdev-scope`, `c-abi-round-trip`)
+- `policy`: Violated policy name (e.g. `target_modules`, `single_lease_holder`, `lease_ownership`, `justification_required`, `cross_team_governance`, `lease_scope`, `dependency_order`, `deferred_work_rationale`, `lease_lifecycle`, `preflight_guard`)
+- `blocking_ids`: Array of identifiers blocking progress (e.g. `["E12S1"]` or `["DW-7f3a"]`)
+- `holder`: Current lease holder preventing the action (e.g. `"amelia"`)
+
+The `develop` skill explicitly instructs agents to quote the cited ID (`constraint_id`, `gate_id`, `policy`, `blocking_ids`, or `holder`) when reporting a refusal or failure to a human.
 
 | Exit | Meaning |
 | --- | --- |

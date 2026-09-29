@@ -106,19 +106,49 @@ pub fn handle_scratch_append(
                 let err = qdev_core::QdevError::policy_refusal(
                     "needs_justification",
                     "--override requires a non-empty --justification",
+                )
+                .with_details(serde_json::json!({
+                    "story_id": canonical_story_id,
+                }))
+                .with_attribution(
+                    qdev_core::RejectionAttribution::new(
+                        "Override requires non-empty justification",
+                    )
+                    .with_policy("justification_required"),
                 );
                 let _ = output.emit_error(&err);
                 return ExitCode::PolicyRefusal;
             }
             override_decision = Some(just.to_string());
         } else if interactivity.is_non_interactive() {
+            let mut attr = qdev_core::RejectionAttribution::new(
+                "Scratchpad append outside active lease requires override and justification",
+            )
+            .with_policy("lease_scope");
+            if let Some(l) = workspace_leases.first() {
+                attr = attr.with_holder(&l.holder);
+            }
+
+            let mut details = serde_json::json!({
+                "story_id": canonical_story_id,
+            });
+            if let Some(l) = workspace_leases.first() {
+                details["active_lease"] = serde_json::json!({
+                    "story_id": l.story_id,
+                    "holder": l.holder,
+                    "worktree_path": l.worktree_path,
+                });
+            }
+
             let err = qdev_core::QdevError::policy_refusal(
                 "needs_confirmation",
                 format!(
                     "Scratchpad append on story '{}' requires an active lease; re-run with --override --justification \"<rationale>\"",
                     canonical_story_id
                 ),
-            );
+            )
+            .with_details(details)
+            .with_attribution(attr);
             let _ = output.emit_error(&err);
             return ExitCode::PolicyRefusal;
         } else {
@@ -146,6 +176,12 @@ pub fn handle_scratch_append(
                             let err = qdev_core::QdevError::policy_refusal(
                                 "needs_justification",
                                 "--override requires a non-empty --justification",
+                            )
+                            .with_attribution(
+                                qdev_core::RejectionAttribution::new(
+                                    "Override requires non-empty justification",
+                                )
+                                .with_policy("justification_required"),
                             );
                             let _ = output.emit_error(&err);
                             return ExitCode::PolicyRefusal;
@@ -156,6 +192,12 @@ pub fn handle_scratch_append(
                         let err = qdev_core::QdevError::policy_refusal(
                             "needs_justification",
                             "--override requires a non-empty --justification",
+                        )
+                        .with_attribution(
+                            qdev_core::RejectionAttribution::new(
+                                "Override requires non-empty justification",
+                            )
+                            .with_policy("justification_required"),
                         );
                         let _ = output.emit_error(&err);
                         return ExitCode::PolicyRefusal;

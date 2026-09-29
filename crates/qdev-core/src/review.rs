@@ -249,7 +249,8 @@ pub fn review_sprint(
         if outcome.status == GateStatus::Fail {
             return Err(
                 QdevError::logical_failure("gate_failed", outcome.summary.clone())
-                    .with_details(serde_json::to_value(outcome.to_payload()).unwrap_or_default()),
+                    .with_details(serde_json::to_value(outcome.to_payload()).unwrap_or_default())
+                    .with_attribution(outcome.rejection_attribution()),
             );
         }
         if outcome.status == GateStatus::Infra {
@@ -257,7 +258,8 @@ pub fn review_sprint(
                 "gate_infra_failure",
                 outcome.summary.clone(),
             )
-            .with_details(serde_json::to_value(outcome.to_payload()).unwrap_or_default()));
+            .with_details(serde_json::to_value(outcome.to_payload()).unwrap_or_default())
+            .with_attribution(outcome.rejection_attribution()));
         }
     }
     let mut assignments = store.get_sprint_assignments(sprint)?;

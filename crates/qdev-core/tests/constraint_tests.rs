@@ -381,6 +381,10 @@ fn test_apply_constraint_remove_non_draft_without_justification_fails() {
     let err = apply_constraint_remove(&remove_opts).unwrap_err();
     assert_eq!(err.exit_code(), ExitCode::PolicyRefusal);
     assert_eq!(err.code(), "needs_justification");
+    let details = err.details().expect("details must be present");
+    assert_eq!(details["policy"], "justification_required");
+    assert_eq!(details["constraint_id"], "E12S4/NG-1");
+    assert!(!details["rule"].as_str().unwrap().is_empty());
 
     // Whitespace only justification also fails
     let remove_opts_whitespace = ConstraintRemoveOptions {

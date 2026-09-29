@@ -387,10 +387,19 @@ pub fn create_governance_override_decision(
 
     let trimmed_just = justification.trim();
     if trimmed_just.is_empty() {
+        let attribution = crate::errors::RejectionAttribution::new(
+            "Governance override requires non-empty justification",
+        )
+        .with_policy("justification_required");
+
         return Err(QdevError::policy_refusal(
             "needs_justification",
             "--override requires a non-empty --justification",
-        ));
+        )
+        .with_details(serde_json::json!({
+            "target_id": target_id,
+        }))
+        .with_attribution(attribution));
     }
 
     let title = match decision_type {

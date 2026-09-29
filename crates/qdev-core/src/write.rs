@@ -3563,13 +3563,24 @@ pub fn apply_constraint_remove(
     if status_str != "draft" {
         let just = options.justification.as_deref().unwrap_or("").trim();
         if just.is_empty() {
+            let attribution = crate::errors::RejectionAttribution::new(
+                "Removing a constraint from a non-draft entity requires explicit justification",
+            )
+            .with_constraint_id(trimmed_target)
+            .with_policy("justification_required");
+
             return Err(QdevError::policy_refusal(
                 "needs_justification",
                 format!(
                     "Removing constraint '{}' from non-draft entity '{}' requires a non-empty --justification",
                     trimmed_target, owner_id
                 ),
-            ));
+            )
+            .with_details(serde_json::json!({
+                "constraint_id": trimmed_target,
+                "entity_id": owner_id,
+            }))
+            .with_attribution(attribution));
         }
     }
 

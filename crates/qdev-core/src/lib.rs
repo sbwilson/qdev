@@ -154,7 +154,10 @@ pub use config::{
     PROJECT_CONFIG_FILENAME,
 };
 pub use envelope::{ErrorPayload, JsonEnvelope, JsonErrorEnvelope, SCHEMA_VERSION};
-pub use errors::{ExitCode, QdevError};
+pub use errors::{
+    get_refusal_entry, ExitCode, QdevError, RefusalCatalogEntry, RejectionAttribution,
+    REFUSAL_CATALOG,
+};
 pub use id::{
     allocate_decision_id, allocate_decision_id_in_with_rng, allocate_decision_id_with_rng,
     allocate_deferred_work_id, allocate_deferred_work_id_in_with_rng,

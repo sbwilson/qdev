@@ -165,6 +165,8 @@ fn test_scratch_append_without_lease_non_interactive() {
 
     let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert_eq!(val["error"]["code"], "needs_confirmation");
+    assert_eq!(val["error"]["details"]["policy"], "lease_scope");
+    assert!(!val["error"]["details"]["rule"].as_str().unwrap().is_empty());
     assert!(val["error"]["message"]
         .as_str()
         .unwrap()
@@ -206,6 +208,8 @@ fn test_scratch_append_with_wrong_lease_non_interactive() {
 
     let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert_eq!(val["error"]["code"], "needs_confirmation");
+    assert_eq!(val["error"]["details"]["policy"], "lease_scope");
+    assert!(!val["error"]["details"]["rule"].as_str().unwrap().is_empty());
 }
 
 #[test]
@@ -276,6 +280,8 @@ fn test_scratch_append_with_override_missing_justification() {
 
     let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert_eq!(val["error"]["code"], "needs_justification");
+    assert_eq!(val["error"]["details"]["policy"], "justification_required");
+    assert!(!val["error"]["details"]["rule"].as_str().unwrap().is_empty());
 }
 
 #[test]

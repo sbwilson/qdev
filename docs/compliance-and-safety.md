@@ -108,12 +108,33 @@ If no result document is present, qdev uses the exit code and the last 40 lines 
 
 ### Attributed rejections
 
-When a gate or review fails because of a constraint, the payload carries `constraint_id` and the constraint text, so the agent never guesses:
+When a command, gate, or review fails or refuses an action (e.g. gate failures, scope violations, lease conflicts, missing justifications, cross-team edits, blocked dependencies, sprint close refusals), the error envelope emitted under `--json` carries a structured attribution payload in `details`:
 
 ```json
-{"status": "fail", "constraint_ids": ["E12S4/NG-2"],
- "failures": [{"location": "crates/video/frame.rs", "message": "Path outside target_modules; violates E12S4/NG-2: Do not touch frame buffers"}]}
+{
+  "schema_version": "1",
+  "error": {
+    "code": "gate_failed",
+    "message": "scope check failed: 1 path(s) outside target_modules",
+    "details": {
+      "gate_id": "qdev-scope",
+      "constraint_id": "E12S4/NG-2",
+      "rule": "Paths must not violate active no-go constraints"
+    }
+  }
+}
 ```
+
+Every refusal path attaches human-readable rule text (`rule`) and at least one structured attribution key:
+- `constraint_id`: ID of the violated constraint (e.g. `E12S4/NG-2`)
+- `gate_id`: Identifier of the failed verification gate (e.g. `qdev-scope`, `c-abi-round-trip`)
+- `policy`: Name of the violated policy (e.g. `target_modules`, `single_lease_holder`, `lease_ownership`, `justification_required`, `cross_team_governance`, `lease_scope`, `dependency_order`, `deferred_work_rationale`, `lease_lifecycle`, `preflight_guard`)
+- `blocking_ids`: Array of IDs blocking the operation (e.g. unmet dependency story IDs or unacceptable deferred work IDs)
+- `holder`: Current lease holder preventing the action (e.g. username or session id)
+
+#### Agent Directive for the Develop Skill
+
+The `develop` skill explicitly instructs agents to quote cited IDs when reporting failures to humans. When an action is refused or a gate fails, the agent must inspect `details`, cite the exact `constraint_id`, `gate_id`, `policy`, `blocking_ids`, or `holder` provided by qdev, and quote the cited ID directly in its report to the human operator rather than hallucinating fixes or halting blindly.
 
 Boundary and constraint checks are built-in gates (`qdev-scope`, `qdev-hygiene`, `qdev-deps`) that exist because they need qdev's own data, not project knowledge.
 

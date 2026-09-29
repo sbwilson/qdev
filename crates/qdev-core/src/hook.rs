@@ -545,10 +545,22 @@ pub fn run_pre_push(
 
     if outcome.status == PreflightStatus::Refusal {
         let text = crate::preflight::format_preflight_text(&outcome);
+        let attribution = crate::errors::RejectionAttribution::new(
+            "Working tree modifications must remain within active story scope before push",
+        )
+        .with_policy("preflight_guard");
+
         return Err(QdevError::policy_refusal(
             "preflight_refusal",
             text.trim_end(),
-        ));
+        )
+        .with_details(serde_json::json!({
+            "status": "refusal",
+            "summary": outcome.summary,
+            "diagnostics": outcome.diagnostics,
+            "remediation_commands": outcome.remediation_commands,
+        }))
+        .with_attribution(attribution));
     }
 
     // 2. Legacy hook chaining (with stdin forwarded)

@@ -222,6 +222,8 @@ fn test_cli_update_non_interactive_json_refusal() {
     let stdout = std::str::from_utf8(&output.stdout).unwrap();
     let parsed: Value = serde_json::from_str(stdout).unwrap();
     assert_eq!(parsed["error"]["code"], "needs_confirmation");
+    assert_eq!(parsed["error"]["details"]["policy"], "cross_team_governance");
+    assert!(!parsed["error"]["details"]["rule"].as_str().unwrap().is_empty());
     let msg = parsed["error"]["message"].as_str().unwrap();
     assert!(msg.contains("--override"));
     assert!(msg.contains("--justification"));

@@ -129,6 +129,8 @@ fn test_non_interactive_missing_name() {
     assert_eq!(val["error"]["code"], "needs_confirmation");
     assert!(val["error"]["message"].as_str().unwrap().contains("--name"));
     assert_eq!(val["error"]["details"]["flag"], "--name");
+    assert_eq!(val["error"]["details"]["policy"], "init_parameters");
+    assert!(!val["error"]["details"]["rule"].as_str().unwrap().is_empty());
 }
 
 #[test]

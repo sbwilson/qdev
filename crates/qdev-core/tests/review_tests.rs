@@ -389,3 +389,60 @@ fn review_sprint_writes_grouped_reports_and_requirement_trace() {
         vec!["DW-1", "DW-2"]
     );
 }
+
+#[test]
+fn sprint_review_gate_failure_attaches_attribution() {
+    use qdev_core::config::{Config, GateConfig, StorageConfig};
+    use qdev_core::review_sprint;
+    use qdev_core::store::SprintRecord;
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    fs::create_dir_all(root.join("docs/state/releases")).unwrap();
+    fs::create_dir_all(root.join(".qdev/cache")).unwrap();
+    fs::write(
+        root.join("docs/state/releases/0.1.0.md"),
+        "---\nid: 0.1.0\ntitle: Release\nstatus: active\nversion: 1\ncreated_by:\n  type: human\n  id: simon\nupdated_by:\n  type: human\n  id: simon\n---\n",
+    )
+    .unwrap();
+    let store = SqliteStore::open_in_memory().unwrap();
+    store
+        .upsert_sprint(&SprintRecord {
+            id: 1,
+            status: Some("active".into()),
+            release_version: Some("0.1.0".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let mut config = Config::default();
+    config.gates.push(GateConfig {
+        id: "failing-review-gate".to_string(),
+        command: Some("false".to_string()),
+        timeout_ms: Some(1000),
+        depends_on: Vec::new(),
+        output_adapter: None,
+        on_transition: vec!["sprint_close".to_string()],
+        verifies: Vec::new(),
+        kind: Some("test".to_string()),
+        metric: None,
+        direction: None,
+        skip: None,
+    });
+
+    let error = review_sprint(
+        root,
+        &StorageConfig::default(),
+        &store,
+        &config,
+        1,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "gate_failed");
+    let details = error.details().expect("details must be present");
+    assert_eq!(details["gate_id"], "failing-review-gate");
+    assert!(!details["rule"].as_str().unwrap().is_empty());
+}

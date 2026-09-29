@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::config::StorageConfig;
-use crate::errors::{ExitCode, QdevError};
+use crate::errors::{ExitCode, QdevError, RejectionAttribution};
 use crate::write::{acquire_workspace_write_lock, write_file_atomic, Author};
 
 pub use adapter::{parse_with_adapter, validate_adapter_name, VALID_ADAPTERS};
@@ -128,6 +128,71 @@ pub struct GateRunOutcome {
 impl GateRunOutcome {
     pub fn cli_exit_code(&self) -> ExitCode {
         self.status.default_exit_code()
+    }
+
+    pub fn rejection_attribution(&self) -> RejectionAttribution {
+        let (policy, constraint_id, rule) = if self.status == GateStatus::Fail {
+            if self.gate_id == BUILTIN_GATE_SCOPE {
+                if let Some(cid) = self.constraint_ids.first() {
+                    (
+                        None,
+                        Some(cid.clone()),
+                        "Paths must not violate active no-go constraints".to_string(),
+                    )
+                } else {
+                    (
+                        Some("target_modules".to_string()),
+                        None,
+                        "All modified files must be inside target_modules declared in story frontmatter".to_string(),
+                    )
+                }
+            } else if self.gate_id == BUILTIN_GATE_DEPS {
+                (
+                    Some("dependencies".to_string()),
+                    None,
+                    "Workspace dependency validation must pass without cycles or missing dependencies".to_string(),
+                )
+            } else if self.gate_id == BUILTIN_GATE_HYGIENE {
+                (
+                    Some("workspace_hygiene".to_string()),
+                    None,
+                    "Hygiene checks must pass without unresolved lint or formatting warnings".to_string(),
+                )
+            } else if let Some(cid) = self.constraint_ids.first() {
+                (
+                    None,
+                    Some(cid.clone()),
+                    "Verification gate checks must pass before proceeding".to_string(),
+                )
+            } else {
+                (
+                    Some("verification_gate".to_string()),
+                    None,
+                    "Verification gate checks must pass before proceeding".to_string(),
+                )
+            }
+        } else if self.status == GateStatus::Infra {
+            (
+                Some("gate_infrastructure".to_string()),
+                None,
+                "Gate execution infrastructure must succeed without timeouts or system errors".to_string(),
+            )
+        } else {
+            (
+                None,
+                None,
+                "Verification gate checks must pass before proceeding".to_string(),
+            )
+        };
+
+        let mut attr = RejectionAttribution::new(rule).with_gate_id(&self.gate_id);
+        if let Some(p) = policy {
+            attr = attr.with_policy(p);
+        }
+        if let Some(cid) = constraint_id {
+            attr = attr.with_constraint_id(cid);
+        }
+        attr
     }
 
     pub fn to_payload(&self) -> GateRunPayload {

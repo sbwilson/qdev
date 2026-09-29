@@ -459,6 +459,12 @@ pub fn claim_story(
 
     // 3. Refuse duplicate claims with exit code 5 (already_leased)
     if let Some(existing) = get_lease_with_storage(workspace_root, trimmed_id, storage) {
+        let attribution = crate::errors::RejectionAttribution::new(
+            "Story leases are exclusive and may only be held by a single user or session",
+        )
+        .with_holder(&existing.holder)
+        .with_policy("single_lease_holder");
+
         return Err(QdevError::conflict(
             "already_leased",
             format!(
@@ -470,7 +476,8 @@ pub fn claim_story(
             "story_id": trimmed_id,
             "holder": existing.holder,
             "worktree_path": existing.worktree_path,
-        })));
+        }))
+        .with_attribution(attribution));
     }
 
     // 4. Construct lease record
@@ -559,10 +566,19 @@ pub fn release_story(
     let existing = match get_lease_with_storage(workspace_root, trimmed_id, storage) {
         Some(l) => l,
         None => {
+            let attribution = crate::errors::RejectionAttribution::new(
+                "Active story lease required to perform lease operations",
+            )
+            .with_policy("lease_ownership");
+
             return Err(QdevError::logical_failure(
                 "lease_not_found",
                 format!("Story {} is not leased", trimmed_id),
-            ));
+            )
+            .with_details(serde_json::json!({
+                "story_id": trimmed_id,
+            }))
+            .with_attribution(attribution));
         }
     };
 
@@ -572,10 +588,19 @@ pub fn release_story(
     if force {
         let just = justification.map(|j| j.trim()).unwrap_or("");
         if just.is_empty() {
+            let attribution = crate::errors::RejectionAttribution::new(
+                "Forced lease release requires non-empty justification",
+            )
+            .with_policy("justification_required");
+
             return Err(QdevError::policy_refusal(
                 "needs_justification",
                 "--force requires a non-empty --justification",
-            ));
+            )
+            .with_details(serde_json::json!({
+                "story_id": trimmed_id,
+            }))
+            .with_attribution(attribution));
         }
         let dec_id = create_lease_override_decision(
             workspace_root,
@@ -587,13 +612,24 @@ pub fn release_story(
         )?;
         decision_id = Some(dec_id);
     } else if !is_holder {
+        let attribution = crate::errors::RejectionAttribution::new(
+            "Only the lease holder may release a story lease without force and justification",
+        )
+        .with_holder(&existing.holder)
+        .with_policy("lease_ownership");
+
         return Err(QdevError::policy_refusal(
             "policy_refusal",
             format!(
                 "Story {} is leased by {} in {}; releasing requires --force --justification",
                 trimmed_id, existing.holder, existing.worktree_path
             ),
-        ));
+        )
+        .with_details(serde_json::json!({
+            "story_id": trimmed_id,
+            "holder": existing.holder,
+        }))
+        .with_attribution(attribution));
     }
 
     // Remove local and shared lease files

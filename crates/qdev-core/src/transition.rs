@@ -262,24 +262,51 @@ impl PreTransitionHook for TransitionGateHook {
         if ctx.skip_gates {
             let justification = ctx.justification.as_deref().map(str::trim).unwrap_or("");
             if justification.is_empty() {
+                let attribution = crate::errors::RejectionAttribution::new(
+                    "Skipping transition gates requires non-empty justification",
+                )
+                .with_policy("justification_required");
+
                 return Err(QdevError::policy_refusal(
                     "needs_justification",
                     "--skip-gates requires non-empty justification",
-                ));
+                )
+                .with_details(serde_json::json!({
+                    "story_id": ctx.story_id,
+                }))
+                .with_attribution(attribution));
             }
 
             if !ctx.interactivity.is_interactive() {
+                let attribution = crate::errors::RejectionAttribution::new(
+                    "Gate skipping is restricted to interactive terminal sessions",
+                )
+                .with_policy("interactive_tty_required");
+
                 return Err(QdevError::policy_refusal(
                     "tty_required",
                     "--skip-gates is available only to humans on an interactive terminal (TTY)",
-                ));
+                )
+                .with_details(serde_json::json!({
+                    "story_id": ctx.story_id,
+                }))
+                .with_attribution(attribution));
             }
 
             if ctx.author.author_type != "human" {
+                let attribution = crate::errors::RejectionAttribution::new(
+                    "Gate skipping is restricted to human authors",
+                )
+                .with_policy("human_author_required");
+
                 return Err(QdevError::policy_refusal(
                     "human_required",
                     "--skip-gates is available only to human authors",
-                ));
+                )
+                .with_details(serde_json::json!({
+                    "story_id": ctx.story_id,
+                }))
+                .with_attribution(attribution));
             }
 
             // Defer writing the gate_skip decision until after the transition commits.
@@ -311,17 +338,21 @@ impl PreTransitionHook for TransitionGateHook {
 
             if scope_outcome.status == crate::gate::GateStatus::Fail {
                 let payload = serde_json::to_value(scope_outcome.to_payload()).unwrap_or_default();
+                let attr = scope_outcome.rejection_attribution();
                 return Err(
                     QdevError::logical_failure("gate_failed", scope_outcome.summary)
-                        .with_details(payload),
+                        .with_details(payload)
+                        .with_attribution(attr),
                 );
             } else if scope_outcome.status == crate::gate::GateStatus::Infra {
                 let payload = serde_json::to_value(scope_outcome.to_payload()).unwrap_or_default();
+                let attr = scope_outcome.rejection_attribution();
                 return Err(QdevError::infrastructure_failure(
                     "gate_infra_failure",
                     scope_outcome.summary,
                 )
-                .with_details(payload));
+                .with_details(payload)
+                .with_attribution(attr));
             }
         }
 
@@ -335,17 +366,21 @@ impl PreTransitionHook for TransitionGateHook {
 
             if deps_outcome.status == crate::gate::GateStatus::Fail {
                 let payload = serde_json::to_value(deps_outcome.to_payload()).unwrap_or_default();
+                let attr = deps_outcome.rejection_attribution();
                 return Err(
                     QdevError::logical_failure("gate_failed", deps_outcome.summary)
-                        .with_details(payload),
+                        .with_details(payload)
+                        .with_attribution(attr),
                 );
             } else if deps_outcome.status == crate::gate::GateStatus::Infra {
                 let payload = serde_json::to_value(deps_outcome.to_payload()).unwrap_or_default();
+                let attr = deps_outcome.rejection_attribution();
                 return Err(QdevError::infrastructure_failure(
                     "gate_infra_failure",
                     deps_outcome.summary,
                 )
-                .with_details(payload));
+                .with_details(payload)
+                .with_attribution(attr));
             }
         }
 
@@ -363,18 +398,22 @@ impl PreTransitionHook for TransitionGateHook {
             if hygiene_outcome.status == crate::gate::GateStatus::Fail {
                 let payload =
                     serde_json::to_value(hygiene_outcome.to_payload()).unwrap_or_default();
+                let attr = hygiene_outcome.rejection_attribution();
                 return Err(
                     QdevError::logical_failure("gate_failed", hygiene_outcome.summary)
-                        .with_details(payload),
+                        .with_details(payload)
+                        .with_attribution(attr),
                 );
             } else if hygiene_outcome.status == crate::gate::GateStatus::Infra {
                 let payload =
                     serde_json::to_value(hygiene_outcome.to_payload()).unwrap_or_default();
+                let attr = hygiene_outcome.rejection_attribution();
                 return Err(QdevError::infrastructure_failure(
                     "gate_infra_failure",
                     hygiene_outcome.summary,
                 )
-                .with_details(payload));
+                .with_details(payload)
+                .with_attribution(attr));
             }
         }
 
@@ -395,15 +434,19 @@ impl PreTransitionHook for TransitionGateHook {
             for outcome in set_outcome.outcomes {
                 if outcome.status == crate::gate::GateStatus::Fail {
                     let payload = serde_json::to_value(outcome.to_payload()).unwrap_or_default();
+                    let attr = outcome.rejection_attribution();
                     return Err(QdevError::logical_failure("gate_failed", outcome.summary)
-                        .with_details(payload));
+                        .with_details(payload)
+                        .with_attribution(attr));
                 } else if outcome.status == crate::gate::GateStatus::Infra {
                     let payload = serde_json::to_value(outcome.to_payload()).unwrap_or_default();
+                    let attr = outcome.rejection_attribution();
                     return Err(QdevError::infrastructure_failure(
                         "gate_infra_failure",
                         outcome.summary,
                     )
-                    .with_details(payload));
+                    .with_details(payload)
+                    .with_attribution(attr));
                 }
             }
         }
@@ -545,6 +588,12 @@ fn validate_dependencies(
         }
 
         if !blocking_ids.is_empty() {
+            let attribution = crate::errors::RejectionAttribution::new(
+                "Stories may not start until all blocking dependencies are done",
+            )
+            .with_blocking_ids(blocking_ids.clone())
+            .with_policy("dependency_order");
+
             return Err(QdevError::policy_refusal(
                 "story_blocked",
                 format!(
@@ -556,12 +605,19 @@ fn validate_dependencies(
             .with_details(serde_json::json!({
                 "story_id": story_id,
                 "blocking_ids": blocking_ids,
-            })));
+            }))
+            .with_attribution(attribution));
         }
     } else if !depends_on_ids.is_empty() {
         // Nothing has been checked: with no cache there is no record of any dependency's
         // status, so calling them unmet tells the operator the wrong thing. Say that the
         // evidence is missing, where it lives, and how to build it.
+        let attribution = crate::errors::RejectionAttribution::new(
+            "Dependency status must be verified in the cache before transitioning to in-progress",
+        )
+        .with_blocking_ids(depends_on_ids.clone())
+        .with_policy("dependency_order");
+
         return Err(QdevError::policy_refusal(
             "story_blocked",
             format!(
@@ -577,7 +633,8 @@ fn validate_dependencies(
             "blocking_ids": depends_on_ids,
             "cache": cache_db_path.display().to_string(),
             "checked": false,
-        })));
+        }))
+        .with_attribution(attribution));
     }
 
     Ok(())
@@ -673,6 +730,11 @@ fn validate_story_transition(
         TransitionKind::LegalForward => {}
         TransitionKind::TerminalJump => {
             if justification.is_empty() {
+                let attribution = crate::errors::RejectionAttribution::new(
+                    "Transition to terminal state requires explicit justification",
+                )
+                .with_policy("justification_required");
+
                 return Err(QdevError::policy_refusal(
                     "needs_justification",
                     format!(
@@ -683,11 +745,17 @@ fn validate_story_transition(
                 .with_details(serde_json::json!({
                     "story_id": story_id,
                     "target_status": target_state.as_str(),
-                })));
+                }))
+                .with_attribution(attribution));
             }
         }
         TransitionKind::Backward => {
             if justification.is_empty() {
+                let attribution = crate::errors::RejectionAttribution::new(
+                    "Backward transition requires explicit justification",
+                )
+                .with_policy("justification_required");
+
                 return Err(QdevError::policy_refusal(
                     "needs_justification",
                     format!(
@@ -700,7 +768,8 @@ fn validate_story_transition(
                     "story_id": story_id,
                     "from_status": from_state.as_str(),
                     "target_status": target_state.as_str(),
-                })));
+                }))
+                .with_attribution(attribution));
             }
         }
     }

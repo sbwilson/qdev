@@ -250,6 +250,16 @@ pub fn start_chore(input: &StartChoreInput) -> Result<ChoreRecord, QdevError> {
             .iter()
             .map(|l| format!("{} (held by {})", l.story_id, l.holder))
             .collect();
+        let holder = leases.first().map(|l| l.holder.clone());
+        let blocking_ids: Vec<String> = leases.iter().map(|l| l.story_id.clone()).collect();
+        let mut attribution = crate::errors::RejectionAttribution::new(
+            "Chore execution is refused when worktree holds an active story lease",
+        )
+        .with_policy("story_lease")
+        .with_blocking_ids(blocking_ids);
+        if let Some(h) = holder {
+            attribution = attribution.with_holder(h);
+        }
         return Err(QdevError::policy_refusal(
             "lease_held",
             format!(
@@ -257,7 +267,11 @@ pub fn start_chore(input: &StartChoreInput) -> Result<ChoreRecord, QdevError> {
                  alongside it",
                 named.join(", ")
             ),
-        ));
+        )
+        .with_details(serde_json::json!({
+            "leases": named,
+        }))
+        .with_attribution(attribution));
     }
 
     let slug = derive_chore_id(title);
@@ -438,13 +452,21 @@ pub fn commit_chore(input: &CommitChoreInput) -> Result<ChoreCommitResult, QdevE
     // `nothing_to_commit` and reported as a mere logical failure.
     if input.strict && !excluded.is_empty() {
         let names: Vec<String> = excluded.iter().map(|e| e.path.clone()).collect();
+        let attribution = crate::errors::RejectionAttribution::new(
+            "Chore execution modified paths outside configured chore allowlist in strict mode",
+        )
+        .with_policy("allowlist");
         return Err(QdevError::policy_refusal(
             "out_of_allowlist",
             format!(
                 "Changes outside the allowlist: {}; commit nothing (strict mode)",
                 names.join(", ")
             ),
-        ));
+        )
+        .with_details(serde_json::json!({
+            "excluded_paths": names,
+        }))
+        .with_attribution(attribution));
     }
 
     if included.is_empty() {
