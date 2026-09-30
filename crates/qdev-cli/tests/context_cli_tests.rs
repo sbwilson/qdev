@@ -676,3 +676,194 @@ fn test_markdown_stats_table_rendering() {
         "stdout must contain '| section | tokens |': {stdout}"
     );
 }
+
+#[test]
+fn test_develop_context_cli_hygiene_directive_and_citation_templates() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    write_story_fixture(root);
+    sync(root);
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["context", "E12S4", "--phase", "develop", "--json"])
+        .assert()
+        .success()
+        .code(0);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+
+    let hygiene = val["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "hygiene")
+        .expect("hygiene section must be present")
+        ["content"]
+        .as_str()
+        .unwrap();
+
+    assert!(hygiene.contains("Write standard code comments."));
+    assert!(hygiene.contains("Citation templates:"));
+    assert!(hygiene.contains("rust: // [{id}] {summary}"));
+    assert!(hygiene.contains("swift: // [{id}] {summary}"));
+    assert!(hygiene.contains("python: # [{id}] {summary}"));
+}
+
+#[test]
+fn test_context_cli_custom_hygiene_config() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    write_story_fixture(root);
+
+    let toml_path = root.join("qdev.toml");
+    let mut toml = fs::read_to_string(&toml_path).unwrap();
+    toml.push_str(
+        r#"
+[hygiene]
+directive = "Custom project-level commenting policy."
+citation_template = "[{id}]"
+
+[hygiene.citation_templates]
+rust = "// [{entity_id}]"
+"#,
+    );
+    fs::write(toml_path, toml).unwrap();
+    sync(root);
+
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["context", "E12S4", "--phase", "develop", "--json"])
+        .assert()
+        .success()
+        .code(0);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+
+    let hygiene = val["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "hygiene")
+        .expect("hygiene section must be present")
+        ["content"]
+        .as_str()
+        .unwrap();
+
+    assert!(hygiene.starts_with("Custom project-level commenting policy."));
+    assert!(hygiene.contains("rust: // [{entity_id}]"));
+    assert!(hygiene.contains("swift: // [{id}]"));
+    assert!(hygiene.contains("python: # [{id}]"));
+}
+
+#[test]
+fn test_review_context_cli_hygiene_findings() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    write_story_fixture(root);
+    sync(root);
+
+    // Initialize git repo with integration branch `develop`
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run `git {}`: {}", args.join(" "), e));
+        assert!(
+            output.status.success(),
+            "`git {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    git(&["init", "-b", "develop"]);
+    git(&["config", "user.email", "simon@example.com"]);
+    git(&["config", "user.name", "Simon"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    git(&["add", "."]);
+    git(&["commit", "-m", "initial baseline"]);
+
+    // Create feature branch
+    git(&["checkout", "-b", "feature/E12S4-core-response"]);
+
+    // 1. Clean review context -> hygiene_findings is (none)
+    let assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["context", "E12S4", "--phase", "review", "--json"])
+        .assert()
+        .success()
+        .code(0);
+    let val: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+
+    let section_names: Vec<&str> = val["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        section_names,
+        vec![
+            "story_spec",
+            "constraints",
+            "modules",
+            "adr_excerpts",
+            "requirements",
+            "scratchpad",
+            "gates",
+            "hygiene",
+            "diff",
+            "hygiene_findings",
+            "gate_receipts",
+            "evidence"
+        ]
+    );
+
+    let hygiene_findings = val["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "hygiene_findings")
+        .unwrap();
+    assert_eq!(hygiene_findings["content"].as_str().unwrap(), "(none)");
+    assert_eq!(hygiene_findings["priority"].as_u64().unwrap(), 10);
+
+    // 2. Add a hygiene violation in diff (story banner)
+    write_file(
+        root,
+        "crates/bridge/lib.rs",
+        "// ⭐ STORY 1.0: First bridge implementation\npub fn bridge() {}\n",
+    );
+
+    let assert_violations = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["context", "E12S4", "--phase", "review", "--json"])
+        .assert()
+        .success()
+        .code(0);
+    let val_violations: Value =
+        serde_json::from_slice(&assert_violations.get_output().stdout).unwrap();
+
+    let findings_content = val_violations["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "hygiene_findings")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap();
+
+    assert!(
+        findings_content.contains("crates/bridge/lib.rs:1: [story_banner]"),
+        "expected violation in hygiene_findings: {}",
+        findings_content
+    );
+}
+

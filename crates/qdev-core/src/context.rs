@@ -74,10 +74,9 @@ impl ContextPhase {
     }
 }
 
-/// Built-in hygiene directive embedded in the `develop` projection, verbatim from
-/// `docs/compliance-and-safety.md` §1. Deliberately a code constant — the `[hygiene]`
-/// config section does not own it (config-overridability arrives in a later story;
-/// both ship this same default text).
+/// Built-in hygiene directive embedded in the `develop` and `review` projections, verbatim from
+/// `docs/compliance-and-safety.md` §1. Serves as the default directive text, overridable by
+/// `[hygiene].directive` in configuration.
 pub const HYGIENE_DIRECTIVE: &str = "Write standard code comments. Cite entities with compact \
 bracket tags such as `[E12S4]`, `[AD-43]`, `[DEC-2b91]`. Never write narrative history, story \
 summaries, or review commentary in code; put reasoning in the scratchpad with `qdev scratch \
@@ -783,6 +782,73 @@ fn diff_section(workspace_root: &Path, config: &Config) -> String {
     lines.join("\n")
 }
 
+/// Formats the hygiene section for develop and review phases: the effective directive
+/// (from `[hygiene].directive` or default `HYGIENE_DIRECTIVE`) followed by resolved
+/// per-language citation templates.
+fn hygiene_section(config: &Config) -> String {
+    let directive = config
+        .hygiene
+        .directive
+        .as_deref()
+        .unwrap_or(HYGIENE_DIRECTIVE);
+    let templates = config.hygiene.resolved_citation_templates();
+    if templates.is_empty() {
+        return directive.to_string();
+    }
+    let mut lines = Vec::new();
+    lines.push(directive.to_string());
+    lines.push(String::new());
+    lines.push("Citation templates:".to_string());
+    for (lang, template) in templates {
+        lines.push(format!("  {}: {}", lang, template));
+    }
+    lines.join("\n")
+}
+
+/// Hygiene findings on the current diff for the review phase, via `check_hygiene`.
+/// Reports `file:line: [rule_id] excerpt` lines, `(none)` if clean or disabled,
+/// or an `(empty: ...)` reason note outside a git worktree or without a diff baseline.
+fn hygiene_findings_section(workspace_root: &Path, config: &Config) -> String {
+    if !config.hygiene.enabled {
+        return NONE_MARKER.to_string();
+    }
+
+    if !is_inside_work_tree(workspace_root) {
+        return "(empty: not inside a git work tree)".to_string();
+    }
+
+    let diff_target = merge_base_commit(workspace_root, &config.git.integration_branch)
+        .or_else(|| ref_exists(workspace_root, &config.git.integration_branch).then(|| config.git.integration_branch.clone()));
+
+    let Some(_) = diff_target else {
+        return format!(
+            "(empty: cannot resolve a diff baseline against '{}')",
+            config.git.integration_branch
+        );
+    };
+
+    let options = crate::hygiene::HygieneCheckOptions {
+        diff: true,
+        paths: Vec::new(),
+    };
+
+    match crate::hygiene::check_hygiene(workspace_root, config, &options) {
+        Ok(outcome) => {
+            if outcome.findings.is_empty() {
+                NONE_MARKER.to_string()
+            } else {
+                let lines: Vec<String> = outcome
+                    .findings
+                    .iter()
+                    .map(|f| format!("{}: [{}] {}", f.location, f.rule_id, f.excerpt))
+                    .collect();
+                lines.join("\n")
+            }
+        }
+        Err(e) => format!("(empty: {})", e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Budget walk
 // ---------------------------------------------------------------------------
@@ -934,13 +1000,17 @@ pub fn build_context(
                 ),
                 SectionDraft::text("scratchpad", &scratchpad_section(store, &entity.id)?),
                 SectionDraft::text("gates", &gates_section(config)),
-                SectionDraft::text("hygiene", HYGIENE_DIRECTIVE),
+                SectionDraft::text("hygiene", &hygiene_section(config)),
             ];
             if options.phase == ContextPhase::Review {
                 let mut review = drafts;
                 review.push(SectionDraft::text(
                     "diff",
                     &diff_section(workspace_root, config),
+                ));
+                review.push(SectionDraft::text(
+                    "hygiene_findings",
+                    &hygiene_findings_section(workspace_root, config),
                 ));
                 review.push(SectionDraft::text(
                     "gate_receipts",

@@ -454,6 +454,10 @@ max_inline_comment_lines = 6
 forbid_patterns = ["(?i)^\\s*(//|#)\\s*(STORY|Review round|Wave)\\b"]
 citation_pattern = "\\[(E\\d+S\\d+|AD-\\d+|DW-[0-9a-f]+|DEC-[0-9a-f]+|HAZ-\\d+|E\\d+(S\\d+)?/(NG|RH)-\\d+)\\]"
 languages = ["rust", "swift", "python"]  # comment syntaxes to parse
+# directive = "..."                      # custom comment directive (defaults to compliance §1 verbatim)
+# citation_template = "[{id}] {summary}" # base citation template (alias: citation_format)
+# [hygiene.citation_templates]           # per-language overrides
+# rust = "// [{entity_id}]"
 
 [regulatory]
 iec62304_class = "ClassB"
@@ -722,15 +726,16 @@ shape: an empty section is still present, marked `(none)`.
 | --- | --- | --- |
 | `specify` | `epic_goal`, `epic_constraints`, `sibling_stories`, `adr_summaries`, `requirements` | 800 |
 | `develop` | `story_spec`, `constraints`, `modules`, `adr_excerpts`, `requirements`, `scratchpad`, `gates`, `hygiene` | 1,200 |
-| `review` | everything in `develop`, plus `diff`, `gate_receipts`, `evidence` | 2,500 |
+| `review` | everything in `develop`, plus `diff`, `hygiene_findings`, `gate_receipts`, `evidence` | 2,500 |
 
 - `story_spec` is the story file's markdown body, frontmatter stripped.
 - `constraints` carries full ids, own first then inherited (tagged `[inherited from <epic>]`).
 - `modules` resolves each `target_modules` id to its configured path globs (an unregistered id is named as such).
 - `adr_excerpts` / `adr_summaries` are the ADRs the story is `governed_by`: the `develop` excerpt carries Rule + Prevents (body `## Rule`/`## Decision`/`## Prevents` sections win over the `decision`/`prevents` frontmatter fields); the `specify` summary is a one-line title + decision. A dangling ADR keeps its id and is marked `(unresolved)` — a dangling reference never fails the payload.
 - `gates` lists the bound gates: the built-ins `qdev-scope`/`qdev-deps`/`qdev-hygiene` in execution order, then configured `[[gates]]` whose `on_transition` includes `review` (the same set the transition engine runs), id-sorted.
-- `hygiene` is the built-in comment-hygiene directive (compliance §1), verbatim.
+- `hygiene` is the comment-hygiene directive (from `[hygiene].directive` or compliance §1 verbatim) followed by resolved per-language citation templates derived from `[hygiene]` configuration.
 - `diff` is the files changed since the merge-base with `[git] integration_branch` (per-file +/- line counts, plus staged, unstaged, and untracked changes); an unresolvable baseline yields an empty section with a reason note.
+- `hygiene_findings` is findings from running the comment linter on the current diff (or `(none)` if clean or disabled); outside a git worktree or with an unresolvable baseline, carries a reason note.
 - `gate_receipts` / `evidence` are the latest run per gate (id, status, summary) and those runs' evidence paths.
 
 **Budgeting and truncation.** When `--budget` is omitted, the phase's typical budget above

@@ -51,9 +51,13 @@ v1 is **lint and report only**. The linter:
 
 The agent performs the rewrite and moves reasoning into the scratchpad with `qdev scratch append`. Automated `--fix` with diff preview is deferred to v2 because distinguishing a memoir from legitimate design documentation is a judgment call.
 
-The `develop` projection includes this directive verbatim:
+The `develop` and `review` context projections include this directive verbatim (or overridden via `[hygiene] directive`):
 
 > Write standard code comments. Cite entities with compact bracket tags such as `[E12S4]`, `[AD-43]`, `[DEC-2b91]`. Never write narrative history, story summaries, or review commentary in code; put reasoning in the scratchpad with `qdev scratch append`.
+
+Followed by resolved per-language citation templates derived from `[hygiene]` configuration (`citation_template` / `citation_format` and `citation_templates`).
+
+Additionally, the `review` phase context projection includes a dedicated `hygiene_findings` section (priority 10) reporting any violations detected on the current diff so reviewers can verify hygiene before approving changes.
 
 ---
 

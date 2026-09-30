@@ -465,6 +465,10 @@ fn validate_hygiene_section(val: &toml::Value, filename: &str) -> Result<(), Qde
         "citation_pattern",
         "languages",
         "secret_patterns",
+        "directive",
+        "citation_template",
+        "citation_format",
+        "citation_templates",
     ];
     check_unknown_keys(table, allowed, "hygiene", filename)?;
 
@@ -514,6 +518,120 @@ fn validate_hygiene_section(val: &toml::Value, filename: &str) -> Result<(), Qde
     }
     if let Some(v) = table.get("secret_patterns") {
         validate_string_array(v, "secret_patterns", "hygiene", filename)?;
+    }
+    if table.contains_key("citation_template") && table.contains_key("citation_format") {
+        return Err(QdevError::usage_error(format!(
+            "Schema violation in {}: cannot specify both 'citation_template' and 'citation_format' in [hygiene]",
+            filename
+        ))
+        .with_details(serde_json::json!({
+            "file": filename,
+            "section": "hygiene",
+        })));
+    }
+
+    if let Some(v) = table.get("directive") {
+        match v.as_str() {
+            Some(s) if !s.trim().is_empty() => {}
+            Some(_) => {
+                return Err(QdevError::usage_error(format!(
+                    "Schema violation in {}: key 'directive' in [hygiene] must not be empty",
+                    filename
+                ))
+                .with_details(serde_json::json!({
+                    "file": filename,
+                    "key": "hygiene.directive",
+                })));
+            }
+            None => {
+                return Err(type_mismatch_error(
+                    "directive",
+                    "hygiene",
+                    "string",
+                    filename,
+                ));
+            }
+        }
+    }
+    if let Some(v) = table.get("citation_template") {
+        match v.as_str() {
+            Some(s) if !s.trim().is_empty() => {}
+            Some(_) => {
+                return Err(QdevError::usage_error(format!(
+                    "Schema violation in {}: key 'citation_template' in [hygiene] must not be empty",
+                    filename
+                ))
+                .with_details(serde_json::json!({
+                    "file": filename,
+                    "key": "hygiene.citation_template",
+                })));
+            }
+            None => {
+                return Err(type_mismatch_error(
+                    "citation_template",
+                    "hygiene",
+                    "string",
+                    filename,
+                ));
+            }
+        }
+    }
+    if let Some(v) = table.get("citation_format") {
+        match v.as_str() {
+            Some(s) if !s.trim().is_empty() => {}
+            Some(_) => {
+                return Err(QdevError::usage_error(format!(
+                    "Schema violation in {}: key 'citation_format' in [hygiene] must not be empty",
+                    filename
+                ))
+                .with_details(serde_json::json!({
+                    "file": filename,
+                    "key": "hygiene.citation_format",
+                })));
+            }
+            None => {
+                return Err(type_mismatch_error(
+                    "citation_format",
+                    "hygiene",
+                    "string",
+                    filename,
+                ));
+            }
+        }
+    }
+    if let Some(v) = table.get("citation_templates") {
+        if let Some(t) = v.as_table() {
+            for (lang, val) in t {
+                match val.as_str() {
+                    Some(s) if !s.trim().is_empty() => {}
+                    Some(_) => {
+                        return Err(QdevError::usage_error(format!(
+                            "Schema violation in {}: template for language '{}' in [hygiene.citation_templates] must not be empty",
+                            filename, lang
+                        ))
+                        .with_details(serde_json::json!({
+                            "file": filename,
+                            "key": format!("hygiene.citation_templates.{}", lang),
+                        })));
+                    }
+                    None => {
+                        return Err(type_mismatch_error(
+                            &format!("citation_templates.{}", lang),
+                            "hygiene",
+                            "string",
+                            filename,
+                        ));
+                    }
+                }
+            }
+        } else {
+            return Err(type_mismatch_error(
+                "citation_templates",
+                "hygiene",
+                "table",
+                filename,
+            ));
+        }
     }
     Ok(())
 }
@@ -1166,6 +1284,65 @@ pub fn merge_configs(
             config.hygiene.secret_patterns = patterns;
         }
     }
+
+    let (dir_val, src) = get_val("hygiene", "directive");
+    sources.insert("hygiene.directive".to_string(), src);
+    if let Some(v) = dir_val.and_then(|v| v.as_str().map(|s| s.to_string())) {
+        config.hygiene.directive = Some(v);
+    }
+
+    let loc_hygiene = local_table.and_then(|t| t.get("hygiene"));
+    let proj_hygiene = project_table.and_then(|t| t.get("hygiene"));
+
+    let (cit_val, cit_src) = if let Some(v) = loc_hygiene
+        .and_then(|h| h.get("citation_template").or_else(|| h.get("citation_format")))
+    {
+        (Some(v.clone()), ConfigSource::Local)
+    } else if let Some(v) = proj_hygiene
+        .and_then(|h| h.get("citation_template").or_else(|| h.get("citation_format")))
+    {
+        (Some(v.clone()), ConfigSource::Project)
+    } else {
+        (None, ConfigSource::Default)
+    };
+
+    sources.insert("hygiene.citation_template".to_string(), cit_src);
+    if let Some(v) = cit_val.and_then(|v| v.as_str().map(|s| s.to_string())) {
+        config.hygiene.citation_template = Some(v);
+    }
+
+    let mut merged_tmpls = BTreeMap::new();
+    let mut tmpls_src = ConfigSource::Default;
+    if let Some(loc_tmpls) = loc_hygiene
+        .and_then(|h| h.get("citation_templates"))
+        .and_then(|v| v.as_table())
+    {
+        tmpls_src = ConfigSource::Local;
+        for (k, v) in loc_tmpls {
+            if let Some(s) = v.as_str() {
+                merged_tmpls.insert(k.clone(), s.to_string());
+                sources.insert(format!("hygiene.citation_templates.{}", k), ConfigSource::Local);
+            }
+        }
+    }
+    if let Some(proj_tmpls) = proj_hygiene
+        .and_then(|h| h.get("citation_templates"))
+        .and_then(|v| v.as_table())
+    {
+        if tmpls_src == ConfigSource::Default {
+            tmpls_src = ConfigSource::Project;
+        }
+        for (k, v) in proj_tmpls {
+            if !merged_tmpls.keys().any(|existing| existing.eq_ignore_ascii_case(k)) {
+                if let Some(s) = v.as_str() {
+                    merged_tmpls.insert(k.clone(), s.to_string());
+                    sources.insert(format!("hygiene.citation_templates.{}", k), ConfigSource::Project);
+                }
+            }
+        }
+    }
+    sources.insert("hygiene.citation_templates".to_string(), tmpls_src);
+    config.hygiene.citation_templates = merged_tmpls;
 
     // 7. [regulatory]
     sources.insert("regulatory".to_string(), section_source("regulatory"));

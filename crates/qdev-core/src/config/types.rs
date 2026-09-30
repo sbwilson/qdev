@@ -152,6 +152,16 @@ pub struct HygieneConfig {
     pub languages: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_patterns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directive: Option<String>,
+    #[serde(
+        default,
+        alias = "citation_format",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub citation_template: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub citation_templates: BTreeMap<String, String>,
 }
 
 fn default_max_inline_comment_lines() -> u32 {
@@ -168,6 +178,59 @@ fn default_languages() -> Vec<String> {
 
 pub const DEFAULT_CITATION_PATTERN: &str = r"\[(E[1-9][0-9]*(S[1-9][0-9]*)?|AD-[1-9][0-9]*|FR-[1-9][0-9]*|NFR-[1-9][0-9]*|HAZ-[1-9][0-9]*|PRD-[1-9][0-9]*|DW-[0-9a-f]{4,}|DEC-[0-9a-f]{4,}|E[1-9][0-9]*(S[1-9][0-9]*)?/(NG|RH)-[1-9][0-9]*)\]";
 
+impl HygieneConfig {
+    /// Resolves citation templates for each configured language in `self.languages`.
+    pub fn resolved_citation_templates(&self) -> BTreeMap<String, String> {
+        let mut map = BTreeMap::new();
+        let base = self
+            .citation_template
+            .as_deref()
+            .unwrap_or("[{id}] {summary}")
+            .trim();
+
+        for lang in &self.languages {
+            let key = lang.to_lowercase();
+            // 1. Check citation_templates (case-insensitive)
+            if let Some((_, custom)) = self
+                .citation_templates
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(lang))
+            {
+                map.insert(key, custom.clone());
+                continue;
+            }
+
+            // 2 & 3. Prepend or adapt comment leader
+            let template = match key.as_str() {
+                "python" | "py" | "ruby" | "shell" | "sh" | "bash" | "yaml" | "yml" | "toml" => {
+                    if base.starts_with('#') {
+                        base.to_string()
+                    } else if base.starts_with('/') {
+                        let stripped = base.trim_start_matches('/').trim_start_matches('!').trim();
+                        format!("# {}", stripped)
+                    } else {
+                        format!("# {}", base)
+                    }
+                }
+                _ => {
+                    // Rust, Swift, C, C++, Go, JS, TS, and others
+                    if base.starts_with("//") {
+                        base.to_string()
+                    } else if base.starts_with('#') {
+                        let stripped = base.trim_start_matches('#').trim();
+                        format!("// {}", stripped)
+                    } else {
+                        format!("// {}", base)
+                    }
+                }
+            };
+            map.insert(key, template);
+        }
+
+        map
+    }
+}
+
 impl Default for HygieneConfig {
     fn default() -> Self {
         Self {
@@ -177,6 +240,9 @@ impl Default for HygieneConfig {
             citation_pattern: Some(DEFAULT_CITATION_PATTERN.to_string()),
             languages: default_languages(),
             secret_patterns: Vec::new(),
+            directive: None,
+            citation_template: None,
+            citation_templates: BTreeMap::new(),
         }
     }
 }

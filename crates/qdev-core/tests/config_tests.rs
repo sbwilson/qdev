@@ -1063,3 +1063,175 @@ fn test_commit_message_format_rejects_unsupported_value() {
     assert!(err.message().contains("simple"));
     assert!(err.message().contains("conventional"));
 }
+
+#[test]
+fn test_hygiene_config_parsing_and_resolution() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    let toml = r#"
+[hygiene]
+enabled = true
+directive = "Custom team rules for comments."
+citation_template = "[{id}]"
+
+[hygiene.citation_templates]
+rust = "// [{entity_id}]"
+"#;
+    fs::write(root.join("qdev.toml"), toml).unwrap();
+
+    let annotated = load_config(root).unwrap();
+    let hygiene = &annotated.config.hygiene;
+
+    assert_eq!(
+        hygiene.directive.as_deref(),
+        Some("Custom team rules for comments.")
+    );
+    assert_eq!(hygiene.citation_template.as_deref(), Some("[{id}]"));
+    assert_eq!(
+        hygiene.citation_templates.get("rust").map(|s| s.as_str()),
+        Some("// [{entity_id}]")
+    );
+
+    let resolved = hygiene.resolved_citation_templates();
+    assert_eq!(resolved.get("rust").unwrap(), "// [{entity_id}]");
+    assert_eq!(resolved.get("swift").unwrap(), "// [{id}]");
+    assert_eq!(resolved.get("python").unwrap(), "# [{id}]");
+
+    let report = annotated.to_text_report();
+    assert!(report.contains("directive = \"Custom team rules for comments.\""));
+    assert!(report.contains("citation_template = \"[{id}]\""));
+    assert!(report.contains("citation_templates"));
+}
+
+#[test]
+fn test_hygiene_config_citation_format_alias() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    let toml = r#"
+[hygiene]
+citation_format = "[{id}] {summary}"
+"#;
+    fs::write(root.join("qdev.toml"), toml).unwrap();
+
+    let annotated = load_config(root).unwrap();
+    assert_eq!(
+        annotated.config.hygiene.citation_template.as_deref(),
+        Some("[{id}] {summary}")
+    );
+}
+
+#[test]
+fn test_hygiene_citation_derivation_comment_leaders() {
+    // 1. Base starts with //
+    let mut config = qdev_core::config::HygieneConfig::default();
+    config.citation_template = Some("// [{id}]".to_string());
+    let templates = config.resolved_citation_templates();
+    assert_eq!(templates.get("rust").unwrap(), "// [{id}]");
+    assert_eq!(templates.get("python").unwrap(), "# [{id}]");
+
+    // 2. Base starts with #
+    config.citation_template = Some("# [{id}]".to_string());
+    let templates = config.resolved_citation_templates();
+    assert_eq!(templates.get("rust").unwrap(), "// [{id}]");
+    assert_eq!(templates.get("python").unwrap(), "# [{id}]");
+
+    // 3. Case-insensitive language lookup in citation_templates
+    config.citation_templates.insert("RUST".to_string(), "// [RUST-{id}]".to_string());
+    let templates = config.resolved_citation_templates();
+    assert_eq!(templates.get("rust").unwrap(), "// [RUST-{id}]");
+
+    // 4. py language alias and doc-comment prefix stripping
+    let mut py_cfg = qdev_core::config::HygieneConfig::default();
+    py_cfg.languages = vec!["py".to_string(), "rust".to_string()];
+    py_cfg.citation_template = Some("/// [{id}] {summary}".to_string());
+    let templates = py_cfg.resolved_citation_templates();
+    assert_eq!(templates.get("py").unwrap(), "# [{id}] {summary}");
+    assert_eq!(templates.get("rust").unwrap(), "/// [{id}] {summary}");
+
+    py_cfg.citation_template = Some("//! [{id}]".to_string());
+    let templates = py_cfg.resolved_citation_templates();
+    assert_eq!(templates.get("py").unwrap(), "# [{id}]");
+}
+
+#[test]
+fn test_hygiene_config_hierarchical_merging_and_alias_precedence() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    // Project defines citation_template and Rust template with uppercase key
+    let project_toml = r#"
+[hygiene]
+enabled = true
+citation_template = "[PROJECT-{id}]"
+
+[hygiene.citation_templates]
+Rust = "// [PROJECT-RUST-{id}]"
+swift = "// [PROJECT-SWIFT-{id}]"
+"#;
+    fs::write(root.join("qdev.toml"), project_toml).unwrap();
+
+    // Local defines citation_format (alias) and overrides rust template with lowercase key
+    let local_toml = r#"
+[hygiene]
+citation_format = "[LOCAL-{id}]"
+
+[hygiene.citation_templates]
+rust = "// [LOCAL-RUST-{id}]"
+"#;
+    fs::write(root.join(".qdev.local.toml"), local_toml).unwrap();
+
+    let annotated = load_config(root).unwrap();
+    let hygiene = &annotated.config.hygiene;
+
+    // Local citation_format must override project citation_template
+    assert_eq!(hygiene.citation_template.as_deref(), Some("[LOCAL-{id}]"));
+    let src = annotated.sources.get("hygiene.citation_template").unwrap();
+    assert_eq!(*src, qdev_core::config::ConfigSource::Local);
+
+    // Local "rust" must override project "Rust" without case-sensitive duplication
+    assert_eq!(hygiene.citation_templates.len(), 2);
+    assert_eq!(
+        hygiene.citation_templates.get("rust").map(|s| s.as_str()),
+        Some("// [LOCAL-RUST-{id}]")
+    );
+    assert_eq!(
+        hygiene.citation_templates.get("swift").map(|s| s.as_str()),
+        Some("// [PROJECT-SWIFT-{id}]")
+    );
+    assert!(!hygiene.citation_templates.contains_key("Rust"));
+}
+
+#[test]
+fn test_hygiene_config_schema_violations() {
+    let invalid_cases = [
+        ("[hygiene]\ndirective = 123\n", "directive", "hygiene"),
+        ("[hygiene]\ndirective = \"   \"\n", "directive", "hygiene"),
+        ("[hygiene]\ncitation_template = true\n", "citation_template", "hygiene"),
+        ("[hygiene]\ncitation_template = \"\"\n", "citation_template", "hygiene"),
+        ("[hygiene]\ncitation_format = false\n", "citation_format", "hygiene"),
+        ("[hygiene]\ncitation_format = \"  \t  \"\n", "citation_format", "hygiene"),
+        ("[hygiene]\ncitation_template = \"[{id}]\"\ncitation_format = \"[{id}]\"\n", "citation_template", "hygiene"),
+        ("[hygiene]\ncitation_templates = \"not-a-table\"\n", "citation_templates", "hygiene"),
+        ("[hygiene.citation_templates]\nrust = 123\n", "rust", "hygiene"),
+        ("[hygiene.citation_templates]\nrust = \"   \"\n", "rust", "hygiene"),
+    ];
+
+    for (content, key, section) in invalid_cases {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::write(root.join("qdev.toml"), content).unwrap();
+
+        let err = load_config(root).expect_err(&format!("expected error for invalid {}: {}", key, content));
+        assert_eq!(err.exit_code(), ExitCode::UsageError);
+        assert!(
+            err.message().contains(key) && err.message().contains(section),
+            "expected key '{}' and section '{}' in message: {}",
+            key,
+            section,
+            err.message()
+        );
+    }
+}
+

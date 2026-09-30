@@ -269,6 +269,36 @@ impl AnnotatedConfig {
                 self.config.hygiene.secret_patterns, src
             ));
         }
+        if let Some(dir) = &self.config.hygiene.directive {
+            let src = self
+                .sources
+                .get("hygiene.directive")
+                .unwrap_or(&ConfigSource::Default);
+            out.push_str(&format!(
+                "  directive = {:?} (source: {})\n",
+                dir, src
+            ));
+        }
+        if let Some(cit) = &self.config.hygiene.citation_template {
+            let src = self
+                .sources
+                .get("hygiene.citation_template")
+                .unwrap_or(&ConfigSource::Default);
+            out.push_str(&format!(
+                "  citation_template = {:?} (source: {})\n",
+                cit, src
+            ));
+        }
+        if !self.config.hygiene.citation_templates.is_empty() {
+            let src = self
+                .sources
+                .get("hygiene.citation_templates")
+                .unwrap_or(&ConfigSource::Default);
+            out.push_str(&format!(
+                "  citation_templates = {:?} (source: {})\n",
+                self.config.hygiene.citation_templates, src
+            ));
+        }
 
         if !self.config.regulatory.require_rationale_for.is_empty()
             || self.config.regulatory.iec62304_class.is_some()

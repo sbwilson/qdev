@@ -406,8 +406,12 @@ fn test_develop_sections_carry_the_right_content() {
     assert!(scope_pos < deps_pos && deps_pos < hygiene_pos && hygiene_pos < custom_pos);
     assert!(gates.contains("c-abi-round-trip (command [review])"));
 
-    // 8. Hygiene directive: verbatim from compliance-and-safety.md §1.
-    assert_eq!(section("hygiene"), HYGIENE_DIRECTIVE);
+    // 8. Hygiene directive & citation templates: verbatim from compliance-and-safety.md §1 plus derived templates.
+    let hygiene = section("hygiene");
+    assert!(hygiene.contains(HYGIENE_DIRECTIVE));
+    assert!(hygiene.contains("rust: // [{id}] {summary}"));
+    assert!(hygiene.contains("swift: // [{id}] {summary}"));
+    assert!(hygiene.contains("python: # [{id}] {summary}"));
     assert!(HYGIENE_DIRECTIVE.contains("`qdev scratch append`"));
 }
 
@@ -601,6 +605,7 @@ fn test_review_section_set_extends_develop() {
             "gates",
             "hygiene",
             "diff",
+            "hygiene_findings",
             "gate_receipts",
             "evidence"
         ]
@@ -618,6 +623,18 @@ fn test_review_section_set_extends_develop() {
     assert!(
         diff.starts_with("(empty: "),
         "diff must be empty with a reason note, got: {diff}"
+    );
+
+    let hygiene_findings = payload
+        .sections
+        .iter()
+        .find(|s| s.name == "hygiene_findings")
+        .unwrap()
+        .content
+        .clone();
+    assert!(
+        hygiene_findings.starts_with("(empty: "),
+        "hygiene_findings must be empty with a reason note outside git worktree, got: {hygiene_findings}"
     );
 
     // No runs yet: both review extras are (none)-marked but present.
@@ -1313,4 +1330,266 @@ fn test_payload_validates_against_its_own_schema() {
         "payload failed its own schema: {errors:?}"
     );
 }
+
+#[test]
+fn test_hygiene_section_with_custom_directive() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteStore::open_in_memory().unwrap();
+    setup_reference(temp.path(), &store);
+
+    let mut cfg = test_config();
+    cfg.hygiene.directive = Some("Custom engineering rules: be concise.".to_string());
+
+    let payload = build_context(
+        temp.path(),
+        &store,
+        &cfg,
+        &options(ContextPhase::Develop, None, false),
+        "E12S4",
+    )
+    .unwrap();
+
+    let hygiene = payload
+        .sections
+        .iter()
+        .find(|s| s.name == "hygiene")
+        .unwrap()
+        .content
+        .clone();
+
+    assert!(hygiene.starts_with("Custom engineering rules: be concise."));
+    assert!(hygiene.contains("Citation templates:"));
+    assert!(hygiene.contains("rust: // [{id}] {summary}"));
+    assert!(hygiene.contains("swift: // [{id}] {summary}"));
+    assert!(hygiene.contains("python: # [{id}] {summary}"));
+}
+
+#[test]
+fn test_hygiene_section_with_custom_citation_template_and_alias() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteStore::open_in_memory().unwrap();
+    setup_reference(temp.path(), &store);
+
+    let mut cfg = test_config();
+    cfg.hygiene.citation_template = Some("[{id}]".to_string());
+
+    let payload = build_context(
+        temp.path(),
+        &store,
+        &cfg,
+        &options(ContextPhase::Develop, None, false),
+        "E12S4",
+    )
+    .unwrap();
+
+    let hygiene = payload
+        .sections
+        .iter()
+        .find(|s| s.name == "hygiene")
+        .unwrap()
+        .content
+        .clone();
+
+    assert!(hygiene.contains("rust: // [{id}]"));
+    assert!(hygiene.contains("swift: // [{id}]"));
+    assert!(hygiene.contains("python: # [{id}]"));
+}
+
+#[test]
+fn test_hygiene_section_with_custom_per_language_templates() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteStore::open_in_memory().unwrap();
+    setup_reference(temp.path(), &store);
+
+    let mut cfg = test_config();
+    cfg.hygiene.citation_templates.insert("rust".to_string(), "// [{entity_id}]".to_string());
+
+    let payload = build_context(
+        temp.path(),
+        &store,
+        &cfg,
+        &options(ContextPhase::Develop, None, false),
+        "E12S4",
+    )
+    .unwrap();
+
+    let hygiene = payload
+        .sections
+        .iter()
+        .find(|s| s.name == "hygiene")
+        .unwrap()
+        .content
+        .clone();
+
+    assert!(hygiene.contains("rust: // [{entity_id}]"));
+    assert!(hygiene.contains("swift: // [{id}] {summary}"));
+    assert!(hygiene.contains("python: # [{id}] {summary}"));
+}
+
+#[test]
+fn test_review_hygiene_findings_clean_diff_and_violations() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let store = SqliteStore::open_in_memory().unwrap();
+
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run `git {}`: {}", args.join(" "), e));
+        assert!(
+            output.status.success(),
+            "`git {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    git(&["init", "-b", "develop"]);
+    git(&["config", "user.email", "simon@example.com"]);
+    git(&["config", "user.name", "Simon"]);
+    git(&["config", "commit.gpgsign", "false"]);
+
+    setup_reference(root, &store);
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/lib.rs"), "// standard clean code\npub fn foo() {}\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "initial baseline"]);
+
+    // Create feature branch
+    git(&["checkout", "-b", "feature/E12S4"]);
+
+    // Clean diff case: add clean code in a new commit
+    fs::write(
+        root.join("src/lib.rs"),
+        "// [E12S4] standard clean citation\npub fn foo() {}\n",
+    )
+    .unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "clean update"]);
+
+    let mut cfg = test_config();
+    cfg.git.integration_branch = "develop".to_string();
+
+    let payload = build_context(
+        root,
+        &store,
+        &cfg,
+        &options(ContextPhase::Review, None, false),
+        "E12S4",
+    )
+    .unwrap();
+
+    // 1. Clean diff -> hygiene_findings is (none)
+    let hygiene_findings = payload
+        .sections
+        .iter()
+        .find(|s| s.name == "hygiene_findings")
+        .unwrap();
+    assert_eq!(hygiene_findings.content, "(none)");
+    assert_eq!(hygiene_findings.priority, 10);
+
+    // 2. Add a hygiene violation in diff (story banner)
+    fs::write(
+        root.join("src/lib.rs"),
+        "// ⭐ STORY 1.2: Forensic development memoirs in source comments\npub fn foo() {}\n",
+    )
+    .unwrap();
+
+    let payload = build_context(
+        root,
+        &store,
+        &cfg,
+        &options(ContextPhase::Review, None, false),
+        "E12S4",
+    )
+    .unwrap();
+
+    let hygiene_findings = payload
+        .sections
+        .iter()
+        .find(|s| s.name == "hygiene_findings")
+        .unwrap();
+    assert!(
+        hygiene_findings.content.contains("src/lib.rs:1: [story_banner]"),
+        "expected violation in hygiene_findings: {}",
+        hygiene_findings.content
+    );
+
+    // 3. Hygiene disabled in config -> hygiene_findings is (none)
+    let mut disabled_cfg = cfg.clone();
+    disabled_cfg.hygiene.enabled = false;
+
+    let payload_disabled = build_context(
+        root,
+        &store,
+        &disabled_cfg,
+        &options(ContextPhase::Review, None, false),
+        "E12S4",
+    )
+    .unwrap();
+
+    let hygiene_findings_disabled = payload_disabled
+        .sections
+        .iter()
+        .find(|s| s.name == "hygiene_findings")
+        .unwrap();
+    assert_eq!(hygiene_findings_disabled.content, "(none)");
+}
+
+#[test]
+fn test_review_hygiene_findings_unresolvable_diff_baseline() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let store = SqliteStore::open_in_memory().unwrap();
+
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run `git {}`: {}", args.join(" "), e));
+        assert!(
+            output.status.success(),
+            "`git {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.email", "simon@example.com"]);
+    git(&["config", "user.name", "Simon"]);
+    git(&["config", "commit.gpgsign", "false"]);
+
+    setup_reference(root, &store);
+    git(&["add", "."]);
+    git(&["commit", "-m", "initial commit on main"]);
+
+    let mut cfg = test_config();
+    cfg.git.integration_branch = "develop".to_string();
+
+    let payload = build_context(
+        root,
+        &store,
+        &cfg,
+        &options(ContextPhase::Review, None, false),
+        "E12S4",
+    )
+    .unwrap();
+
+    let hygiene_findings = payload
+        .sections
+        .iter()
+        .find(|s| s.name == "hygiene_findings")
+        .unwrap();
+
+    assert_eq!(
+        hygiene_findings.content,
+        "(empty: cannot resolve a diff baseline against 'develop')"
+    );
+}
+
+
 
