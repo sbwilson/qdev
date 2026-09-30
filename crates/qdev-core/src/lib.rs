@@ -138,8 +138,8 @@ pub use dag::{
 
 pub use doctor::{
     default_doctor_sections, CacheDoctorSection, DoctorSection, DoctorSectionReport,
-    HooksDoctorSection, LeasesDoctorSection, McpDoctorSection, SkillsDoctorSection,
-    ValidationDoctorSection,
+    GatesDoctorSection, GitDoctorSection, HooksDoctorSection, LeasesDoctorSection, McpDoctorSection,
+    ModulesDoctorSection, SkillsDoctorSection, ValidationDoctorSection,
 };
 
 pub use mcp::{

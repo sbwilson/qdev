@@ -207,7 +207,7 @@ fn held_by_this_worktree(lease: &StoryLease, root: &Path) -> bool {
 /// `up_to_date`/`behind`/`ahead`/`diverged`; a failed count names which refs are
 /// missing (`integration_branch_missing`, `remote_ref_missing`, `refs_missing`) via local
 /// `rev-parse --verify` probes — no remote update, ever.
-fn integration_status(
+pub fn integration_status(
     root: &Path,
     remote: &str,
     integration_branch: &str,

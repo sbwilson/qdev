@@ -27,6 +27,7 @@
             },
             "then": {
               "required": [
+                "status",
                 "cache_schema_version",
                 "expected_cache_schema_version",
                 "schema_status",
@@ -36,6 +37,11 @@
                 "finding_count"
               ],
               "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": ["ok", "mismatch"],
+                  "description": "\"ok\" only when the observed version matches and no table is missing."
+                },
                 "cache_schema_version": {
                   "type": "integer",
                   "description": "The version the cache database actually carries, read from it rather than reported back from this binary's own constant."
@@ -278,6 +284,157 @@
                   "type": ["array", "null"],
                   "items": { "type": "string" },
                   "description": "List of targets (e.g. \"claude\", \"cursor\") where qdev MCP server is registered."
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "name": { "const": "git" } },
+              "required": ["name"]
+            },
+            "then": {
+              "required": [
+                "status",
+                "unavailable_reason",
+                "clean",
+                "dirty_files",
+                "branch",
+                "head",
+                "remote",
+                "integration_branch",
+                "integration_state",
+                "ahead",
+                "behind"
+              ],
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": ["ok", "mismatch", "unavailable"],
+                  "description": "\"ok\" when tree is clean and integration is normal, \"mismatch\" when dirty or diverged, \"unavailable\" outside a git repository."
+                },
+                "unavailable_reason": {
+                  "type": ["string", "null"],
+                  "description": "The error code that prevented git inspection (e.g. \"not_a_git_repository\"); null when status is \"ok\" or \"mismatch\"."
+                },
+                "clean": {
+                  "type": ["boolean", "null"],
+                  "description": "True when git status --porcelain reports 0 dirty files. Null when unavailable."
+                },
+                "dirty_files": {
+                  "type": ["integer", "null"],
+                  "description": "Count of modified, staged, or untracked files. Null when unavailable."
+                },
+                "branch": {
+                  "type": ["string", "null"],
+                  "description": "Current active git branch. Null when unavailable."
+                },
+                "head": {
+                  "type": ["string", "null"],
+                  "description": "Current HEAD commit SHA. Null when unavailable."
+                },
+                "remote": {
+                  "type": ["string", "null"],
+                  "description": "Configured integration remote name."
+                },
+                "integration_branch": {
+                  "type": ["string", "null"],
+                  "description": "Configured integration branch name."
+                },
+                "integration_state": {
+                  "type": ["string", "null"],
+                  "description": "Integration sync state (e.g. \"up_to_date\", \"behind\", \"ahead\", \"diverged\"). Null when unavailable."
+                },
+                "ahead": {
+                  "type": ["integer", "null"],
+                  "description": "Commits ahead of integration branch. Null when unavailable or not count-based."
+                },
+                "behind": {
+                  "type": ["integer", "null"],
+                  "description": "Commits behind integration branch. Null when unavailable or not count-based."
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "name": { "const": "modules" } },
+              "required": ["name"]
+            },
+            "then": {
+              "required": [
+                "status",
+                "unavailable_reason",
+                "declared_count",
+                "unmatched_count",
+                "unmatched_globs"
+              ],
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": ["ok", "mismatch", "unavailable"],
+                  "description": "\"ok\" when all path globs match at least one file, \"mismatch\" when any module glob matches 0 files, \"unavailable\" on failure."
+                },
+                "unavailable_reason": {
+                  "type": ["string", "null"],
+                  "description": "Error code if modules check failed; null otherwise."
+                },
+                "declared_count": {
+                  "type": ["integer", "null"],
+                  "description": "Total number of modules declared in configuration."
+                },
+                "unmatched_count": {
+                  "type": ["integer", "null"],
+                  "description": "Number of declared path globs matching zero files."
+                },
+                "unmatched_globs": {
+                  "type": ["array", "null"],
+                  "items": { "type": "string" },
+                  "description": "Declared path globs matching zero files."
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "name": { "const": "gates" } },
+              "required": ["name"]
+            },
+            "then": {
+              "required": [
+                "status",
+                "unavailable_reason",
+                "configured_count",
+                "missing_count",
+                "missing_executables",
+                "skipped_locally_count"
+              ],
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": ["ok", "mismatch", "unavailable"],
+                  "description": "\"ok\" when all configured gate executables exist, \"mismatch\" when any executable is missing, \"unavailable\" on failure."
+                },
+                "unavailable_reason": {
+                  "type": ["string", "null"],
+                  "description": "Error code if gates inspection failed; null otherwise."
+                },
+                "configured_count": {
+                  "type": ["integer", "null"],
+                  "description": "Total number of configured verification gates."
+                },
+                "missing_count": {
+                  "type": ["integer", "null"],
+                  "description": "Count of configured gates with missing executable binaries."
+                },
+                "missing_executables": {
+                  "type": ["array", "null"],
+                  "items": { "type": "string" },
+                  "description": "List of gate IDs or commands whose executable binary could not be found."
+                },
+                "skipped_locally_count": {
+                  "type": ["integer", "null"],
+                  "description": "Count of configured gates marked skip = true in local configuration."
                 }
               }
             }

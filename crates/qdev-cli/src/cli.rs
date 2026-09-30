@@ -122,6 +122,10 @@ pub struct DoctorArgs {
     /// Automatically fix remediable issues (e.g. rewrite missing or outdated git hook shims)
     #[arg(long)]
     pub fix: bool,
+
+    /// Automatically confirm destructive actions (e.g. cache rebuild)
+    #[arg(short = 'y', long = "yes")]
+    pub yes: bool,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]

@@ -546,8 +546,18 @@ fn test_doctor_section_order_is_cache_then_validation_with_no_duplicate_keys() {
     let names: Vec<&str> = first.iter().map(|s| s["name"].as_str().unwrap()).collect();
     assert_eq!(
         names,
-        vec!["cache", "validation", "leases", "hooks", "skills", "mcp"],
-        "cache must be reported before validation, validation before leases, leases before hooks, hooks before skills, and skills before mcp"
+        vec![
+            "cache",
+            "validation",
+            "leases",
+            "hooks",
+            "skills",
+            "mcp",
+            "git",
+            "modules",
+            "gates"
+        ],
+        "sections must be reported in order: cache, validation, leases, hooks, skills, mcp, git, modules, gates"
     );
     assert_eq!(
         first.iter().map(|s| s["name"].clone()).collect::<Vec<_>>(),
@@ -570,9 +580,19 @@ fn test_doctor_section_order_is_cache_then_validation_with_no_duplicate_keys() {
     let hooks_at = raw.find("\"hooks\"").unwrap();
     let skills_at = raw.find("\"skills\"").unwrap();
     let mcp_at = raw.find("\"mcp\"").unwrap();
+    let git_at = raw.find("\"git\"").unwrap();
+    let modules_at = raw.find("\"modules\"").unwrap();
+    let gates_at = raw.find("\"gates\"").unwrap();
     assert!(
-        cache_at < validation_at && validation_at < leases_at && leases_at < hooks_at && hooks_at < skills_at && skills_at < mcp_at,
-        "sections must be serialized cache-first then validation then leases then hooks then skills then mcp: {}",
+        cache_at < validation_at
+            && validation_at < leases_at
+            && leases_at < hooks_at
+            && hooks_at < skills_at
+            && skills_at < mcp_at
+            && mcp_at < git_at
+            && git_at < modules_at
+            && modules_at < gates_at,
+        "sections must be serialized cache-first then validation then leases then hooks then skills then mcp then git then modules then gates: {}",
         raw
     );
     // Asserted per section rather than as a global count, so a third section added by a later
@@ -827,3 +847,207 @@ fn test_doctor_defective_workspace_output_matches_its_printed_schema() {
         "the fixture must exercise a non-empty, multi-code breakdown"
     );
 }
+
+#[test]
+fn test_doctor_text_output_renders_eight_check_summary_block() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd.current_dir(root).args(["doctor"]).assert().success();
+    let text = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    // Summary block must render the 8 checks matching CLI ref §7 with glyphs
+    assert!(text.contains("[x] Git:"), "text must contain '[x] Git:': {}", text);
+    assert!(text.contains("[✓] Cache:"), "text must contain '[✓] Cache:': {}", text);
+    assert!(text.contains("[✓] Modules:"), "text must contain '[✓] Modules:': {}", text);
+    assert!(text.contains("[✓] Gates:"), "text must contain '[✓] Gates:': {}", text);
+    assert!(text.contains("[x] Hooks:"), "text must contain '[x] Hooks:': {}", text);
+    assert!(text.contains("[✓] Skills:"), "text must contain '[✓] Skills:': {}", text);
+    assert!(text.contains("[!] MCP:"), "text must contain '[!] MCP:': {}", text);
+    assert!(text.contains("[✓] Leases:"), "text must contain '[✓] Leases:': {}", text);
+
+    // Followed by detailed sections
+    assert!(text.contains("[cache]"), "text must contain [cache] section");
+    assert!(text.contains("[validation]"), "text must contain [validation] section");
+    assert!(text.contains("[git]"), "text must contain [git] section");
+    assert!(text.contains("[modules]"), "text must contain [modules] section");
+    assert!(text.contains("[gates]"), "text must contain [gates] section");
+}
+
+#[test]
+fn test_doctor_text_output_in_clean_git_workspace() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    // Initialize git repo with develop branch and a bare origin
+    std::process::Command::new("git")
+        .args(["init", "-b", "develop"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "commit.gpgsign", "false"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Simon"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.email", "simon@example.com"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "--no-gpg-sign", "-m", "init"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    let origin_temp = TempDir::new().unwrap();
+    let origin_dir = origin_temp.path().join("origin.git");
+    std::process::Command::new("git")
+        .args(["init", "--bare", origin_dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["remote", "add", "origin", origin_dir.to_str().unwrap()])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["push", "-u", "origin", "develop"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    // Install hooks so hooks are [✓]
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["install", "hooks"])
+        .assert()
+        .success();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd.current_dir(root).args(["doctor"]).assert().success();
+    let text = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(
+        text.contains("[✓] Git: develop tracks origin/develop; clean tree"),
+        "text must contain clean git line: {}",
+        text
+    );
+    assert!(
+        text.contains("[✓] Hooks: 3 shims installed and current"),
+        "text must contain clean hooks line: {}",
+        text
+    );
+    assert!(text.contains("[✓] Cache:"), "text must contain Cache check: {}", text);
+    assert!(text.contains("[✓] Modules:"), "text must contain Modules check: {}", text);
+    assert!(text.contains("[✓] Gates:"), "text must contain Gates check: {}", text);
+    assert!(text.contains("[✓] Skills:"), "text must contain Skills check: {}", text);
+    assert!(text.contains("[!] MCP:"), "text must contain MCP check: {}", text);
+    assert!(text.contains("[✓] Leases:"), "text must contain Leases check: {}", text);
+}
+
+#[test]
+fn test_doctor_fix_regenerates_outdated_skills() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    // Plant an outdated skill
+    let claude_skill_dir = root.join(".claude/skills/qdev");
+    fs::create_dir_all(&claude_skill_dir).unwrap();
+    fs::write(
+        claude_skill_dir.join("SKILL.md"),
+        "---\nname: qdev\ndescription: old\nversion: \"0.0.1\"\nqdev_version: \"0.0.1\"\n---\n# Old\n",
+    )
+    .unwrap();
+
+    // Verify doctor reports mismatch first
+    let sections = doctor_sections(root);
+    let skills_sec = section(&sections, "skills");
+    assert_eq!(skills_sec["status"], "mismatch");
+    assert_eq!(skills_sec["outdated_count"], 1);
+
+    // Run doctor --fix
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["doctor", "--fix", "--non-interactive"])
+        .assert()
+        .success();
+
+    // Verify skill is regenerated and doctor reports ok
+    let sections_after = doctor_sections(root);
+    let skills_sec_after = section(&sections_after, "skills");
+    assert_eq!(skills_sec_after["status"], "ok");
+    assert_eq!(skills_sec_after["outdated_count"], 0);
+    assert_eq!(skills_sec_after["up_to_date"], true);
+}
+
+#[test]
+fn test_doctor_fix_corrupt_cache_requires_confirmation_in_non_interactive_mode() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    // Corrupt the sqlite cache file
+    let cache_db = root.join(".qdev/cache/cache.sqlite");
+    fs::write(&cache_db, b"corrupted sqlite header or contents").unwrap();
+
+    // doctor --fix in non-interactive mode without --yes must refuse with exit code 3 (PolicyRefusal)
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["doctor", "--fix", "--non-interactive", "--json"])
+        .assert()
+        .code(3);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let combined = format!("{}{}", stdout, stderr);
+    assert!(
+        combined.contains("needs_confirmation") || combined.contains("Rebuilding corrupt cache requires"),
+        "output must explain confirmation requirement: {}",
+        combined
+    );
+}
+
+#[test]
+fn test_doctor_fix_corrupt_cache_with_yes_rebuilds_cache() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let stories_dir = root.join("docs/specs/stories");
+    write_story(&stories_dir, "E1S1", "Story One");
+
+    // Corrupt cache
+    let cache_db = root.join(".qdev/cache/cache.sqlite");
+    fs::write(&cache_db, b"corrupted sqlite header or contents").unwrap();
+
+    // Run doctor --fix --yes --non-interactive
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["doctor", "--fix", "--yes", "--non-interactive"])
+        .assert()
+        .success();
+
+    // Verify cache is healthy and reflects markdown entity
+    let sections = doctor_sections(root);
+    let cache_sec = section(&sections, "cache");
+    assert_eq!(cache_sec["status"], "ok");
+    assert_eq!(cache_sec["schema_status"], "ok");
+    assert_eq!(cache_sec["entity_count"], 1);
+}
+

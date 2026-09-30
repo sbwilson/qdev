@@ -120,6 +120,10 @@ impl DoctorSection for CacheDoctorSection {
         Ok(DoctorSectionReport {
             name: self.name().to_string(),
             fields: vec![
+                (
+                    "status".to_string(),
+                    serde_json::Value::from(schema_status),
+                ),
                 // Named `cache_schema_version`, not `schema_version`: the envelope already
                 // has a `schema_version` (a string, the payload contract version), and a
                 // section field of the same name but a different type and meaning would be a
@@ -550,10 +554,339 @@ impl DoctorSection for McpDoctorSection {
     }
 }
 
+/// Reports Git repository and working tree health: whether working tree is clean or dirty,
+/// current branch and head commit, and integration branch synchronization status.
+pub struct GitDoctorSection {
+    workspace_root: PathBuf,
+    config: Config,
+}
+
+impl GitDoctorSection {
+    pub fn new(workspace_root: PathBuf, config: Config) -> Self {
+        Self {
+            workspace_root,
+            config,
+        }
+    }
+}
+
+impl DoctorSection for GitDoctorSection {
+    fn name(&self) -> &'static str {
+        "git"
+    }
+
+    fn run(&self, _store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
+        if !crate::gate::git::is_inside_work_tree(&self.workspace_root) {
+            return Ok(DoctorSectionReport {
+                name: self.name().to_string(),
+                fields: vec![
+                    ("status".to_string(), serde_json::Value::from("unavailable")),
+                    (
+                        "unavailable_reason".to_string(),
+                        serde_json::Value::from("not_a_git_repository"),
+                    ),
+                    ("clean".to_string(), serde_json::Value::Null),
+                    ("dirty_files".to_string(), serde_json::Value::Null),
+                    ("branch".to_string(), serde_json::Value::Null),
+                    ("head".to_string(), serde_json::Value::Null),
+                    (
+                        "remote".to_string(),
+                        serde_json::Value::from(self.config.git.remote.clone()),
+                    ),
+                    (
+                        "integration_branch".to_string(),
+                        serde_json::Value::from(self.config.git.integration_branch.clone()),
+                    ),
+                    ("integration_state".to_string(), serde_json::Value::Null),
+                    ("ahead".to_string(), serde_json::Value::Null),
+                    ("behind".to_string(), serde_json::Value::Null),
+                ],
+            });
+        }
+
+        let status_output = crate::gate::git::run_git(&self.workspace_root, &["status", "--porcelain"]);
+        let (clean, dirty_files) = match status_output {
+            Ok(out) if out.status.success() => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let count = if text.trim().is_empty() {
+                    0
+                } else {
+                    text.lines().filter(|l| !l.trim().is_empty()).count() as u32
+                };
+                (count == 0, count)
+            }
+            _ => {
+                return Ok(DoctorSectionReport {
+                    name: self.name().to_string(),
+                    fields: vec![
+                        ("status".to_string(), serde_json::Value::from("unavailable")),
+                        (
+                            "unavailable_reason".to_string(),
+                            serde_json::Value::from("git_status_failed"),
+                        ),
+                        ("clean".to_string(), serde_json::Value::Null),
+                        ("dirty_files".to_string(), serde_json::Value::Null),
+                        ("branch".to_string(), serde_json::Value::Null),
+                        ("head".to_string(), serde_json::Value::Null),
+                        (
+                            "remote".to_string(),
+                            serde_json::Value::from(self.config.git.remote.clone()),
+                        ),
+                        (
+                            "integration_branch".to_string(),
+                            serde_json::Value::from(self.config.git.integration_branch.clone()),
+                        ),
+                        ("integration_state".to_string(), serde_json::Value::Null),
+                        ("ahead".to_string(), serde_json::Value::Null),
+                        ("behind".to_string(), serde_json::Value::Null),
+                    ],
+                });
+            }
+        };
+
+        let branch = match crate::gate::git::run_git(&self.workspace_root, &["rev-parse", "--abbrev-ref", "HEAD"]) {
+            Ok(out) if out.status.success() => {
+                let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if b.is_empty() {
+                    None
+                } else {
+                    Some(b)
+                }
+            }
+            _ => None,
+        };
+
+        let head = crate::gate::git::head_sha(&self.workspace_root);
+
+        let integration = crate::pulse::integration_status(
+            &self.workspace_root,
+            &self.config.git.remote,
+            &self.config.git.integration_branch,
+            true,
+        );
+
+        let int_state = integration.as_ref().map(|i| i.state.clone());
+        let ahead = integration.as_ref().and_then(|i| i.ahead);
+        let behind = integration.as_ref().and_then(|i| i.behind);
+
+        let status = if !clean {
+            "mismatch"
+        } else if matches!(
+            int_state.as_deref(),
+            Some("diverged")
+                | Some("refs_missing")
+                | Some("integration_branch_missing")
+                | Some("remote_ref_missing")
+        ) {
+            "mismatch"
+        } else {
+            "ok"
+        };
+
+        Ok(DoctorSectionReport {
+            name: self.name().to_string(),
+            fields: vec![
+                ("status".to_string(), serde_json::Value::from(status)),
+                ("unavailable_reason".to_string(), serde_json::Value::Null),
+                ("clean".to_string(), serde_json::Value::from(clean)),
+                ("dirty_files".to_string(), serde_json::Value::from(dirty_files)),
+                (
+                    "branch".to_string(),
+                    match branch {
+                        Some(b) => serde_json::Value::from(b),
+                        None => serde_json::Value::Null,
+                    },
+                ),
+                (
+                    "head".to_string(),
+                    match head {
+                        Some(h) => serde_json::Value::from(h),
+                        None => serde_json::Value::Null,
+                    },
+                ),
+                (
+                    "remote".to_string(),
+                    serde_json::Value::from(self.config.git.remote.clone()),
+                ),
+                (
+                    "integration_branch".to_string(),
+                    serde_json::Value::from(self.config.git.integration_branch.clone()),
+                ),
+                (
+                    "integration_state".to_string(),
+                    match int_state {
+                        Some(s) => serde_json::Value::from(s),
+                        None => serde_json::Value::Null,
+                    },
+                ),
+                (
+                    "ahead".to_string(),
+                    match ahead {
+                        Some(a) => serde_json::Value::from(a),
+                        None => serde_json::Value::Null,
+                    },
+                ),
+                (
+                    "behind".to_string(),
+                    match behind {
+                        Some(b) => serde_json::Value::from(b),
+                        None => serde_json::Value::Null,
+                    },
+                ),
+            ],
+        })
+    }
+}
+
+/// Reports module declarations and verifies that all declared path globs match at least one file.
+pub struct ModulesDoctorSection {
+    workspace_root: PathBuf,
+    config: Config,
+}
+
+impl ModulesDoctorSection {
+    pub fn new(workspace_root: PathBuf, config: Config) -> Self {
+        Self {
+            workspace_root,
+            config,
+        }
+    }
+}
+
+impl DoctorSection for ModulesDoctorSection {
+    fn name(&self) -> &'static str {
+        "modules"
+    }
+
+    fn run(&self, _store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
+        let declared_count = self.config.modules.len();
+        let findings = crate::validate::find_unmatched_module_globs(&self.workspace_root, &self.config)?;
+        let mut unmatched_globs = Vec::new();
+        for finding in &findings {
+            if let Some(msg) = &finding.message {
+                if let Some(start) = msg.find("path glob '") {
+                    let rem = &msg[start + 11..];
+                    if let Some(end) = rem.find('\'') {
+                        unmatched_globs.push(rem[..end].to_string());
+                    }
+                }
+            }
+        }
+
+        let unmatched_count = unmatched_globs.len();
+        let status = if unmatched_count == 0 {
+            "ok"
+        } else {
+            "mismatch"
+        };
+
+        Ok(DoctorSectionReport {
+            name: self.name().to_string(),
+            fields: vec![
+                ("status".to_string(), serde_json::Value::from(status)),
+                ("unavailable_reason".to_string(), serde_json::Value::Null),
+                (
+                    "declared_count".to_string(),
+                    serde_json::Value::from(declared_count),
+                ),
+                (
+                    "unmatched_count".to_string(),
+                    serde_json::Value::from(unmatched_count),
+                ),
+                (
+                    "unmatched_globs".to_string(),
+                    serde_json::to_value(&unmatched_globs).unwrap(),
+                ),
+            ],
+        })
+    }
+}
+
+/// Reports configured verification gates, checking whether executable binaries exist and
+/// counting locally skipped gates without executing commands.
+pub struct GatesDoctorSection {
+    workspace_root: PathBuf,
+    config: Config,
+}
+
+impl GatesDoctorSection {
+    pub fn new(workspace_root: PathBuf, config: Config) -> Self {
+        Self {
+            workspace_root,
+            config,
+        }
+    }
+}
+
+impl DoctorSection for GatesDoctorSection {
+    fn name(&self) -> &'static str {
+        "gates"
+    }
+
+    fn run(&self, _store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
+        let configured_count = self.config.gates.len();
+        let mut missing_executables = Vec::new();
+        let mut skipped_locally_count = 0usize;
+
+        for gate in &self.config.gates {
+            if gate.skip == Some(true) {
+                skipped_locally_count += 1;
+                continue;
+            }
+
+            if let Some(ref cmd) = gate.command {
+                let args = crate::gate::runner::parse_command_args(cmd);
+                if args.is_empty() {
+                    missing_executables.push(format!("{}: <empty command>", gate.id));
+                } else {
+                    let binary_str = &args[0];
+                    let (_, exists) =
+                        crate::gate::runner::resolve_binary(&self.workspace_root, binary_str);
+                    if !exists {
+                        missing_executables.push(format!("{}: {}", gate.id, binary_str));
+                    }
+                }
+            } else if !crate::gate::builtin::is_builtin_gate(&gate.id) {
+                missing_executables.push(format!("{}: <no command>", gate.id));
+            }
+        }
+
+        let missing_count = missing_executables.len();
+        let status = if missing_count == 0 {
+            "ok"
+        } else {
+            "mismatch"
+        };
+
+        Ok(DoctorSectionReport {
+            name: self.name().to_string(),
+            fields: vec![
+                ("status".to_string(), serde_json::Value::from(status)),
+                ("unavailable_reason".to_string(), serde_json::Value::Null),
+                (
+                    "configured_count".to_string(),
+                    serde_json::Value::from(configured_count),
+                ),
+                (
+                    "missing_count".to_string(),
+                    serde_json::Value::from(missing_count),
+                ),
+                (
+                    "missing_executables".to_string(),
+                    serde_json::to_value(&missing_executables).unwrap(),
+                ),
+                (
+                    "skipped_locally_count".to_string(),
+                    serde_json::Value::from(skipped_locally_count),
+                ),
+            ],
+        })
+    }
+}
+
 /// Builds the default set of doctor sections, in the order `qdev doctor` reports them: `cache`
-/// first, then `validation`, then `leases`, then `hooks`, then `skills`, then `mcp`. This stays the single wiring point — later epics append
-/// their own `DoctorSection` impl here (gates, hygiene, ...) and take whatever context they need
-/// from the arguments already threaded through, without widening the trait.
+/// first, then `validation`, then `leases`, then `hooks`, then `skills`, then `mcp`, then `git`,
+/// then `modules`, then `gates`. This stays the single wiring point without widening the trait.
 pub fn default_doctor_sections(
     workspace_root: &Path,
     config: &Config,
@@ -571,5 +904,18 @@ pub fn default_doctor_sections(
         Box::new(HooksDoctorSection::new(workspace_root.to_path_buf())),
         Box::new(SkillsDoctorSection::new(workspace_root.to_path_buf())),
         Box::new(McpDoctorSection::new(workspace_root.to_path_buf())),
+        Box::new(GitDoctorSection::new(
+            workspace_root.to_path_buf(),
+            config.clone(),
+        )),
+        Box::new(ModulesDoctorSection::new(
+            workspace_root.to_path_buf(),
+            config.clone(),
+        )),
+        Box::new(GatesDoctorSection::new(
+            workspace_root.to_path_buf(),
+            config.clone(),
+        )),
     ]
 }
+
