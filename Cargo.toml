@@ -4,3 +4,9 @@ members = [
     "crates/qdev-core",
     "crates/qdev-cli",
 ]
+
+[profile.dev]
+split-debuginfo = "packed"
+
+[profile.test]
+split-debuginfo = "packed"

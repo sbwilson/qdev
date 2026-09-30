@@ -3,6 +3,14 @@ name = "qdev-core"
 version = "0.1.0"
 edition = "2021"
 description = "Core domain models, envelope contracts, error taxonomy, and state machine for qdev"
+autotests = false
+
+[lib]
+doctest = false
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

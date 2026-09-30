@@ -3,10 +3,16 @@ name = "qdev-cli"
 version = "0.1.0"
 edition = "2021"
 description = "Command-line interface and entrypoint for qdev"
+autotests = false
 
 [[bin]]
 name = "qdev"
 path = "src/main.rs"
+test = false
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"
 
 [dependencies]
 qdev-core = { path = "../qdev-core" }
