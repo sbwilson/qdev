@@ -42,6 +42,8 @@ mod hygiene_cli_tests;
 mod impact_cli_tests;
 #[path = "init_cli_tests.rs"]
 mod init_cli_tests;
+#[path = "install_skills_cli_tests.rs"]
+mod install_skills_cli_tests;
 #[path = "lease_cli_tests.rs"]
 mod lease_cli_tests;
 #[path = "list_cli_tests.rs"]

@@ -24,6 +24,7 @@ pub mod query;
 pub mod review;
 pub mod schema;
 pub mod scratch;
+pub mod skills;
 pub mod soup;
 pub mod sprint;
 pub mod store;
@@ -136,7 +137,14 @@ pub use dag::{
 
 pub use doctor::{
     default_doctor_sections, CacheDoctorSection, DoctorSection, DoctorSectionReport,
-    HooksDoctorSection, LeasesDoctorSection, ValidationDoctorSection,
+    HooksDoctorSection, LeasesDoctorSection, SkillsDoctorSection, ValidationDoctorSection,
+};
+
+pub use skills::{
+    generate_agent_skills, generate_claude_skills, generate_cursor_rule,
+    generate_cursor_rule_content, generate_skill_content, inspect_skills, install_skills,
+    CommandCatalog, CommandDefinition, OptionDefinition, SkillInstallOptions,
+    SkillsInstallReport, SkillsStatus, SubcommandDefinition, CORE_SKILL_NAMES, MANAGED_SKILL_PATHS,
 };
 
 pub use hook::{

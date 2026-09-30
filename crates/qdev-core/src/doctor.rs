@@ -417,8 +417,80 @@ impl DoctorSection for HooksDoctorSection {
     }
 }
 
+/// Reports editor and agent skills status: whether all installed skills match the active binary
+/// version, or lists any outdated skills.
+pub struct SkillsDoctorSection {
+    workspace_root: PathBuf,
+}
+
+impl SkillsDoctorSection {
+    pub fn new(workspace_root: PathBuf) -> Self {
+        Self { workspace_root }
+    }
+}
+
+impl DoctorSection for SkillsDoctorSection {
+    fn name(&self) -> &'static str {
+        "skills"
+    }
+
+    fn run(&self, _store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
+        match crate::skills::inspect_skills(&self.workspace_root) {
+            Ok(status) => {
+                let status_str = if status.up_to_date {
+                    "ok"
+                } else {
+                    "mismatch"
+                };
+                Ok(DoctorSectionReport {
+                    name: self.name().to_string(),
+                    fields: vec![
+                        ("status".to_string(), serde_json::Value::from(status_str)),
+                        ("unavailable_reason".to_string(), serde_json::Value::Null),
+                        (
+                            "binary_version".to_string(),
+                            serde_json::Value::from(status.binary_version),
+                        ),
+                        (
+                            "installed_count".to_string(),
+                            serde_json::Value::from(status.installed_count),
+                        ),
+                        (
+                            "outdated_count".to_string(),
+                            serde_json::Value::from(status.outdated_count),
+                        ),
+                        (
+                            "up_to_date".to_string(),
+                            serde_json::Value::from(status.up_to_date),
+                        ),
+                        (
+                            "outdated_skills".to_string(),
+                            serde_json::to_value(&status.outdated_skills).unwrap(),
+                        ),
+                    ],
+                })
+            }
+            Err(e) => Ok(DoctorSectionReport {
+                name: self.name().to_string(),
+                fields: vec![
+                    ("status".to_string(), serde_json::Value::from("unavailable")),
+                    (
+                        "unavailable_reason".to_string(),
+                        serde_json::Value::from(e.code()),
+                    ),
+                    ("binary_version".to_string(), serde_json::Value::Null),
+                    ("installed_count".to_string(), serde_json::Value::Null),
+                    ("outdated_count".to_string(), serde_json::Value::Null),
+                    ("up_to_date".to_string(), serde_json::Value::Null),
+                    ("outdated_skills".to_string(), serde_json::Value::Null),
+                ],
+            }),
+        }
+    }
+}
+
 /// Builds the default set of doctor sections, in the order `qdev doctor` reports them: `cache`
-/// first, then `validation`, then `leases`, then `hooks`. This stays the single wiring point — later epics append
+/// first, then `validation`, then `leases`, then `hooks`, then `skills`. This stays the single wiring point — later epics append
 /// their own `DoctorSection` impl here (gates, hygiene, ...) and take whatever context they need
 /// from the arguments already threaded through, without widening the trait.
 pub fn default_doctor_sections(
@@ -436,5 +508,6 @@ pub fn default_doctor_sections(
             config.leases.clone(),
         )),
         Box::new(HooksDoctorSection::new(workspace_root.to_path_buf())),
+        Box::new(SkillsDoctorSection::new(workspace_root.to_path_buf())),
     ]
 }

@@ -546,8 +546,8 @@ fn test_doctor_section_order_is_cache_then_validation_with_no_duplicate_keys() {
     let names: Vec<&str> = first.iter().map(|s| s["name"].as_str().unwrap()).collect();
     assert_eq!(
         names,
-        vec!["cache", "validation", "leases", "hooks"],
-        "cache must be reported before validation, validation before leases, and leases before hooks"
+        vec!["cache", "validation", "leases", "hooks", "skills"],
+        "cache must be reported before validation, validation before leases, leases before hooks, and hooks before skills"
     );
     assert_eq!(
         first.iter().map(|s| s["name"].clone()).collect::<Vec<_>>(),
@@ -567,9 +567,11 @@ fn test_doctor_section_order_is_cache_then_validation_with_no_duplicate_keys() {
     let cache_at = raw.find("\"cache\"").unwrap();
     let validation_at = raw.find("\"validation\"").unwrap();
     let leases_at = raw.find("\"leases\"").unwrap();
+    let hooks_at = raw.find("\"hooks\"").unwrap();
+    let skills_at = raw.find("\"skills\"").unwrap();
     assert!(
-        cache_at < validation_at && validation_at < leases_at,
-        "sections must be serialized cache-first then validation then leases: {}",
+        cache_at < validation_at && validation_at < leases_at && leases_at < hooks_at && hooks_at < skills_at,
+        "sections must be serialized cache-first then validation then leases then hooks then skills: {}",
         raw
     );
     // Asserted per section rather than as a global count, so a third section added by a later

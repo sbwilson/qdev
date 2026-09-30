@@ -62,6 +62,8 @@ mod review_tests;
 mod schema_tests;
 #[path = "scratch_tests.rs"]
 mod scratch_tests;
+#[path = "skills_tests.rs"]
+mod skills_tests;
 #[path = "soup_tests.rs"]
 mod soup_tests;
 #[path = "sprint_tests.rs"]

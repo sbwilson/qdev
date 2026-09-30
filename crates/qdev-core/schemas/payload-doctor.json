@@ -193,6 +193,55 @@
                 }
               }
             }
+          },
+          {
+            "if": {
+              "properties": { "name": { "const": "skills" } },
+              "required": ["name"]
+            },
+            "then": {
+              "required": [
+                "status",
+                "unavailable_reason",
+                "binary_version",
+                "installed_count",
+                "outdated_count",
+                "up_to_date",
+                "outdated_skills"
+              ],
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": ["ok", "mismatch", "unavailable"],
+                  "description": "\"ok\" when all installed skills match the binary version or none are installed, \"mismatch\" when any installed skill's version stamp differs from the binary, \"unavailable\" if inspection failed."
+                },
+                "unavailable_reason": {
+                  "type": ["string", "null"],
+                  "description": "The error code that prevented the skills check from completing; null when status is \"ok\" or \"mismatch\"."
+                },
+                "binary_version": {
+                  "type": ["string", "null"],
+                  "description": "The current binary version (CARGO_PKG_VERSION)."
+                },
+                "installed_count": {
+                  "type": ["integer", "null"],
+                  "description": "Number of qdev skills/rules currently installed in the workspace."
+                },
+                "outdated_count": {
+                  "type": ["integer", "null"],
+                  "description": "Number of installed skills/rules whose version stamp differs from the binary version."
+                },
+                "up_to_date": {
+                  "type": ["boolean", "null"],
+                  "description": "True when all installed skills match the binary version or none are installed."
+                },
+                "outdated_skills": {
+                  "type": ["array", "null"],
+                  "items": { "type": "string" },
+                  "description": "Relative paths to installed skills whose version stamp differs from the binary version."
+                }
+              }
+            }
           }
         ]
       }

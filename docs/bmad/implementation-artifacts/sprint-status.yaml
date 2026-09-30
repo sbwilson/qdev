@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 09-30-2026 07:37
+last_updated: 09-30-2026 21:15
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -98,7 +98,7 @@ development_status:
   4-1-qdev-context-projection: review
   4-2-attributed-rejections: review
   4-3-hygiene-directive-citation-template: review
-  4-4-skill-generation-install: backlog
+  4-4-skill-generation-install: review
   4-5-mcp-server: backlog
   4-6-the-five-skills: backlog
   4-7-doctor-environment-skills-mcp-hooks-leases: backlog

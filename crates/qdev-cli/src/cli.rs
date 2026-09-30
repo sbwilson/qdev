@@ -120,10 +120,27 @@ pub struct InstallArgs {
 pub enum InstallCommands {
     /// Install git hook shims
     Hooks(InstallHooksArgs),
+    /// Install editor and agent skill bundles
+    Skills(InstallSkillsArgs),
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
 pub struct InstallHooksArgs {}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct InstallSkillsArgs {
+    /// Install skills for Claude (.claude/skills/<skill>/SKILL.md)
+    #[arg(long)]
+    pub claude: bool,
+
+    /// Install rule for Cursor (.cursor/rules/qdev.mdc)
+    #[arg(long)]
+    pub cursor: bool,
+
+    /// Install skills for agents (.agents/skills/<skill>/SKILL.md)
+    #[arg(long)]
+    pub agents: bool,
+}
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]
 pub struct HookArgs {

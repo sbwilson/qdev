@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Skill Install Payload Schema",
+  "description": "Output shape of `qdev install skills --json`. Reports installed editor and agent skill bundles. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "targets",
+    "installed_files",
+    "version"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Selected installation target environments (e.g. claude, cursor, agents)."
+    },
+    "installed_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Workspace-relative paths to the installed skill and rule files."
+    },
+    "version": {
+      "type": "string",
+      "description": "The binary version stamped into the installed skills."
+    }
+  },
+  "additionalProperties": false
+}

@@ -171,6 +171,7 @@ pub enum PayloadKind {
     Hygiene,
     Impact,
     Context,
+    SkillInstall,
 }
 
 impl PayloadKind {
@@ -199,6 +200,7 @@ impl PayloadKind {
             PayloadKind::Hygiene => include_str!("../schemas/payload-hygiene.json"),
             PayloadKind::Impact => include_str!("../schemas/payload-impact.json"),
             PayloadKind::Context => include_str!("../schemas/payload-context.json"),
+            PayloadKind::SkillInstall => include_str!("../schemas/payload-skill-install.json"),
         }
     }
 
@@ -238,11 +240,12 @@ impl PayloadKind {
             PayloadKind::Hygiene => "hygiene",
             PayloadKind::Impact => "impact",
             PayloadKind::Context => "context",
+            PayloadKind::SkillInstall => "skill_install",
         }
     }
 
     /// Returns an array of all currently-supported payload kinds.
-    pub const fn all() -> &'static [PayloadKind; 22] {
+    pub const fn all() -> &'static [PayloadKind; 23] {
         &[
             PayloadKind::Story,
             PayloadKind::Error,
@@ -266,6 +269,7 @@ impl PayloadKind {
             PayloadKind::Hygiene,
             PayloadKind::Impact,
             PayloadKind::Context,
+            PayloadKind::SkillInstall,
         ]
     }
 
@@ -310,6 +314,9 @@ impl PayloadKind {
             "hygiene" | "hygiene_check" => Ok(PayloadKind::Hygiene),
             "impact" | "impacts" | "impact_analysis" => Ok(PayloadKind::Impact),
             "context" | "contexts" => Ok(PayloadKind::Context),
+            "skill_install" | "skills_install" | "install_skills" | "install_skill" => {
+                Ok(PayloadKind::SkillInstall)
+            }
             _ => Err(QdevError::usage_error(format!(
                 "Unknown payload name '{}'. Valid payload names: {}",
                 s,

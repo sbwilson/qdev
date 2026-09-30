@@ -2976,6 +2976,21 @@ fn render_doctor_text(sections: &[qdev_core::DoctorSectionReport]) -> String {
                 }
                 continue;
             }
+            if let serde_json::Value::Array(items) = value {
+                if items.is_empty() {
+                    out.push_str(&format!("  {} = none\n", key));
+                } else {
+                    let rendered_items: Vec<String> = items
+                        .iter()
+                        .map(|item| match item {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        })
+                        .collect();
+                    out.push_str(&format!("  {} = {}\n", key, rendered_items.join(", ")));
+                }
+                continue;
+            }
             let rendered = match value {
                 serde_json::Value::Null => "null".to_string(),
                 serde_json::Value::String(s) => s.clone(),

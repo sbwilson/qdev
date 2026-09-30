@@ -89,7 +89,7 @@ fn test_default_doctor_sections_order() {
     let temp = TempDir::new().unwrap();
     let sections = qdev_core::default_doctor_sections(temp.path(), &Config::default());
     let names: Vec<&str> = sections.iter().map(|s| s.name()).collect();
-    assert_eq!(names, vec!["cache", "validation", "leases", "hooks"]);
+    assert_eq!(names, vec!["cache", "validation", "leases", "hooks", "skills"]);
 }
 
 #[test]
@@ -109,4 +109,80 @@ fn test_doctor_hooks_section_reports_unavailable_on_non_git_repo() {
     assert!(field(&report, "all_installed").is_null());
     assert!(field(&report, "missing_hooks").is_null());
     assert!(field(&report, "outdated_hooks").is_null());
+}
+
+#[test]
+fn test_doctor_skills_section_uninstalled_reports_ok() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteStore::open_in_memory().unwrap();
+
+    let section = qdev_core::SkillsDoctorSection::new(temp.path().to_path_buf());
+    let report = section.run(&store).unwrap();
+
+    assert_eq!(report.name, "skills");
+    assert_eq!(*field(&report, "status"), "ok");
+    assert!(field(&report, "unavailable_reason").is_null());
+    assert_eq!(*field(&report, "installed_count"), 0);
+    assert_eq!(*field(&report, "outdated_count"), 0);
+    assert_eq!(*field(&report, "up_to_date"), true);
+    assert_eq!(*field(&report, "outdated_skills"), serde_json::json!([]));
+}
+
+#[test]
+fn test_doctor_skills_section_clean_reports_ok() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteStore::open_in_memory().unwrap();
+
+    let options = qdev_core::SkillInstallOptions {
+        claude: true,
+        cursor: false,
+        agents: false,
+    };
+    qdev_core::install_skills(temp.path(), &options).unwrap();
+
+    let section = qdev_core::SkillsDoctorSection::new(temp.path().to_path_buf());
+    let report = section.run(&store).unwrap();
+
+    assert_eq!(report.name, "skills");
+    assert_eq!(*field(&report, "status"), "ok");
+    assert!(field(&report, "unavailable_reason").is_null());
+    assert_eq!(*field(&report, "installed_count"), 5);
+    assert_eq!(*field(&report, "outdated_count"), 0);
+    assert_eq!(*field(&report, "up_to_date"), true);
+    assert_eq!(*field(&report, "outdated_skills"), serde_json::json!([]));
+}
+
+#[test]
+fn test_doctor_skills_section_outdated_reports_mismatch() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteStore::open_in_memory().unwrap();
+
+    let claude_skill_dir = temp.path().join(".claude/skills/qdev");
+    std::fs::create_dir_all(&claude_skill_dir).unwrap();
+    std::fs::write(
+        claude_skill_dir.join("SKILL.md"),
+        r#"---
+name: qdev
+description: "Outdated skill"
+version: "0.0.9"
+qdev_version: "0.0.9"
+---
+# Outdated
+"#,
+    )
+    .unwrap();
+
+    let section = qdev_core::SkillsDoctorSection::new(temp.path().to_path_buf());
+    let report = section.run(&store).unwrap();
+
+    assert_eq!(report.name, "skills");
+    assert_eq!(*field(&report, "status"), "mismatch");
+    assert!(field(&report, "unavailable_reason").is_null());
+    assert_eq!(*field(&report, "installed_count"), 1);
+    assert_eq!(*field(&report, "outdated_count"), 1);
+    assert_eq!(*field(&report, "up_to_date"), false);
+    assert_eq!(
+        *field(&report, "outdated_skills"),
+        serde_json::json!([".claude/skills/qdev/SKILL.md"])
+    );
 }

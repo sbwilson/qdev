@@ -629,13 +629,27 @@ scaffolded.
 
 | Target | Command | Writes |
 | --- | --- | --- |
-| Claude Code | `qdev install skills --claude` | `.claude/skills/qdev-*/SKILL.md` |
+| Claude Code | `qdev install skills --claude` | `.claude/skills/<skill>/SKILL.md` for core skills |
 | Cursor | `qdev install skills --cursor` | `.cursor/rules/qdev.mdc` |
-| Agent directories | `qdev install skills --agents` | `.agents/skills/qdev-*` |
-| MCP | `qdev install mcp --claude|--cursor` | Stdio server entry pointing at `qdev mcp serve` |
+| Agent directories | `qdev install skills --agents` | `.agents/skills/<skill>/SKILL.md` for core skills |
+| MCP | `qdev install mcp --claude\|--cursor` | Stdio server entry pointing at `qdev mcp serve` |
 | Git hooks | `qdev install hooks` | Shims for `pre-commit`, `pre-push`, `prepare-commit-msg` that call `qdev hook <name>` |
 
-Skills are generated from the same command catalog as the CLI, so they cannot drift from the binary.
+#### `qdev install skills`
+
+Generates and installs editor and agent skill bundles from the centralized `CommandCatalog`. Requires at least one target flag (`--claude`, `--cursor`, or `--agents`); passing no target flag exits 2 with a usage error. Supports multiple targets in a single invocation (e.g. `qdev install skills --claude --cursor --agents`).
+
+- **Claude skills**: Writes 5 skills into `.claude/skills/<skill>/SKILL.md` (`qdev`, `qdev-plan`, `qdev-create-story`, `qdev-develop`, `qdev-review`).
+- **Cursor rule**: Writes `.cursor/rules/qdev.mdc`.
+- **Agent skills**: Writes 5 skills into `.agents/skills/<skill>/SKILL.md` (`qdev`, `qdev-plan`, `qdev-create-story`, `qdev-develop`, `qdev-review`).
+
+All generated skills:
+- Carry frontmatter stamped with the active binary version (`version: "<version>"` and `qdev_version: "<version>"`).
+- Explicitly instruct assistants to always read and mutate state via `qdev <subcommand> ... --json`.
+- Direct assistants to inspect context using `qdev context <story-id> --phase <phase> --json`, never reading, parsing, or assembling raw entity Markdown files directly.
+- Never overwrite non-qdev files in target skill/rule directories.
+
+With `--json`, emits a JSON envelope conforming to `payload-skill-install.json` reporting `targets`, `installed_files`, and `version`.
 
 ### `qdev mcp serve`
 
@@ -658,11 +672,21 @@ $ qdev doctor
 `qdev doctor` is a report, never a gate: findings never change its exit code, so it exits 0 on a
 workspace full of them. (It can still fail for its own reasons — an unreadable workspace, a
 config that will not parse.) `qdev validate` is the command that exits 1 on an `error`-severity
-finding.
-
 Diagnostics are contributed by independent sections, reported in a fixed order — currently
-`cache`, then `validation`. `qdev doctor --json` emits each as a flat object under `sections`
+`cache`, then `validation`, then `leases`, then `hooks`, then `skills`. `qdev doctor --json` emits each as a flat object under `sections`
 (see `qdev schema payload doctor`); later epics append their own.
+
+#### The `skills` section
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `ok` when all installed skills match the active binary version (or when none are installed), `mismatch` when any installed skill is outdated, `unavailable` on inspection error |
+| `unavailable_reason` | The error code that prevented inspection; `null` when `status` is `ok` or `mismatch` |
+| `binary_version` | The active `qdev` binary version (`CARGO_PKG_VERSION`) |
+| `installed_count` | Total number of installed `qdev` skills and rules discovered in the workspace |
+| `outdated_count` | Number of installed skills whose version stamp differs from the binary version |
+| `up_to_date` | `true` if `outdated_count == 0` |
+| `outdated_skills` | List of workspace-relative paths for any outdated skill files |
 
 #### The `validation` section
 
