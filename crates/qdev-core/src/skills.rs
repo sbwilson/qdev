@@ -620,6 +620,20 @@ const ALL_COMMANDS: &[CommandDefinition] = &[
                     },
                 ],
             },
+            SubcommandDefinition {
+                name: "mcp",
+                summary: "Install MCP server configuration",
+                options: &[
+                    OptionDefinition {
+                        name: "--claude",
+                        summary: "Install Claude Code MCP configuration",
+                    },
+                    OptionDefinition {
+                        name: "--cursor",
+                        summary: "Install Cursor MCP configuration",
+                    },
+                ],
+            },
         ],
         options: &[],
     },
@@ -646,6 +660,16 @@ const ALL_COMMANDS: &[CommandDefinition] = &[
         name: "impact",
         summary: "Analyze change impact across modules, active stories, relations, and gates",
         subcommands: &[],
+        options: &[],
+    },
+    CommandDefinition {
+        name: "mcp",
+        summary: "Model Context Protocol (MCP) server commands",
+        subcommands: &[SubcommandDefinition {
+            name: "serve",
+            summary: "Start stdio-based MCP JSON-RPC 2.0 server",
+            options: &[],
+        }],
         options: &[],
     },
 ];

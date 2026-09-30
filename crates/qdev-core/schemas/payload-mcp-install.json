@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MCP Install Payload Schema",
+  "description": "Output shape of `qdev install mcp --json`. Reports registered MCP server configurations in target environments.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "targets",
+    "installed_files",
+    "command",
+    "args"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Selected installation target environments (e.g. claude, cursor)."
+    },
+    "installed_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Workspace-relative paths to the modified settings files."
+    },
+    "command": {
+      "type": "string",
+      "description": "The command registered for the MCP server."
+    },
+    "args": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "The arguments registered for the MCP server."
+    }
+  },
+  "additionalProperties": false
+}

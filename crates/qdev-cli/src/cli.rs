@@ -101,6 +101,20 @@ pub enum Commands {
     Hygiene(HygieneArgs),
     /// Analyze change impact across modules, active stories, relations, and gates
     Impact(ImpactArgs),
+    /// Model Context Protocol (MCP) server commands
+    Mcp(McpArgs),
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq)]
+pub struct McpArgs {
+    #[command(subcommand)]
+    pub command: McpCommands,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum McpCommands {
+    /// Start stdio-based MCP JSON-RPC 2.0 server
+    Serve,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
@@ -122,6 +136,8 @@ pub enum InstallCommands {
     Hooks(InstallHooksArgs),
     /// Install editor and agent skill bundles
     Skills(InstallSkillsArgs),
+    /// Install Model Context Protocol (MCP) server configuration
+    Mcp(InstallMcpArgs),
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
@@ -140,6 +156,17 @@ pub struct InstallSkillsArgs {
     /// Install skills for agents (.agents/skills/<skill>/SKILL.md)
     #[arg(long)]
     pub agents: bool,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
+pub struct InstallMcpArgs {
+    /// Install qdev MCP server configuration for Claude Code (.claude/settings.json)
+    #[arg(long)]
+    pub claude: bool,
+
+    /// Install qdev MCP server configuration for Cursor (.cursor/mcp.json)
+    #[arg(long)]
+    pub cursor: bool,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]

@@ -9,6 +9,7 @@ pub mod hook;
 pub mod hygiene;
 pub mod impact;
 pub mod install;
+pub mod mcp;
 pub mod next;
 pub mod preflight;
 pub mod pulse;

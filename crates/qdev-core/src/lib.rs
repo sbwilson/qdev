@@ -17,6 +17,7 @@ pub mod init;
 pub mod interactivity;
 pub mod lease;
 pub mod modules;
+pub mod mcp;
 pub mod next;
 pub mod preflight;
 pub mod pulse;
@@ -137,7 +138,14 @@ pub use dag::{
 
 pub use doctor::{
     default_doctor_sections, CacheDoctorSection, DoctorSection, DoctorSectionReport,
-    HooksDoctorSection, LeasesDoctorSection, SkillsDoctorSection, ValidationDoctorSection,
+    HooksDoctorSection, LeasesDoctorSection, McpDoctorSection, SkillsDoctorSection,
+    ValidationDoctorSection,
+};
+
+pub use mcp::{
+    inspect_mcp, inspect_mcp_with_handshake_override, install_mcp, CallToolResult, JsonRpcError,
+    JsonRpcRequest, JsonRpcResponse, McpDoctorStatus, McpInstallReport, McpServer,
+    ToolContentItem, ToolDefinition,
 };
 
 pub use skills::{

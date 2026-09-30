@@ -511,6 +511,9 @@ fn run(raw_args: &[String]) -> i32 {
             handlers::impact::handle_impact(impact_args, &annotated_config, &cli, &output, &root)
                 .as_i32()
         }
+        Some(Commands::Mcp(ref mcp_args)) => {
+            handlers::mcp::handle_mcp(mcp_args, &annotated_config, &cli, &current_dir).as_i32()
+        }
         Some(Commands::Init(_)) => unreachable!(),
         Some(Commands::Schema(_)) => unreachable!(),
     }
@@ -612,7 +615,10 @@ fn requires_workspace(command: Option<&Commands>) -> bool {
         | Some(Commands::Context(_))
         | Some(Commands::Gate(_))
         | Some(Commands::Soup(_))
-        | Some(Commands::Impact(_)) => true,
+        | Some(Commands::Impact(_))
+        | Some(Commands::Mcp(cli::McpArgs {
+            command: cli::McpCommands::Serve,
+        })) => true,
     }
 }
 

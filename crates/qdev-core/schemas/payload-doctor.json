@@ -242,6 +242,45 @@
                 }
               }
             }
+          },
+          {
+            "if": {
+              "properties": { "name": { "const": "mcp" } },
+              "required": ["name"]
+            },
+            "then": {
+              "required": [
+                "status",
+                "unavailable_reason",
+                "registered",
+                "handshake_ok",
+                "registered_targets"
+              ],
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": ["ok", "unregistered", "unavailable"],
+                  "description": "\"ok\" when registered in at least one editor and handshake succeeds, \"unregistered\" when not registered in any editor, \"unavailable\" if inspection failed."
+                },
+                "unavailable_reason": {
+                  "type": ["string", "null"],
+                  "description": "The error code that prevented MCP inspection from completing; null when status is \"ok\" or \"unregistered\"."
+                },
+                "registered": {
+                  "type": ["boolean", "null"],
+                  "description": "True when qdev MCP server is registered in .claude/settings.json or .cursor/mcp.json."
+                },
+                "handshake_ok": {
+                  "type": ["boolean", "null"],
+                  "description": "True when the MCP server successfully completes the initialize handshake."
+                },
+                "registered_targets": {
+                  "type": ["array", "null"],
+                  "items": { "type": "string" },
+                  "description": "List of targets (e.g. \"claude\", \"cursor\") where qdev MCP server is registered."
+                }
+              }
+            }
           }
         ]
       }

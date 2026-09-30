@@ -489,8 +489,69 @@ impl DoctorSection for SkillsDoctorSection {
     }
 }
 
+/// Reports MCP server integration status: whether qdev is registered in Claude/Cursor settings
+/// and whether the server handshake succeeds.
+pub struct McpDoctorSection {
+    workspace_root: PathBuf,
+}
+
+impl McpDoctorSection {
+    pub fn new(workspace_root: PathBuf) -> Self {
+        Self { workspace_root }
+    }
+}
+
+impl DoctorSection for McpDoctorSection {
+    fn name(&self) -> &'static str {
+        "mcp"
+    }
+
+    fn run(&self, _store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
+        match crate::mcp::inspect_mcp(&self.workspace_root) {
+            Ok(status) => Ok(DoctorSectionReport {
+                name: self.name().to_string(),
+                fields: vec![
+                    ("status".to_string(), serde_json::Value::from(status.status)),
+                    (
+                        "unavailable_reason".to_string(),
+                        status
+                            .unavailable_reason
+                            .map(serde_json::Value::from)
+                            .unwrap_or(serde_json::Value::Null),
+                    ),
+                    (
+                        "registered".to_string(),
+                        serde_json::Value::from(status.registered),
+                    ),
+                    (
+                        "handshake_ok".to_string(),
+                        serde_json::Value::from(status.handshake_ok),
+                    ),
+                    (
+                        "registered_targets".to_string(),
+                        serde_json::to_value(&status.registered_targets).unwrap(),
+                    ),
+                ],
+            }),
+            Err(e) => Ok(DoctorSectionReport {
+                name: self.name().to_string(),
+                fields: vec![
+                    ("status".to_string(), serde_json::Value::from("unavailable")),
+                    (
+                        "unavailable_reason".to_string(),
+                        serde_json::Value::from(e.code()),
+                    ),
+                    ("registered".to_string(), serde_json::Value::Null),
+                    ("handshake_ok".to_string(), serde_json::Value::Null),
+                    ("registered_targets".to_string(), serde_json::Value::Null),
+                ],
+            }),
+        }
+    }
+}
+
 /// Builds the default set of doctor sections, in the order `qdev doctor` reports them: `cache`
-/// first, then `validation`, then `leases`, then `hooks`, then `skills`. This stays the single wiring point — later epics append
+/// first, then `validation`, then `leases`, then `hooks`, then `skills`, then `mcp`. This stays the single wiring point — later epics append
 /// their own `DoctorSection` impl here (gates, hygiene, ...) and take whatever context they need
 /// from the arguments already threaded through, without widening the trait.
 pub fn default_doctor_sections(
@@ -509,5 +570,6 @@ pub fn default_doctor_sections(
         )),
         Box::new(HooksDoctorSection::new(workspace_root.to_path_buf())),
         Box::new(SkillsDoctorSection::new(workspace_root.to_path_buf())),
+        Box::new(McpDoctorSection::new(workspace_root.to_path_buf())),
     ]
 }

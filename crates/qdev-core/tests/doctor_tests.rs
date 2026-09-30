@@ -89,7 +89,7 @@ fn test_default_doctor_sections_order() {
     let temp = TempDir::new().unwrap();
     let sections = qdev_core::default_doctor_sections(temp.path(), &Config::default());
     let names: Vec<&str> = sections.iter().map(|s| s.name()).collect();
-    assert_eq!(names, vec!["cache", "validation", "leases", "hooks", "skills"]);
+    assert_eq!(names, vec!["cache", "validation", "leases", "hooks", "skills", "mcp"]);
 }
 
 #[test]

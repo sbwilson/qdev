@@ -47,7 +47,7 @@ Universal reference resolution: any command that takes an ID accepts any entity 
 | `qdev validate [--changed] [--fix-ids] [--yes]` | Dangling relations, cycles, ID collisions, schema, orphan DW, missing rationale |
 | `qdev sync [--rebuild]` | Force hydration or rebuild the cache |
 | `qdev schema <entity-kind>` | Print JSON Schema for an entity's frontmatter shape (`story`, `epic`, `dw`, ...) |
-| `qdev schema payload <name>` | Print JSON Schema for a command's output payload (`story`, `error`, `validate`, `fix_ids`, `list`, `sync`, `doctor`, `next`, `pulse`, `impact`, `context`, `gate_run`, …) |
+| `qdev schema payload <name>` | Print JSON Schema for a command's output payload (`story`, `error`, `validate`, `fix_ids`, `list`, `sync`, `doctor`, `next`, `pulse`, `impact`, `context`, `gate_run`, `mcp_install`, …) |
 | `qdev config show` | Effective merged configuration |
 | `qdev next [--sprint N] [--owner me]` | Deterministically select the next unblocked story |
 | `qdev context <id> --phase P [--budget N] [--stats] [--format md]` | Token-budgeted projection for an agent phase (see below) |
@@ -651,9 +651,45 @@ All generated skills:
 
 With `--json`, emits a JSON envelope conforming to `payload-skill-install.json` reporting `targets`, `installed_files`, and `version`.
 
+#### `qdev install mcp`
+
+Registers the `qdev` Model Context Protocol (MCP) server configuration into Claude Desktop and/or Cursor editor settings. Requires at least one target flag (`--claude` or `--cursor`); passing no target flag exits 2 with a usage error. Supports passing both targets in a single invocation.
+
+- `--claude`: Updates or creates `.claude/settings.json`, adding or updating `mcpServers.qdev` with `command: "qdev"` and `args: ["mcp", "serve"]`.
+- `--cursor`: Updates or creates `.cursor/mcp.json`, adding or updating `mcpServers.qdev` with `command: "qdev"` and `args: ["mcp", "serve"]`.
+
+Existing unrelated configurations and other MCP server definitions in those files are strictly preserved.
+
+With `--json`, emits a JSON envelope conforming to `payload-mcp-install.json` reporting:
+- `schema_version`: `"1"`
+- `targets`: List of target strings (e.g. `["claude", "cursor"]`)
+- `installed_files`: Workspace-relative paths of modified settings files
+- `command`: `"qdev"`
+- `args`: `["mcp", "serve"]`
+
 ### `qdev mcp serve`
 
-Stdio MCP server exposing: `get_entity`, `list_entities`, `context`, `next`, `claim`, `transition`, `scratch_append`, `scratch_read`, `dw_add`, `decision_log`, `gate_run`, `validate`. Each tool returns the same JSON payload as the CLI.
+Runs a stdio-based JSON-RPC 2.0 Model Context Protocol (MCP) server providing headless assistants and IDE integrations with direct tool access to core operations.
+
+#### Protocol Support
+- `initialize`: Returns server info (`name: "qdev"`, `version`), supported MCP protocol version (`2024-11-05`), and capabilities (`tools.listChanged: false`).
+- `notifications/initialized`: Notification handshake acknowledgment (no response emitted).
+- `tools/list`: Advertises the 12 core tools along with their input/output JSON schemas generated from `PayloadKind`.
+- `tools/call`: Executes the requested tool with `Interactivity::NonInteractive`. If any tool call fails or is refused, returns `isError: true` with a structured `JsonErrorEnvelope` conforming to `payload-error.json`.
+
+#### Advertised Tools
+1. `get_entity`: Inspect entity frontmatter, body, relations, and constraints (Story 1.13).
+2. `list_entities`: Query and filter entities by kind, status, epic, tag, module, and blocked status (Story 1.13).
+3. `context`: Project phased token-budgeted context for specify, develop, or review phases (Story 4.1).
+4. `next`: Find the next actionable story or work item (Story 2.11).
+5. `claim`: Claim active work lease on a story (Story 2.12).
+6. `transition`: Transition entity lifecycle status across valid state machine edges (Story 2.13).
+7. `scratch_append`: Append notes or findings to story scratchpad (Story 2.14).
+8. `scratch_read`: Read formatted scratchpad entries for a story (Story 2.14).
+9. `dw_add`: Record deferred work item (Story 2.15).
+10. `decision_log`: Log architectural or implementation decision (Story 2.16).
+11. `gate_run`: Run quality gate suite or specific gate targets (Story 3.1).
+12. `validate`: Run workspace integrity, schema, and relationship validation rules (Story 1.13).
 
 ### `qdev doctor`
 
@@ -673,7 +709,7 @@ $ qdev doctor
 workspace full of them. (It can still fail for its own reasons — an unreadable workspace, a
 config that will not parse.) `qdev validate` is the command that exits 1 on an `error`-severity
 Diagnostics are contributed by independent sections, reported in a fixed order — currently
-`cache`, then `validation`, then `leases`, then `hooks`, then `skills`. `qdev doctor --json` emits each as a flat object under `sections`
+`cache`, then `validation`, then `leases`, then `hooks`, then `skills`, then `mcp`. `qdev doctor --json` emits each as a flat object under `sections`
 (see `qdev schema payload doctor`); later epics append their own.
 
 #### The `skills` section
@@ -687,6 +723,16 @@ Diagnostics are contributed by independent sections, reported in a fixed order �
 | `outdated_count` | Number of installed skills whose version stamp differs from the binary version |
 | `up_to_date` | `true` if `outdated_count == 0` |
 | `outdated_skills` | List of workspace-relative paths for any outdated skill files |
+
+#### The `mcp` section
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `ok` when server is registered and passes loopback handshake, `unregistered` when not yet configured in editor configs, `unavailable` on failure |
+| `unavailable_reason` | Error code explanation if `status` is `unavailable`; `null` otherwise |
+| `registered` | `true` if at least one client config (`.claude/settings.json` or `.cursor/mcp.json`) exists and registers `qdev mcp serve` |
+| `handshake_ok` | `true` if internal loopback initialize handshake succeeds |
+| `registered_targets` | Array of detected target strings (e.g. `["claude", "cursor"]`) |
 
 #### The `validation` section
 
