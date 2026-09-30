@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::ModelsConfig;
 use crate::errors::QdevError;
 use crate::schema::extract_frontmatter;
 use crate::write::write_file_atomic;
@@ -552,6 +553,10 @@ const ALL_COMMANDS: &[CommandDefinition] = &[
                         name: "--for-transition",
                         summary: "Run gates bound to transition",
                     },
+                    OptionDefinition {
+                        name: "--story",
+                        summary: "Story identifier to evaluate",
+                    },
                 ],
             },
             SubcommandDefinition {
@@ -693,10 +698,58 @@ fn render_command_catalog_markdown() -> String {
     out
 }
 
-/// Generates the skill content for a specific core skill.
-pub fn generate_skill_content(skill_name: &str) -> String {
+/// The Structured Multi-Perspective Synthesis Template embedded in planning skills.
+pub const STRUCTURED_SYNTHESIS_TEMPLATE: &str = r#"### Structured Multi-Perspective Synthesis Template
+Every planning proposal must provide answers under each of the four headings:
+
+#### Product & domain value
+Problem statement, user persona, measurable success metrics, appetite.
+
+#### Architectural constraints
+Boundaries, target modules, dependencies, cross-crate interfaces, invariants.
+
+#### Safety & risk profile
+ISO 14971 hazards, regulatory compliance (IEC 62304), negative constraints (no-gos and rabbit holes).
+
+#### Implementation directives
+Specific CLI commands to create stories (`qdev create story`) and establish relations (`qdev relate`).
+"#;
+
+fn escape_yaml(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn resolve_model_tier<'a>(skill_name: &str, models: Option<&'a ModelsConfig>) -> &'a str {
+    match skill_name {
+        "qdev" => models
+            .and_then(|m| m.specify.as_deref())
+            .unwrap_or("reasoning"),
+        "qdev-plan" => models
+            .and_then(|m| m.specify.as_deref())
+            .unwrap_or("reasoning"),
+        "qdev-create-story" => models
+            .and_then(|m| m.specify.as_deref())
+            .unwrap_or("reasoning"),
+        "qdev-develop" => models
+            .and_then(|m| m.develop.as_deref())
+            .unwrap_or("fast-coding"),
+        "qdev-review" => models
+            .and_then(|m| m.review.as_deref())
+            .unwrap_or("strongest"),
+        _ => models
+            .and_then(|m| m.specify.as_deref())
+            .unwrap_or("reasoning"),
+    }
+}
+
+/// Generates the skill content for a specific core skill with optional model hints.
+pub fn generate_skill_content_with_models(
+    skill_name: &str,
+    models: Option<&ModelsConfig>,
+) -> String {
     let version = env!("CARGO_PKG_VERSION");
     let catalog_md = render_command_catalog_markdown();
+    let model_tier = escape_yaml(resolve_model_tier(skill_name, models));
 
     match skill_name {
         "qdev" => format!(
@@ -705,6 +758,8 @@ name: qdev
 description: "Inspect project pulse, discover next recommended work, and coordinate development workflow"
 version: "{version}"
 qdev_version: "{version}"
+model_hint: "{model_tier}"
+model: "{model_tier}"
 ---
 
 # Qdev Assistant Skill
@@ -717,10 +772,17 @@ You are operating in a workspace governed by `qdev`.
 3. **Never write or edit raw entity markdown files directly**: State mutations must be executed through `qdev create`, `qdev update`, `qdev transition`, `qdev relate`, etc.
 
 ## Primary Workflow: Pulse & Triage
-1. Check project status and health:
+1. Check project status, pulse, and sprint health:
    ```bash
-   qdev status --json
+   qdev --json
    ```
+   (or `qdev status --json`)
+   Render the pulse to the user, including:
+   - Workspace status and health
+   - Sprint state and active goals
+   - Gate status and baseline ratchet checks
+   - Active story leases and holders
+   - Next recommended steps
 2. Determine the next eligible story or blocker:
    ```bash
    qdev next --json
@@ -744,6 +806,8 @@ name: qdev-plan
 description: "Plan and manage architecture, requirements, epics, and hazards"
 version: "{version}"
 qdev_version: "{version}"
+model_hint: "{model_tier}"
+model: "{model_tier}"
 ---
 
 # Qdev Planning Skill
@@ -755,6 +819,7 @@ You are creating or refining architecture, requirements, epics, and hazards in `
 2. **Never read or write raw entity files directly**: All operations go through `qdev create`, `qdev update`, `qdev relate`, `qdev get`, and `qdev list`.
 3. **Never assemble context from raw files**: Use `qdev context <id> --phase specify --json` to inspect context.
 
+{STRUCTURED_SYNTHESIS_TEMPLATE}
 ## Workflow: Planning Entities
 1. Query existing entities:
    ```bash
@@ -767,11 +832,22 @@ You are creating or refining architecture, requirements, epics, and hazards in `
    ```bash
    qdev get <id> --json
    ```
-3. Establish relationships:
+3. Synthesize planning proposal using the Structured Multi-Perspective Synthesis Template covering all four headings:
+   - Product & domain value
+   - Architectural constraints
+   - Safety & risk profile
+   - Implementation directives
+4. Execute implementation directives:
+   Create stories with `qdev create story` and establish relations with `qdev relate`:
+   ```bash
+   qdev create story <epic-id> --title "<title>" --module "<module>" --appetite <appetite> --json
+   qdev relate <source-id> <relation> <target-id> --json
+   ```
+5. Establish relationships between entities:
    ```bash
    qdev relate <source-id> <relation> <target-id> --json
    ```
-4. Verify workspace consistency:
+6. Verify workspace consistency:
    ```bash
    qdev validate --json
    ```
@@ -785,6 +861,8 @@ name: qdev-create-story
 description: "Specify and create user stories, establish constraints, and transition stories to ready"
 version: "{version}"
 qdev_version: "{version}"
+model_hint: "{model_tier}"
+model: "{model_tier}"
 ---
 
 # Qdev Create Story Skill
@@ -801,19 +879,20 @@ You are creating and refining user stories in `qdev`.
    ```bash
    qdev context <epic-id> --phase specify --json
    ```
-2. Create story with title, target modules, and appetite:
+2. Draft acceptance criteria and negative constraints (no-gos and rabbit holes) based on the epic context and requirements.
+3. Create story with title, target modules, and appetite:
    ```bash
    qdev create story <epic-id> --title "<title>" --module "<module>" --appetite <appetite> --json
    ```
-3. Declare negative or rabbit-hole constraints:
+4. Declare negative or rabbit-hole constraints:
    ```bash
    qdev constraint add <story-id> --kind <no_go|rabbit_hole|appetite> "<constraint text>" --json
    ```
-4. Relate dependencies:
+5. Relate dependencies:
    ```bash
    qdev relate <story-id> depends_on <dependency-id> --json
    ```
-5. Once story has clear acceptance criteria and scope, transition to ready:
+6. Once story has clear acceptance criteria and negative constraints, transition to ready:
    ```bash
    qdev transition story <story-id> ready --json
    ```
@@ -827,6 +906,8 @@ name: qdev-develop
 description: "Implement a story: run preflight, claim lease, fetch develop context, update scratchpad, run gates, and transition to review"
 version: "{version}"
 qdev_version: "{version}"
+model_hint: "{model_tier}"
+model: "{model_tier}"
 ---
 
 # Qdev Develop Skill
@@ -837,7 +918,8 @@ You are implementing a story in `qdev`.
 1. **Always use JSON output**: Run all commands with `--json`.
 2. **Never assemble or inspect context from raw files directly**: Always run `qdev context <story-id> --phase develop --json`.
 3. **Never modify raw spec/status files directly**: Record all progress through `qdev scratch append` and `qdev transition`.
-4. **Always quote cited IDs on refusals**: When reporting a refusal or failure to the human, always quote cited IDs (`constraint_id`, `gate_id`, `policy`, `blocking_ids`, or `holder`).
+4. **Never bypass preflight, lease claims, or transition-bound gates**: Preflight and claim must precede edits, and gates must pass before requesting review.
+5. **Always quote cited IDs on refusals**: When reporting a refusal or failure to the human, always quote cited IDs (`constraint_id`, `gate_id`, `policy`, `blocking_ids`, or `holder`).
 
 ## Workflow: Story Implementation
 1. Run preflight to verify clean tree, working tree scope, and branch freshness:
@@ -852,7 +934,7 @@ You are implementing a story in `qdev`.
    ```bash
    qdev context <story-id> --phase develop --json
    ```
-4. Append ongoing notes, tradeoffs, or decisions to scratchpad:
+4. Implement within scope and append ongoing progress, notes, tradeoffs, or decisions to scratchpad:
    ```bash
    qdev scratch append <story-id> "<message>" --kind note --json
    ```
@@ -868,6 +950,8 @@ You are implementing a story in `qdev`.
    ```bash
    qdev transition story <story-id> review --json
    ```
+8. Handle Refusals:
+   On any refusal or error from preflight, claim, gates, or transition, quote cited IDs (`constraint_id`, `gate_id`, `policy`, `blocking_ids`, `holder`).
 
 {catalog_md}
 "#
@@ -878,6 +962,8 @@ name: qdev-review
 description: "Review a story: audit review context and diff against AC and constraints, evaluate impact, and transition to done or in_progress"
 version: "{version}"
 qdev_version: "{version}"
+model_hint: "{model_tier}"
+model: "{model_tier}"
 ---
 
 # Qdev Review Skill
@@ -894,22 +980,23 @@ You are reviewing story implementation in `qdev`.
    ```bash
    qdev context <story-id> --phase review --json
    ```
-2. Analyze change impact:
+2. Audit diff against acceptance criteria and negative constraints.
+3. Analyze change impact across modules and dependencies:
    ```bash
    qdev impact <story-id> --json
    ```
-3. Verify all gates:
+4. Run all verification gates:
    ```bash
    qdev gate run --all --story <story-id> --json
    ```
-4. If approved:
+5. If approved, transition to done:
    ```bash
    qdev transition story <story-id> done --json
    ```
-5. If changes requested:
+6. If changes requested, append findings to scratchpad and transition back to in_progress with justification:
    ```bash
    qdev scratch append <story-id> "<review finding>" --kind note --json
-   qdev transition story <story-id> in_progress --json
+   qdev transition story <story-id> in_progress --justification "<justification>" --json
    ```
 
 {catalog_md}
@@ -921,6 +1008,8 @@ name: {skill_name}
 description: "Qdev assistant skill"
 version: "{version}"
 qdev_version: "{version}"
+model_hint: "{model_tier}"
+model: "{model_tier}"
 ---
 
 # Qdev Assistant Skill ({skill_name})
@@ -938,10 +1027,20 @@ You are operating in a workspace governed by `qdev`.
     }
 }
 
-/// Generates the Cursor rule content for `.cursor/rules/qdev.mdc`.
-pub fn generate_cursor_rule_content() -> String {
+/// Generates the skill content for a specific core skill with default model tiers.
+pub fn generate_skill_content(skill_name: &str) -> String {
+    generate_skill_content_with_models(skill_name, None)
+}
+
+/// Generates the Cursor rule content for `.cursor/rules/qdev.mdc` with optional model hints.
+pub fn generate_cursor_rule_content_with_models(models: Option<&ModelsConfig>) -> String {
     let version = env!("CARGO_PKG_VERSION");
     let catalog_md = render_command_catalog_markdown();
+    let model_tier = escape_yaml(
+        models
+            .and_then(|m| m.specify.as_deref())
+            .unwrap_or("reasoning"),
+    );
 
     format!(
         r#"---
@@ -949,6 +1048,8 @@ description: "Qdev workspace development and workflow instructions"
 globs: "*"
 version: "{version}"
 qdev_version: "{version}"
+model_hint: "{model_tier}"
+model: "{model_tier}"
 ---
 
 # Qdev Workspace Rules
@@ -960,52 +1061,73 @@ You are working in a codebase governed by `qdev`.
 - **Never assemble or inspect context from raw files directly**: Always use `qdev context <id> --phase <phase> --json` (phases: `specify`, `develop`, `review`). Never parse, inspect, or reconstruct markdown files from `docs/` directly.
 - **Never write or edit raw entity markdown files directly**: Always use `qdev create`, `qdev update`, `qdev transition`, `qdev relate`, etc.
 
+{STRUCTURED_SYNTHESIS_TEMPLATE}
 ## Workflows
-- `/qdev`: Pulse inspection (`qdev status --json`) and next step discovery (`qdev next --json`).
-- `/qdev-plan`: Manage architecture, requirements, epics, and hazards (`qdev list`, `qdev get`, `qdev relate <source> <relation> <target>`).
-- `/qdev-create-story`: Story specification, constraints, and transition to ready (`qdev create story`, `qdev constraint add <target> --kind <kind> "<text>"`, `qdev transition story <id> ready`).
-- `/qdev-develop`: Implementation lifecycle (`qdev preflight`, `qdev claim`, `qdev context --phase develop`, `qdev scratch append`, `qdev gate run --for-transition review`, `qdev transition story <id> review`).
-- `/qdev-review`: Code review and audit (`qdev context --phase review`, `qdev impact`, `qdev gate run --all`, `qdev transition story <id> done`).
+- `/qdev`: Pulse inspection (`qdev --json` or `qdev status --json`) and next step discovery (`qdev next --json`). Render workspace health, sprint state, gates, leases, and next steps.
+- `/qdev-plan`: Manage architecture, requirements, epics, and hazards using the Structured Multi-Perspective Synthesis Template (`qdev list`, `qdev get`, `qdev create story`, `qdev relate`).
+- `/qdev-create-story`: Story specification, constraints, and transition to ready (`qdev context <epic-id> --phase specify --json`, draft acceptance criteria and negative constraints, `qdev create story`, `qdev constraint add`, `qdev transition story <id> ready --json`).
+- `/qdev-develop`: Implementation lifecycle (`qdev preflight --story <id> --json`, `qdev claim <id> --json`, `qdev context <id> --phase develop --json`, `qdev scratch append`, `qdev gate run --for-transition review`, `qdev transition story <id> review --json`, quote cited IDs on refusal).
+- `/qdev-review`: Code review and audit (`qdev context <id> --phase review --json`, audit diff against AC/constraints, `qdev impact <id> --json`, `qdev gate run --all`, `qdev transition story <id> done --json` or `qdev transition story <id> in_progress --justification "<justification>" --json`).
 
 {catalog_md}
 "#
     )
 }
 
-/// Generates Claude skills returning pairs of (relative_path, content).
-pub fn generate_claude_skills() -> Vec<(PathBuf, String)> {
+/// Generates the Cursor rule content for `.cursor/rules/qdev.mdc`.
+pub fn generate_cursor_rule_content() -> String {
+    generate_cursor_rule_content_with_models(None)
+}
+
+/// Generates Claude skills returning pairs of (relative_path, content) with optional model hints.
+pub fn generate_claude_skills_with_models(models: Option<&ModelsConfig>) -> Vec<(PathBuf, String)> {
     CORE_SKILL_NAMES
         .iter()
         .map(|name| {
             let path = PathBuf::from(".claude/skills")
                 .join(name)
                 .join("SKILL.md");
-            let content = generate_skill_content(name);
+            let content = generate_skill_content_with_models(name, models);
             (path, content)
         })
         .collect()
 }
 
-/// Generates Cursor rule returning (relative_path, content).
-pub fn generate_cursor_rule() -> (PathBuf, String) {
+/// Generates Claude skills returning pairs of (relative_path, content).
+pub fn generate_claude_skills() -> Vec<(PathBuf, String)> {
+    generate_claude_skills_with_models(None)
+}
+
+/// Generates Cursor rule returning (relative_path, content) with optional model hints.
+pub fn generate_cursor_rule_with_models(models: Option<&ModelsConfig>) -> (PathBuf, String) {
     (
         PathBuf::from(".cursor/rules/qdev.mdc"),
-        generate_cursor_rule_content(),
+        generate_cursor_rule_content_with_models(models),
     )
 }
 
-/// Generates Agent skills returning pairs of (relative_path, content).
-pub fn generate_agent_skills() -> Vec<(PathBuf, String)> {
+/// Generates Cursor rule returning (relative_path, content).
+pub fn generate_cursor_rule() -> (PathBuf, String) {
+    generate_cursor_rule_with_models(None)
+}
+
+/// Generates Agent skills returning pairs of (relative_path, content) with optional model hints.
+pub fn generate_agent_skills_with_models(models: Option<&ModelsConfig>) -> Vec<(PathBuf, String)> {
     CORE_SKILL_NAMES
         .iter()
         .map(|name| {
             let path = PathBuf::from(".agents/skills")
                 .join(name)
                 .join("SKILL.md");
-            let content = generate_skill_content(name);
+            let content = generate_skill_content_with_models(name, models);
             (path, content)
         })
         .collect()
+}
+
+/// Generates Agent skills returning pairs of (relative_path, content).
+pub fn generate_agent_skills() -> Vec<(PathBuf, String)> {
+    generate_agent_skills_with_models(None)
 }
 
 /// Options specifying target environments for `install_skills`.
@@ -1086,10 +1208,14 @@ fn write_managed_file(
     Ok(rel_path.to_string_lossy().to_string())
 }
 
-/// Installs skills and rules for selected target editors and agents.
-pub fn install_skills(
+/// Installs skills and rules for selected target editors and agents with optional model hints.
+///
+/// Reads advisory model selections from `models`, or falls back to loading workspace
+/// configuration from `workspace_root`, or uses default model tiers.
+pub fn install_skills_with_models(
     workspace_root: &Path,
     options: &SkillInstallOptions,
+    models: Option<&ModelsConfig>,
 ) -> Result<SkillsInstallReport, QdevError> {
     if !options.claude && !options.cursor && !options.agents {
         return Err(QdevError::usage_error(
@@ -1097,12 +1223,25 @@ pub fn install_skills(
         ));
     }
 
+    let loaded_models;
+    let effective_models = match models {
+        Some(m) => Some(m),
+        None => {
+            if let Ok(annotated) = crate::config::load_config(workspace_root) {
+                loaded_models = Some(annotated.config.models);
+                loaded_models.as_ref()
+            } else {
+                None
+            }
+        }
+    };
+
     let mut targets = Vec::new();
     let mut installed_files = Vec::new();
 
     if options.claude {
         targets.push("claude".to_string());
-        for (rel_path, content) in generate_claude_skills() {
+        for (rel_path, content) in generate_claude_skills_with_models(effective_models) {
             let written = write_managed_file(workspace_root, &rel_path, &content)?;
             installed_files.push(written);
         }
@@ -1110,14 +1249,14 @@ pub fn install_skills(
 
     if options.cursor {
         targets.push("cursor".to_string());
-        let (rel_path, content) = generate_cursor_rule();
+        let (rel_path, content) = generate_cursor_rule_with_models(effective_models);
         let written = write_managed_file(workspace_root, &rel_path, &content)?;
         installed_files.push(written);
     }
 
     if options.agents {
         targets.push("agents".to_string());
-        for (rel_path, content) in generate_agent_skills() {
+        for (rel_path, content) in generate_agent_skills_with_models(effective_models) {
             let written = write_managed_file(workspace_root, &rel_path, &content)?;
             installed_files.push(written);
         }
@@ -1128,6 +1267,16 @@ pub fn install_skills(
         installed_files,
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+/// Installs skills and rules for selected target editors and agents.
+///
+/// Auto-loads model configuration from `workspace_root` or falls back to default tiers.
+pub fn install_skills(
+    workspace_root: &Path,
+    options: &SkillInstallOptions,
+) -> Result<SkillsInstallReport, QdevError> {
+    install_skills_with_models(workspace_root, options, None)
 }
 
 /// Inspects the installation state of qdev skills and rules in the workspace.

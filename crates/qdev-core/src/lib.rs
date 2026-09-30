@@ -149,10 +149,13 @@ pub use mcp::{
 };
 
 pub use skills::{
-    generate_agent_skills, generate_claude_skills, generate_cursor_rule,
-    generate_cursor_rule_content, generate_skill_content, inspect_skills, install_skills,
-    CommandCatalog, CommandDefinition, OptionDefinition, SkillInstallOptions,
-    SkillsInstallReport, SkillsStatus, SubcommandDefinition, CORE_SKILL_NAMES, MANAGED_SKILL_PATHS,
+    generate_agent_skills, generate_agent_skills_with_models, generate_claude_skills,
+    generate_claude_skills_with_models, generate_cursor_rule, generate_cursor_rule_with_models,
+    generate_cursor_rule_content, generate_cursor_rule_content_with_models, generate_skill_content,
+    generate_skill_content_with_models, inspect_skills, install_skills,
+    install_skills_with_models, CommandCatalog, CommandDefinition, OptionDefinition,
+    SkillInstallOptions, SkillsInstallReport, SkillsStatus, SubcommandDefinition, CORE_SKILL_NAMES,
+    MANAGED_SKILL_PATHS, STRUCTURED_SYNTHESIS_TEMPLATE,
 };
 
 pub use hook::{

@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use qdev_core::{
-    find_workspace_root, install_hooks, install_mcp, install_skills, ExitCode, JsonEnvelope,
-    QdevError, SkillInstallOptions,
+    find_workspace_root, install_hooks, install_mcp, install_skills_with_models,
+    ExitCode, JsonEnvelope, QdevError, SkillInstallOptions,
 };
 
 use crate::cli;
@@ -13,7 +13,7 @@ use crate::Cli;
 
 pub fn handle_install(
     install_args: &cli::InstallArgs,
-    _annotated_config: &qdev_core::AnnotatedConfig,
+    annotated_config: &qdev_core::AnnotatedConfig,
     cli: &Cli,
     output: &OutputEmitter,
     current_dir: &Path,
@@ -70,7 +70,7 @@ pub fn handle_install(
                 cursor: skills_args.cursor,
                 agents: skills_args.agents,
             };
-            match install_skills(&root, &options) {
+            match install_skills_with_models(&root, &options, Some(&annotated_config.config.models)) {
                 Ok(report) => {
                     if cli.json {
                         let envelope = JsonEnvelope::new(report);
