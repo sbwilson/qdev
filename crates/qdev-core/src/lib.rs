@@ -149,10 +149,12 @@ pub use mcp::{
 };
 
 pub use skills::{
-    generate_agent_skills, generate_agent_skills_with_models, generate_claude_skills,
-    generate_claude_skills_with_models, generate_cursor_rule, generate_cursor_rule_with_models,
-    generate_cursor_rule_content, generate_cursor_rule_content_with_models, generate_skill_content,
-    generate_skill_content_with_models, inspect_skills, install_skills,
+    generate_agent_skills, generate_agent_skills_configured, generate_agent_skills_with_models,
+    generate_claude_skills, generate_claude_skills_configured, generate_claude_skills_with_models,
+    generate_cursor_rule, generate_cursor_rule_configured, generate_cursor_rule_content,
+    generate_cursor_rule_content_configured, generate_cursor_rule_content_with_models,
+    generate_cursor_rule_with_models, generate_skill_content, generate_skill_content_configured,
+    generate_skill_content_with_models, inspect_skills, install_skills, install_skills_configured,
     install_skills_with_models, CommandCatalog, CommandDefinition, OptionDefinition,
     SkillInstallOptions, SkillsInstallReport, SkillsStatus, SubcommandDefinition, CORE_SKILL_NAMES,
     MANAGED_SKILL_PATHS, STRUCTURED_SYNTHESIS_TEMPLATE,
@@ -165,12 +167,12 @@ pub use hook::{
 };
 
 pub use config::{
-    find_workspace_root, load_config, load_project_storage, merge_configs, resolve_git_email,
-    validate_config_table, AnnotatedConfig, AnnotatedValue, CommitMessagesConfig, Config,
-    ConfigSource, EnvironmentConfig, GateConfig, GitConfig, HygieneConfig, IdentityConfig,
-    LeasesConfig, ModelsConfig, ModuleConfig, PreferencesConfig, ProjectConfig, RegulatoryConfig,
-    SoupConfig, StorageConfig, TeamsConfig, DEFAULT_CITATION_PATTERN, LOCAL_CONFIG_FILENAME,
-    PROJECT_CONFIG_FILENAME,
+    default_synthesis_headings, find_workspace_root, load_config, load_project_storage,
+    merge_configs, resolve_git_email, validate_config_table, AnnotatedConfig, AnnotatedValue,
+    CommitMessagesConfig, Config, ConfigSource, EnvironmentConfig, GateConfig, GitConfig,
+    HygieneConfig, IdentityConfig, LeasesConfig, ModelsConfig, ModuleConfig, PreferencesConfig,
+    ProjectConfig, RegulatoryConfig, SoupConfig, StorageConfig, SynthesisConfig, TeamsConfig,
+    DEFAULT_CITATION_PATTERN, LOCAL_CONFIG_FILENAME, PROJECT_CONFIG_FILENAME,
 };
 pub use envelope::{ErrorPayload, JsonEnvelope, JsonErrorEnvelope, SCHEMA_VERSION};
 pub use errors::{

@@ -406,7 +406,131 @@ impl Default for LeasesConfig {
     }
 }
 
-/// Universal typed configuration schema combining all 14 sections.
+/// Shipped default synthesis headings matching `docs/architecture.md` §4.
+pub fn default_synthesis_headings() -> Vec<String> {
+    vec![
+        "Product & domain value".to_string(),
+        "Architectural constraints".to_string(),
+        "Safety & risk profile".to_string(),
+        "Implementation directives".to_string(),
+    ]
+}
+
+/// Synthesis configuration section `[synthesis]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SynthesisConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headings: Option<Vec<String>>,
+}
+
+impl SynthesisConfig {
+    /// Resolves the headings to use: custom configured headings if present,
+    /// or extracted from markdown headers in custom template, or defaults.
+    pub fn resolved_headings(&self) -> Vec<String> {
+        if let Some(ref h) = self.headings {
+            let trimmed_headings: Vec<String> = h
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !trimmed_headings.is_empty() {
+                return trimmed_headings;
+            }
+        }
+
+        if let Some(ref tmpl) = self.template {
+            if !tmpl.contains("{headings}") {
+                let mut extracted = Vec::new();
+                let has_h4 = tmpl.lines().any(|l| l.trim().starts_with("#### "));
+                let prefix = if has_h4 { "#### " } else { "### " };
+                for line in tmpl.lines() {
+                    let trimmed = line.trim();
+                    if let Some(h) = trimmed.strip_prefix(prefix) {
+                        let h = h.trim();
+                        let lower = h.to_lowercase();
+                        if !lower.contains("synthesis template")
+                            && !lower.contains("rejection")
+                            && !lower.contains("template")
+                            && !h.is_empty()
+                        {
+                            extracted.push(h.to_string());
+                        }
+                    }
+                }
+                if !extracted.is_empty() {
+                    return extracted;
+                }
+            }
+        }
+
+        default_synthesis_headings()
+    }
+
+    /// Renders the synthesis template: either custom template or generated from resolved headings.
+    pub fn render_template(&self) -> String {
+        let mut out = if let Some(ref tmpl) = self.template {
+            let rendered = if tmpl.contains("{headings}") {
+                tmpl.replace("{headings}", &self.resolved_headings().join(", "))
+            } else {
+                tmpl.clone()
+            };
+            let lower = rendered.to_lowercase();
+            if !lower.contains("rejection") && !lower.contains("reject") {
+                let mut s = rendered.trim_end().to_string();
+                s.push_str("\n\n#### Rejection Directive\nReject any model response or proposal missing any required heading and re-prompt.");
+                s
+            } else {
+                rendered
+            }
+        } else {
+            let headings = self.resolved_headings();
+            let mut s = String::new();
+            s.push_str("### Structured Multi-Perspective Synthesis Template\n");
+            s.push_str("Every planning proposal must provide answers under each of the required headings:\n\n");
+            for heading in &headings {
+                let h_trimmed = heading.trim();
+                s.push_str(&format!("#### {}\n", h_trimmed));
+                let desc = match h_trimmed.to_lowercase().as_str() {
+                    "product & domain value" => "Problem statement, user persona, measurable success metrics, appetite.",
+                    "architectural constraints" => "Boundaries, target modules, dependencies, cross-crate interfaces, invariants.",
+                    "safety & risk profile" => "ISO 14971 hazards, regulatory compliance (IEC 62304), negative constraints (no-gos and rabbit holes).",
+                    "implementation directives" => "Specific CLI commands to create stories (`qdev create story`) and establish relations (`qdev relate`).",
+                    "clinical value" => "Clinical indications, workflow integration, regulatory evidence, and patient outcomes.",
+                    _ => "Domain-specific analysis, constraints, and requirements.",
+                };
+                s.push_str(desc);
+                s.push_str("\n\n");
+            }
+            s.push_str("#### Rejection Directive\nReject any model response or proposal missing any required heading and re-prompt.");
+            s
+        };
+
+        // Ensure render_template ends with \n\n for clean Markdown block separation
+        out = out.trim_end().to_string();
+        out.push_str("\n\n");
+        out
+    }
+
+    /// Programmatic helper that checks if an output string contains all required headings (case-insensitive).
+    pub fn validate_output(&self, output: &str) -> Result<(), Vec<String>> {
+        let lower = output.to_lowercase();
+        let mut missing = Vec::new();
+        for heading in self.resolved_headings() {
+            if !lower.contains(&heading.to_lowercase()) {
+                missing.push(heading);
+            }
+        }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(missing)
+        }
+    }
+}
+
+/// Universal typed configuration schema combining all sections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
@@ -439,4 +563,6 @@ pub struct Config {
     pub preferences: PreferencesConfig,
     #[serde(default)]
     pub leases: LeasesConfig,
+    #[serde(default)]
+    pub synthesis: SynthesisConfig,
 }

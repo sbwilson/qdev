@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::ModelsConfig;
+use crate::config::{ModelsConfig, SynthesisConfig};
 use crate::errors::QdevError;
 use crate::schema::extract_frontmatter;
 use crate::write::write_file_atomic;
@@ -700,7 +700,7 @@ fn render_command_catalog_markdown() -> String {
 
 /// The Structured Multi-Perspective Synthesis Template embedded in planning skills.
 pub const STRUCTURED_SYNTHESIS_TEMPLATE: &str = r#"### Structured Multi-Perspective Synthesis Template
-Every planning proposal must provide answers under each of the four headings:
+Every planning proposal must provide answers under each of the required headings:
 
 #### Product & domain value
 Problem statement, user persona, measurable success metrics, appetite.
@@ -713,6 +713,9 @@ ISO 14971 hazards, regulatory compliance (IEC 62304), negative constraints (no-g
 
 #### Implementation directives
 Specific CLI commands to create stories (`qdev create story`) and establish relations (`qdev relate`).
+
+#### Rejection Directive
+Reject any model response or proposal missing any required heading and re-prompt.
 "#;
 
 fn escape_yaml(s: &str) -> String {
@@ -742,14 +745,25 @@ fn resolve_model_tier<'a>(skill_name: &str, models: Option<&'a ModelsConfig>) ->
     }
 }
 
-/// Generates the skill content for a specific core skill with optional model hints.
-pub fn generate_skill_content_with_models(
+/// Generates the skill content for a specific core skill with optional model hints and synthesis configuration.
+pub fn generate_skill_content_configured(
     skill_name: &str,
     models: Option<&ModelsConfig>,
+    synthesis: Option<&SynthesisConfig>,
 ) -> String {
     let version = env!("CARGO_PKG_VERSION");
     let catalog_md = render_command_catalog_markdown();
     let model_tier = escape_yaml(resolve_model_tier(skill_name, models));
+
+    let default_synthesis = SynthesisConfig::default();
+    let effective_synthesis = synthesis.unwrap_or(&default_synthesis);
+    let synthesis_template = effective_synthesis.render_template();
+    let resolved_headings = effective_synthesis.resolved_headings();
+    let headings_list = resolved_headings
+        .iter()
+        .map(|h| format!("   - {}", h))
+        .collect::<Vec<_>>()
+        .join("\n");
 
     match skill_name {
         "qdev" => format!(
@@ -819,8 +833,7 @@ You are creating or refining architecture, requirements, epics, and hazards in `
 2. **Never read or write raw entity files directly**: All operations go through `qdev create`, `qdev update`, `qdev relate`, `qdev get`, and `qdev list`.
 3. **Never assemble context from raw files**: Use `qdev context <id> --phase specify --json` to inspect context.
 
-{STRUCTURED_SYNTHESIS_TEMPLATE}
-## Workflow: Planning Entities
+{synthesis_template}## Workflow: Planning Entities
 1. Query existing entities:
    ```bash
    qdev list epic --json
@@ -832,11 +845,9 @@ You are creating or refining architecture, requirements, epics, and hazards in `
    ```bash
    qdev get <id> --json
    ```
-3. Synthesize planning proposal using the Structured Multi-Perspective Synthesis Template covering all four headings:
-   - Product & domain value
-   - Architectural constraints
-   - Safety & risk profile
-   - Implementation directives
+3. Synthesize planning proposal using the Structured Multi-Perspective Synthesis Template covering all required headings:
+{headings_list}
+   Strict Rejection Directive: Reject any model response or proposal missing any required heading and re-prompt.
 4. Execute implementation directives:
    Create stories with `qdev create story` and establish relations with `qdev relate`:
    ```bash
@@ -874,12 +885,14 @@ You are creating and refining user stories in `qdev`.
 2. **Never assemble or inspect context from raw files directly**: Always run `qdev context <epic-id> --phase specify --json` or `qdev get <id> --json`.
 3. **Never write raw story files directly**: Always use `qdev create story`.
 
-## Workflow: Story Creation & Readiness
+{synthesis_template}## Workflow: Story Creation & Readiness
 1. Inspect parent epic context:
    ```bash
    qdev context <epic-id> --phase specify --json
    ```
-2. Draft acceptance criteria and negative constraints (no-gos and rabbit holes) based on the epic context and requirements.
+2. Synthesize story proposal, acceptance criteria, and negative constraints (no-gos and rabbit holes) using the Structured Multi-Perspective Synthesis Template covering all required headings:
+{headings_list}
+   Strict Rejection Directive: Reject any model response or proposal missing any required heading and re-prompt.
 3. Create story with title, target modules, and appetite:
    ```bash
    qdev create story <epic-id> --title "<title>" --module "<module>" --appetite <appetite> --json
@@ -1027,13 +1040,24 @@ You are operating in a workspace governed by `qdev`.
     }
 }
 
-/// Generates the skill content for a specific core skill with default model tiers.
-pub fn generate_skill_content(skill_name: &str) -> String {
-    generate_skill_content_with_models(skill_name, None)
+/// Generates the skill content for a specific core skill with optional model hints.
+pub fn generate_skill_content_with_models(
+    skill_name: &str,
+    models: Option<&ModelsConfig>,
+) -> String {
+    generate_skill_content_configured(skill_name, models, None)
 }
 
-/// Generates the Cursor rule content for `.cursor/rules/qdev.mdc` with optional model hints.
-pub fn generate_cursor_rule_content_with_models(models: Option<&ModelsConfig>) -> String {
+/// Generates the skill content for a specific core skill with default model tiers.
+pub fn generate_skill_content(skill_name: &str) -> String {
+    generate_skill_content_configured(skill_name, None, None)
+}
+
+/// Generates the Cursor rule content for `.cursor/rules/qdev.mdc` with optional model hints and synthesis configuration.
+pub fn generate_cursor_rule_content_configured(
+    models: Option<&ModelsConfig>,
+    synthesis: Option<&SynthesisConfig>,
+) -> String {
     let version = env!("CARGO_PKG_VERSION");
     let catalog_md = render_command_catalog_markdown();
     let model_tier = escape_yaml(
@@ -1041,6 +1065,11 @@ pub fn generate_cursor_rule_content_with_models(models: Option<&ModelsConfig>) -
             .and_then(|m| m.specify.as_deref())
             .unwrap_or("reasoning"),
     );
+
+    let default_synthesis = SynthesisConfig::default();
+    let effective_synthesis = synthesis.unwrap_or(&default_synthesis);
+    let synthesis_template = effective_synthesis.render_template();
+    let headings_summary = effective_synthesis.resolved_headings().join(", ");
 
     format!(
         r#"---
@@ -1061,11 +1090,10 @@ You are working in a codebase governed by `qdev`.
 - **Never assemble or inspect context from raw files directly**: Always use `qdev context <id> --phase <phase> --json` (phases: `specify`, `develop`, `review`). Never parse, inspect, or reconstruct markdown files from `docs/` directly.
 - **Never write or edit raw entity markdown files directly**: Always use `qdev create`, `qdev update`, `qdev transition`, `qdev relate`, etc.
 
-{STRUCTURED_SYNTHESIS_TEMPLATE}
-## Workflows
+{synthesis_template}## Workflows
 - `/qdev`: Pulse inspection (`qdev --json` or `qdev status --json`) and next step discovery (`qdev next --json`). Render workspace health, sprint state, gates, leases, and next steps.
-- `/qdev-plan`: Manage architecture, requirements, epics, and hazards using the Structured Multi-Perspective Synthesis Template (`qdev list`, `qdev get`, `qdev create story`, `qdev relate`).
-- `/qdev-create-story`: Story specification, constraints, and transition to ready (`qdev context <epic-id> --phase specify --json`, draft acceptance criteria and negative constraints, `qdev create story`, `qdev constraint add`, `qdev transition story <id> ready --json`).
+- `/qdev-plan`: Manage architecture, requirements, epics, and hazards using the Structured Multi-Perspective Synthesis Template covering all required headings ({headings_summary}) and rejecting proposals missing any required heading (`qdev list`, `qdev get`, `qdev create story`, `qdev relate`).
+- `/qdev-create-story`: Story specification, constraints, and transition to ready using the Structured Multi-Perspective Synthesis Template covering all required headings ({headings_summary}) and rejecting proposals missing any required heading (`qdev context <epic-id> --phase specify --json`, draft acceptance criteria and negative constraints, `qdev create story`, `qdev constraint add`, `qdev transition story <id> ready --json`).
 - `/qdev-develop`: Implementation lifecycle (`qdev preflight --story <id> --json`, `qdev claim <id> --json`, `qdev context <id> --phase develop --json`, `qdev scratch append`, `qdev gate run --for-transition review`, `qdev transition story <id> review --json`, quote cited IDs on refusal).
 - `/qdev-review`: Code review and audit (`qdev context <id> --phase review --json`, audit diff against AC/constraints, `qdev impact <id> --json`, `qdev gate run --all`, `qdev transition story <id> done --json` or `qdev transition story <id> in_progress --justification "<justification>" --json`).
 
@@ -1074,60 +1102,89 @@ You are working in a codebase governed by `qdev`.
     )
 }
 
-/// Generates the Cursor rule content for `.cursor/rules/qdev.mdc`.
-pub fn generate_cursor_rule_content() -> String {
-    generate_cursor_rule_content_with_models(None)
+/// Generates the Cursor rule content for `.cursor/rules/qdev.mdc` with optional model hints.
+pub fn generate_cursor_rule_content_with_models(models: Option<&ModelsConfig>) -> String {
+    generate_cursor_rule_content_configured(models, None)
 }
 
-/// Generates Claude skills returning pairs of (relative_path, content) with optional model hints.
-pub fn generate_claude_skills_with_models(models: Option<&ModelsConfig>) -> Vec<(PathBuf, String)> {
+/// Generates the Cursor rule content for `.cursor/rules/qdev.mdc`.
+pub fn generate_cursor_rule_content() -> String {
+    generate_cursor_rule_content_configured(None, None)
+}
+
+/// Generates Claude skills returning pairs of (relative_path, content) with optional model hints and synthesis configuration.
+pub fn generate_claude_skills_configured(
+    models: Option<&ModelsConfig>,
+    synthesis: Option<&SynthesisConfig>,
+) -> Vec<(PathBuf, String)> {
     CORE_SKILL_NAMES
         .iter()
         .map(|name| {
             let path = PathBuf::from(".claude/skills")
                 .join(name)
                 .join("SKILL.md");
-            let content = generate_skill_content_with_models(name, models);
+            let content = generate_skill_content_configured(name, models, synthesis);
             (path, content)
         })
         .collect()
 }
 
+/// Generates Claude skills returning pairs of (relative_path, content) with optional model hints.
+pub fn generate_claude_skills_with_models(models: Option<&ModelsConfig>) -> Vec<(PathBuf, String)> {
+    generate_claude_skills_configured(models, None)
+}
+
 /// Generates Claude skills returning pairs of (relative_path, content).
 pub fn generate_claude_skills() -> Vec<(PathBuf, String)> {
-    generate_claude_skills_with_models(None)
+    generate_claude_skills_configured(None, None)
+}
+
+/// Generates Cursor rule returning (relative_path, content) with optional model hints and synthesis configuration.
+pub fn generate_cursor_rule_configured(
+    models: Option<&ModelsConfig>,
+    synthesis: Option<&SynthesisConfig>,
+) -> (PathBuf, String) {
+    (
+        PathBuf::from(".cursor/rules/qdev.mdc"),
+        generate_cursor_rule_content_configured(models, synthesis),
+    )
 }
 
 /// Generates Cursor rule returning (relative_path, content) with optional model hints.
 pub fn generate_cursor_rule_with_models(models: Option<&ModelsConfig>) -> (PathBuf, String) {
-    (
-        PathBuf::from(".cursor/rules/qdev.mdc"),
-        generate_cursor_rule_content_with_models(models),
-    )
+    generate_cursor_rule_configured(models, None)
 }
 
 /// Generates Cursor rule returning (relative_path, content).
 pub fn generate_cursor_rule() -> (PathBuf, String) {
-    generate_cursor_rule_with_models(None)
+    generate_cursor_rule_configured(None, None)
 }
 
-/// Generates Agent skills returning pairs of (relative_path, content) with optional model hints.
-pub fn generate_agent_skills_with_models(models: Option<&ModelsConfig>) -> Vec<(PathBuf, String)> {
+/// Generates Agent skills returning pairs of (relative_path, content) with optional model hints and synthesis configuration.
+pub fn generate_agent_skills_configured(
+    models: Option<&ModelsConfig>,
+    synthesis: Option<&SynthesisConfig>,
+) -> Vec<(PathBuf, String)> {
     CORE_SKILL_NAMES
         .iter()
         .map(|name| {
             let path = PathBuf::from(".agents/skills")
                 .join(name)
                 .join("SKILL.md");
-            let content = generate_skill_content_with_models(name, models);
+            let content = generate_skill_content_configured(name, models, synthesis);
             (path, content)
         })
         .collect()
 }
 
+/// Generates Agent skills returning pairs of (relative_path, content) with optional model hints.
+pub fn generate_agent_skills_with_models(models: Option<&ModelsConfig>) -> Vec<(PathBuf, String)> {
+    generate_agent_skills_configured(models, None)
+}
+
 /// Generates Agent skills returning pairs of (relative_path, content).
 pub fn generate_agent_skills() -> Vec<(PathBuf, String)> {
-    generate_agent_skills_with_models(None)
+    generate_agent_skills_configured(None, None)
 }
 
 /// Options specifying target environments for `install_skills`.
@@ -1208,14 +1265,15 @@ fn write_managed_file(
     Ok(rel_path.to_string_lossy().to_string())
 }
 
-/// Installs skills and rules for selected target editors and agents with optional model hints.
+/// Installs skills and rules for selected target editors and agents with optional model hints and synthesis configuration.
 ///
-/// Reads advisory model selections from `models`, or falls back to loading workspace
-/// configuration from `workspace_root`, or uses default model tiers.
-pub fn install_skills_with_models(
+/// Reads advisory model selections from `models` and synthesis configuration from `synthesis`,
+/// or falls back to loading workspace configuration from `workspace_root`, or uses defaults.
+pub fn install_skills_configured(
     workspace_root: &Path,
     options: &SkillInstallOptions,
     models: Option<&ModelsConfig>,
+    synthesis: Option<&SynthesisConfig>,
 ) -> Result<SkillsInstallReport, QdevError> {
     if !options.claude && !options.cursor && !options.agents {
         return Err(QdevError::usage_error(
@@ -1223,15 +1281,19 @@ pub fn install_skills_with_models(
         ));
     }
 
-    let loaded_models;
-    let effective_models = match models {
-        Some(m) => Some(m),
-        None => {
+    let loaded_config;
+    let (effective_models, effective_synthesis) = match (models, synthesis) {
+        (Some(m), Some(s)) => (Some(m), Some(s)),
+        _ => {
             if let Ok(annotated) = crate::config::load_config(workspace_root) {
-                loaded_models = Some(annotated.config.models);
-                loaded_models.as_ref()
+                loaded_config = Some(annotated.config);
+                let cfg = loaded_config.as_ref().unwrap();
+                (
+                    models.or(Some(&cfg.models)),
+                    synthesis.or(Some(&cfg.synthesis)),
+                )
             } else {
-                None
+                (models, synthesis)
             }
         }
     };
@@ -1241,7 +1303,7 @@ pub fn install_skills_with_models(
 
     if options.claude {
         targets.push("claude".to_string());
-        for (rel_path, content) in generate_claude_skills_with_models(effective_models) {
+        for (rel_path, content) in generate_claude_skills_configured(effective_models, effective_synthesis) {
             let written = write_managed_file(workspace_root, &rel_path, &content)?;
             installed_files.push(written);
         }
@@ -1249,14 +1311,14 @@ pub fn install_skills_with_models(
 
     if options.cursor {
         targets.push("cursor".to_string());
-        let (rel_path, content) = generate_cursor_rule_with_models(effective_models);
+        let (rel_path, content) = generate_cursor_rule_configured(effective_models, effective_synthesis);
         let written = write_managed_file(workspace_root, &rel_path, &content)?;
         installed_files.push(written);
     }
 
     if options.agents {
         targets.push("agents".to_string());
-        for (rel_path, content) in generate_agent_skills_with_models(effective_models) {
+        for (rel_path, content) in generate_agent_skills_configured(effective_models, effective_synthesis) {
             let written = write_managed_file(workspace_root, &rel_path, &content)?;
             installed_files.push(written);
         }
@@ -1269,14 +1331,27 @@ pub fn install_skills_with_models(
     })
 }
 
+/// Installs skills and rules for selected target editors and agents with optional model hints.
+///
+/// Reads advisory model selections from `models`, or falls back to loading workspace
+/// configuration from `workspace_root`, or uses default model tiers.
+/// Auto-loads workspace `synthesis` configuration if not explicitly supplied.
+pub fn install_skills_with_models(
+    workspace_root: &Path,
+    options: &SkillInstallOptions,
+    models: Option<&ModelsConfig>,
+) -> Result<SkillsInstallReport, QdevError> {
+    install_skills_configured(workspace_root, options, models, None)
+}
+
 /// Installs skills and rules for selected target editors and agents.
 ///
-/// Auto-loads model configuration from `workspace_root` or falls back to default tiers.
+/// Auto-loads model and synthesis configuration from `workspace_root` or falls back to defaults.
 pub fn install_skills(
     workspace_root: &Path,
     options: &SkillInstallOptions,
 ) -> Result<SkillsInstallReport, QdevError> {
-    install_skills_with_models(workspace_root, options, None)
+    install_skills_configured(workspace_root, options, None, None)
 }
 
 /// Inspects the installation state of qdev skills and rules in the workspace.

@@ -498,6 +498,24 @@ impl AnnotatedConfig {
             self.config.leases.stale_age_days, src
         ));
 
+        if self.config.synthesis.template.is_some() || self.config.synthesis.headings.is_some() {
+            out.push_str("\n[synthesis]\n");
+            if let Some(tmpl) = &self.config.synthesis.template {
+                let src = self
+                    .sources
+                    .get("synthesis.template")
+                    .unwrap_or(&ConfigSource::Default);
+                out.push_str(&format!("  template = {:?} (source: {})\n", tmpl, src));
+            }
+            if let Some(hdgs) = &self.config.synthesis.headings {
+                let src = self
+                    .sources
+                    .get("synthesis.headings")
+                    .unwrap_or(&ConfigSource::Default);
+                out.push_str(&format!("  headings = {:?} (source: {})\n", hdgs, src));
+            }
+        }
+
         out
     }
 }

@@ -409,6 +409,9 @@ fn test_qdev_plan_multi_perspective_synthesis_template() {
     // Must instruct entity creation and relationship establishment
     assert!(plan.contains("qdev create story"));
     assert!(plan.contains("qdev relate"));
+
+    // Must contain rejection directive
+    assert!(plan.contains("Reject any model response or proposal missing any required heading and re-prompt"));
 }
 
 #[test]
@@ -426,6 +429,12 @@ fn test_qdev_pulse_rendering_instructions() {
 fn test_qdev_create_story_workflow() {
     let create = qdev_core::generate_skill_content("qdev-create-story");
     assert!(create.contains("qdev context <epic-id> --phase specify --json"));
+    assert!(create.contains("Structured Multi-Perspective Synthesis Template"));
+    assert!(create.contains("Product & domain value"));
+    assert!(create.contains("Architectural constraints"));
+    assert!(create.contains("Safety & risk profile"));
+    assert!(create.contains("Implementation directives"));
+    assert!(create.contains("Reject any model response or proposal missing any required heading and re-prompt"));
     assert!(create.contains("qdev create story"));
     assert!(create.contains("qdev constraint add"));
     assert!(create.contains("qdev transition story <story-id> ready --json"));
@@ -465,8 +474,45 @@ fn test_cursor_rule_synthesis_template_and_models() {
     assert!(content.contains("Architectural constraints"));
     assert!(content.contains("Safety & risk profile"));
     assert!(content.contains("Implementation directives"));
+    assert!(content.contains("Reject any model response or proposal missing any required heading and re-prompt"));
     assert!(content.contains("model_hint: \"reasoning\""));
     assert!(content.contains("model: \"reasoning\""));
+}
+
+#[test]
+fn test_install_skills_loads_workspace_qdev_toml_synthesis() {
+    let temp = TempDir::new().unwrap();
+    let qdev_toml = r#"
+[project]
+name = "CustomSynthesisTest"
+
+[synthesis]
+headings = [
+    "Product & domain value",
+    "Safety & risk profile",
+    "Clinical efficacy",
+]
+"#;
+    fs::write(temp.path().join("qdev.toml"), qdev_toml).unwrap();
+
+    let options = SkillInstallOptions {
+        claude: true,
+        cursor: true,
+        agents: false,
+    };
+
+    // 2-argument install_skills auto-loads from workspace qdev.toml
+    let report = install_skills(temp.path(), &options).unwrap();
+    assert_eq!(report.installed_files.len(), 6);
+
+    let plan_file = temp.path().join(".claude/skills/qdev-plan/SKILL.md");
+    let plan_content = fs::read_to_string(plan_file).unwrap();
+    assert!(plan_content.contains("Clinical efficacy"));
+    assert!(plan_content.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+
+    let cursor_file = temp.path().join(".cursor/rules/qdev.mdc");
+    let cursor_content = fs::read_to_string(cursor_file).unwrap();
+    assert!(cursor_content.contains("Clinical efficacy"));
 }
 
 #[test]
@@ -538,3 +584,102 @@ fn test_skills_frontmatter_escapes_yaml_model_hints() {
     assert!(content.contains("model_hint: \"custom\\\"reasoner\\\\test\""));
     assert!(content.contains("model: \"custom\\\"reasoner\\\\test\""));
 }
+
+#[test]
+fn test_skills_synthesis_custom_headings() {
+    let synthesis = qdev_core::SynthesisConfig {
+        template: None,
+        headings: Some(vec![
+            "Product & domain value".to_string(),
+            "Architectural constraints".to_string(),
+            "Safety & risk profile".to_string(),
+            "Implementation directives".to_string(),
+            "Clinical value".to_string(),
+        ]),
+    };
+
+    let plan = qdev_core::generate_skill_content_configured("qdev-plan", None, Some(&synthesis));
+    assert!(plan.contains("Clinical value"));
+    assert!(plan.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+
+    let create = qdev_core::generate_skill_content_configured("qdev-create-story", None, Some(&synthesis));
+    assert!(create.contains("Clinical value"));
+    assert!(create.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+
+    let (_, cursor) = qdev_core::generate_cursor_rule_configured(None, Some(&synthesis));
+    assert!(cursor.contains("Clinical value"));
+}
+
+#[test]
+fn test_skills_synthesis_custom_template() {
+    let synthesis = qdev_core::SynthesisConfig {
+        template: Some("### Custom Synthesis Block\nRequired: {headings}\nReject if incomplete.\n".to_string()),
+        headings: None,
+    };
+
+    let plan = qdev_core::generate_skill_content_configured("qdev-plan", None, Some(&synthesis));
+    assert!(plan.contains("### Custom Synthesis Block"));
+    assert!(plan.contains("Required: Product & domain value, Architectural constraints, Safety & risk profile, Implementation directives"));
+    assert!(plan.contains("Reject if incomplete."));
+
+    let create = qdev_core::generate_skill_content_configured("qdev-create-story", None, Some(&synthesis));
+    assert!(create.contains("### Custom Synthesis Block"));
+}
+
+#[test]
+fn test_synthesis_validate_output() {
+    let default_config = qdev_core::SynthesisConfig::default();
+
+    // Complete output with all four headings
+    let full_text = r#"
+    ### Review
+    1. Product & domain value: Delivers clinical improvements.
+    2. Architectural constraints: Respects boundary rules.
+    3. Safety & risk profile: Hazard analysis completed.
+    4. Implementation directives: Run qdev create story.
+    "#;
+    assert_eq!(default_config.validate_output(full_text), Ok(()));
+
+    // Case-insensitive matching
+    let mixed_case = r#"
+    product & domain value is great.
+    ARCHITECTURAL CONSTRAINTS are preserved.
+    safety & risk profile reviewed.
+    IMPLEMENTATION DIRECTIVES specified.
+    "#;
+    assert_eq!(default_config.validate_output(mixed_case), Ok(()));
+
+    // Missing Safety & risk profile
+    let missing_safety = r#"
+    1. Product & domain value: Good.
+    2. Architectural constraints: Good.
+    4. Implementation directives: Good.
+    "#;
+    assert_eq!(
+        default_config.validate_output(missing_safety),
+        Err(vec!["Safety & risk profile".to_string()])
+    );
+
+    // Missing multiple headings
+    let missing_all = "Empty text";
+    let err = default_config.validate_output(missing_all).unwrap_err();
+    assert_eq!(err.len(), 4);
+
+    // Custom headings output validation
+    let custom_config = qdev_core::SynthesisConfig {
+        template: None,
+        headings: Some(vec![
+            "Product & domain value".to_string(),
+            "Clinical value".to_string(),
+        ]),
+    };
+    assert_eq!(
+        custom_config.validate_output("Product & domain value only"),
+        Err(vec!["Clinical value".to_string()])
+    );
+    assert_eq!(
+        custom_config.validate_output("Product & domain value and Clinical value"),
+        Ok(())
+    );
+}
+

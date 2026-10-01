@@ -3445,10 +3445,11 @@ fn handle_doctor(
                         cursor,
                         agents,
                     };
-                    if let Err(e) = qdev_core::install_skills_with_models(
+                    if let Err(e) = qdev_core::install_skills_configured(
                         &root,
                         &options,
                         Some(&annotated_config.config.models),
+                        Some(&annotated_config.config.synthesis),
                     ) {
                         let _ = output.emit_error(&e);
                         return e.exit_code();

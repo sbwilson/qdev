@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use qdev_core::{
-    find_workspace_root, install_hooks, install_mcp, install_skills_with_models,
+    find_workspace_root, install_hooks, install_mcp, install_skills_configured,
     ExitCode, JsonEnvelope, QdevError, SkillInstallOptions,
 };
 
@@ -70,7 +70,12 @@ pub fn handle_install(
                 cursor: skills_args.cursor,
                 agents: skills_args.agents,
             };
-            match install_skills_with_models(&root, &options, Some(&annotated_config.config.models)) {
+            match install_skills_configured(
+                &root,
+                &options,
+                Some(&annotated_config.config.models),
+                Some(&annotated_config.config.synthesis),
+            ) {
                 Ok(report) => {
                     if cli.json {
                         let envelope = JsonEnvelope::new(report);

@@ -997,6 +997,37 @@ fn test_doctor_fix_regenerates_outdated_skills() {
 }
 
 #[test]
+fn test_doctor_fix_regenerates_outdated_skills_with_custom_synthesis() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    // Add [synthesis] to qdev.toml
+    let qdev_toml = root.join("qdev.toml");
+    let mut toml_str = fs::read_to_string(&qdev_toml).unwrap();
+    toml_str.push_str("\n[synthesis]\nheadings = [\"Product & domain value\", \"Safety & risk profile\", \"Clinical efficacy\"]\n");
+    fs::write(&qdev_toml, toml_str).unwrap();
+
+    // Plant an outdated skill
+    let skill_path = root.join(".claude/skills/qdev-plan/SKILL.md");
+    fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+    let outdated_content = "---\nname: qdev-plan\nversion: \"0.0.9\"\nqdev_version: \"0.0.9\"\n---\nOutdated content";
+    fs::write(&skill_path, outdated_content).unwrap();
+
+    // Run doctor --fix
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(root)
+        .args(["doctor", "--fix", "--non-interactive"])
+        .assert()
+        .success();
+
+    // Verify skill is regenerated and includes the custom synthesis heading and rejection directive
+    let regenerated = fs::read_to_string(&skill_path).unwrap();
+    assert!(regenerated.contains("Clinical efficacy"));
+    assert!(regenerated.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+}
+
+#[test]
 fn test_doctor_fix_corrupt_cache_requires_confirmation_in_non_interactive_mode() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();

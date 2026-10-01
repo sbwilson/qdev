@@ -835,6 +835,9 @@ timeout_ms = 5000
 [hygiene]
 enabled = true
 
+[synthesis]
+headings = ["Product & domain value", "Safety & risk profile"]
+
 [preferences]
 color = true
 editor = "vim"
@@ -858,6 +861,8 @@ editor = "vim"
     assert!(report.contains("[[gates]]"));
     assert!(report.contains("timeout_ms = 5000"));
     assert!(report.contains("[hygiene]"));
+    assert!(report.contains("[synthesis]"));
+    assert!(report.contains("Safety & risk profile"));
     assert!(report.contains("[preferences]"));
 }
 
@@ -1216,6 +1221,174 @@ fn test_hygiene_config_schema_violations() {
         ("[hygiene]\ncitation_templates = \"not-a-table\"\n", "citation_templates", "hygiene"),
         ("[hygiene.citation_templates]\nrust = 123\n", "rust", "hygiene"),
         ("[hygiene.citation_templates]\nrust = \"   \"\n", "rust", "hygiene"),
+    ];
+
+    for (content, key, section) in invalid_cases {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::write(root.join("qdev.toml"), content).unwrap();
+
+        let err = load_config(root).expect_err(&format!("expected error for invalid {}: {}", key, content));
+        assert_eq!(err.exit_code(), ExitCode::UsageError);
+        assert!(
+            err.message().contains(key) && err.message().contains(section),
+            "expected key '{}' and section '{}' in message: {}",
+            key,
+            section,
+            err.message()
+        );
+    }
+}
+
+#[test]
+fn test_synthesis_config_defaults() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    let annotated = load_config(root).expect("Default config should load");
+    let synthesis = &annotated.config.synthesis;
+
+    assert_eq!(synthesis.template, None);
+    assert_eq!(synthesis.headings, None);
+    assert_eq!(
+        synthesis.resolved_headings(),
+        qdev_core::default_synthesis_headings()
+    );
+    assert_eq!(synthesis.resolved_headings().len(), 4);
+    assert!(synthesis.resolved_headings().contains(&"Product & domain value".to_string()));
+    assert!(synthesis.resolved_headings().contains(&"Architectural constraints".to_string()));
+    assert!(synthesis.resolved_headings().contains(&"Safety & risk profile".to_string()));
+    assert!(synthesis.resolved_headings().contains(&"Implementation directives".to_string()));
+
+    let rendered = synthesis.render_template();
+    assert!(rendered.contains("### Structured Multi-Perspective Synthesis Template"));
+    assert!(rendered.contains("Product & domain value"));
+    assert!(rendered.contains("Architectural constraints"));
+    assert!(rendered.contains("Safety & risk profile"));
+    assert!(rendered.contains("Implementation directives"));
+    assert!(rendered.contains("Rejection Directive"));
+}
+
+#[test]
+fn test_synthesis_config_custom_headings() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    let project_toml = r#"
+[project]
+name = "SynthesisHeadingsTest"
+
+[synthesis]
+headings = [
+    "Product & domain value",
+    "Architectural constraints",
+    "Safety & risk profile",
+    "Implementation directives",
+    "Clinical value",
+]
+"#;
+
+    fs::write(root.join("qdev.toml"), project_toml).unwrap();
+
+    let annotated = load_config(root).expect("Configuration should load successfully");
+    let cfg = &annotated.config;
+
+    assert_eq!(
+        annotated.get_source("synthesis.headings"),
+        Some(ConfigSource::Project)
+    );
+    let resolved = cfg.synthesis.resolved_headings();
+    assert_eq!(resolved.len(), 5);
+    assert!(resolved.contains(&"Clinical value".to_string()));
+
+    let rendered = cfg.synthesis.render_template();
+    assert!(rendered.contains("Clinical value"));
+    assert!(rendered.contains("Rejection Directive"));
+}
+
+#[test]
+fn test_synthesis_config_custom_template() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    let project_toml = r##"
+[project]
+name = "SynthesisTemplateTest"
+
+[synthesis]
+template = """
+### Custom Template
+Must address: {headings}
+Reject otherwise.
+"""
+"##;
+
+    fs::write(root.join("qdev.toml"), project_toml).unwrap();
+
+    let annotated = load_config(root).expect("Configuration should load successfully");
+    let cfg = &annotated.config;
+
+    assert_eq!(
+        annotated.get_source("synthesis.template"),
+        Some(ConfigSource::Project)
+    );
+    let rendered = cfg.synthesis.render_template();
+    assert!(rendered.contains("### Custom Template"));
+    assert!(rendered.contains("Product & domain value"));
+    assert!(rendered.contains("Reject otherwise."));
+}
+
+#[test]
+fn test_synthesis_config_template_extracted_headings() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    let project_toml = r##"
+[project]
+name = "SynthesisExtractedHeadingsTest"
+
+[synthesis]
+template = """
+### Clinical Evaluation Template
+#### Primary Clinical Outcomes
+Must document measurable outcomes.
+#### Secondary Safety Profile
+Must evaluate risk according to ISO 14971.
+"""
+"##;
+
+    fs::write(root.join("qdev.toml"), project_toml).unwrap();
+
+    let annotated = load_config(root).expect("Configuration should load successfully");
+    let cfg = &annotated.config;
+
+    let headings = cfg.synthesis.resolved_headings();
+    assert_eq!(headings, vec!["Primary Clinical Outcomes", "Secondary Safety Profile"]);
+
+    // Output validation against extracted headings
+    assert!(cfg.synthesis.validate_output("primary clinical outcomes: good. secondary safety profile: verified.").is_ok());
+    assert_eq!(cfg.synthesis.validate_output("primary clinical outcomes: good.").unwrap_err(), vec!["Secondary Safety Profile"]);
+
+    // Render template appends rejection directive since it was absent
+    let rendered = cfg.synthesis.render_template();
+    assert!(rendered.contains("Primary Clinical Outcomes"));
+    assert!(rendered.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+    assert!(rendered.ends_with("\n\n"));
+}
+
+#[test]
+fn test_synthesis_config_schema_violations() {
+    let invalid_cases = [
+        ("[synthesis]\nfoo = \"bar\"\n", "foo", "synthesis"),
+        ("[synthesis]\nheadings = 123\n", "headings", "synthesis"),
+        ("[synthesis]\nheadings = [123]\n", "headings", "synthesis"),
+        ("[synthesis]\nheadings = []\n", "headings", "synthesis"),
+        ("[synthesis]\nheadings = [\"\"]\n", "headings", "synthesis"),
+        ("[synthesis]\nheadings = [\"   \"]\n", "headings", "synthesis"),
+        ("[synthesis]\ntemplate = 123\n", "template", "synthesis"),
+        ("[synthesis]\ntemplate = true\n", "template", "synthesis"),
+        ("[synthesis]\ntemplate = \"\"\n", "template", "synthesis"),
+        ("[synthesis]\ntemplate = \"   \"\n", "template", "synthesis"),
     ];
 
     for (content, key, section) in invalid_cases {

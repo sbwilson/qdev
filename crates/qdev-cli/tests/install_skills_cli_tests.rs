@@ -443,11 +443,18 @@ fn test_installed_skills_have_synthesis_template_and_default_model_hints() {
     assert!(plan.contains("Architectural constraints"));
     assert!(plan.contains("Safety & risk profile"));
     assert!(plan.contains("Implementation directives"));
+    assert!(plan.contains("Reject any model response or proposal missing any required heading and re-prompt"));
     assert!(plan.contains("qdev create story"));
     assert!(plan.contains("qdev relate"));
 
     let create = fs::read_to_string(temp.path().join(".claude/skills/qdev-create-story/SKILL.md")).unwrap();
     assert!(create.contains("model_hint: \"reasoning\""));
+    assert!(create.contains("Structured Multi-Perspective Synthesis Template"));
+    assert!(create.contains("Product & domain value"));
+    assert!(create.contains("Architectural constraints"));
+    assert!(create.contains("Safety & risk profile"));
+    assert!(create.contains("Implementation directives"));
+    assert!(create.contains("Reject any model response or proposal missing any required heading and re-prompt"));
     assert!(create.contains("qdev context <epic-id> --phase specify --json"));
     assert!(create.contains("qdev create story"));
     assert!(create.contains("qdev constraint add"));
@@ -600,3 +607,122 @@ review = "custom-review-llm"
     assert!(agent_rev.contains("model_hint: \"custom-review-llm\""));
     assert!(agent_rev.contains("model: \"custom-review-llm\""));
 }
+
+#[test]
+fn test_install_skills_workspace_synthesis_custom_headings_and_rejection() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    // Add custom [synthesis] section with "Clinical value"
+    let qdev_toml = r#"
+[project]
+name = "SynthesisWorkspaceTest"
+
+[synthesis]
+headings = [
+    "Product & domain value",
+    "Architectural constraints",
+    "Safety & risk profile",
+    "Implementation directives",
+    "Clinical value",
+]
+"#;
+    fs::write(temp.path().join("qdev.toml"), qdev_toml).unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(temp.path())
+        .args(["install", "skills", "--claude", "--cursor", "--agents"])
+        .assert()
+        .success()
+        .code(0);
+
+    // Verify Claude /qdev-plan skill
+    let plan = fs::read_to_string(temp.path().join(".claude/skills/qdev-plan/SKILL.md")).unwrap();
+    assert!(plan.contains("Clinical value"));
+    assert!(plan.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+
+    // Verify Claude /qdev-create-story skill
+    let create = fs::read_to_string(temp.path().join(".claude/skills/qdev-create-story/SKILL.md")).unwrap();
+    assert!(create.contains("Structured Multi-Perspective Synthesis Template"));
+    assert!(create.contains("Clinical value"));
+    assert!(create.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+
+    // Verify Cursor rule
+    let cursor = fs::read_to_string(temp.path().join(".cursor/rules/qdev.mdc")).unwrap();
+    assert!(cursor.contains("Clinical value"));
+
+    // Verify Agent skills
+    let agent_plan = fs::read_to_string(temp.path().join(".agents/skills/qdev-plan/SKILL.md")).unwrap();
+    assert!(agent_plan.contains("Clinical value"));
+    assert!(agent_plan.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+
+    let agent_create = fs::read_to_string(temp.path().join(".agents/skills/qdev-create-story/SKILL.md")).unwrap();
+    assert!(agent_create.contains("Structured Multi-Perspective Synthesis Template"));
+    assert!(agent_create.contains("Clinical value"));
+    assert!(agent_create.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+}
+
+#[test]
+fn test_install_skills_workspace_synthesis_custom_template() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    let qdev_toml = r#"
+[project]
+name = "SynthesisCustomTemplateWorkspaceTest"
+
+[synthesis]
+template = """
+### Bespoke Synthesis Framework
+Headings required: {headings}
+"""
+"#;
+    fs::write(temp.path().join("qdev.toml"), qdev_toml).unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    cmd.current_dir(temp.path())
+        .args(["install", "skills", "--claude"])
+        .assert()
+        .success()
+        .code(0);
+
+    let plan = fs::read_to_string(temp.path().join(".claude/skills/qdev-plan/SKILL.md")).unwrap();
+    assert!(plan.contains("### Bespoke Synthesis Framework"));
+    assert!(plan.contains("Headings required: Product & domain value, Architectural constraints, Safety & risk profile, Implementation directives"));
+    // Rejection directive should be automatically appended since custom template lacked it
+    assert!(plan.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+}
+
+#[test]
+fn test_install_skills_workspace_synthesis_invalid_schema() {
+    let temp = TempDir::new().unwrap();
+    setup_workspace(temp.path());
+
+    let qdev_toml = r#"
+[project]
+name = "SynthesisInvalidSchemaTest"
+
+[synthesis]
+headings = []
+"#;
+    fs::write(temp.path().join("qdev.toml"), qdev_toml).unwrap();
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(temp.path())
+        .args(["install", "skills", "--claude"])
+        .assert()
+        .failure()
+        .code(2);
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let combined = format!("{}{}", stdout, stderr);
+    assert!(
+        combined.contains("headings") && combined.contains("synthesis"),
+        "expected error regarding synthesis.headings, got: {}",
+        combined
+    );
+}
+
+

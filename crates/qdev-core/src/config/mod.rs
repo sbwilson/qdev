@@ -7,9 +7,10 @@ use std::process::Command;
 
 pub use source::{AnnotatedConfig, AnnotatedValue, ConfigSource};
 pub use types::{
-    CommitMessagesConfig, Config, EnvironmentConfig, GateConfig, GitConfig, HygieneConfig,
-    IdentityConfig, LeasesConfig, ModelsConfig, ModuleConfig, PreferencesConfig, ProjectConfig,
-    RegulatoryConfig, SoupConfig, StorageConfig, TeamsConfig, DEFAULT_CITATION_PATTERN,
+    default_synthesis_headings, CommitMessagesConfig, Config, EnvironmentConfig, GateConfig,
+    GitConfig, HygieneConfig, IdentityConfig, LeasesConfig, ModelsConfig, ModuleConfig,
+    PreferencesConfig, ProjectConfig, RegulatoryConfig, SoupConfig, StorageConfig, SynthesisConfig,
+    TeamsConfig, DEFAULT_CITATION_PATTERN,
 };
 
 use crate::errors::QdevError;
@@ -30,6 +31,7 @@ const ALLOWED_TOP_LEVEL_SECTIONS: &[&str] = &[
     "identity",
     "preferences",
     "leases",
+    "synthesis",
 ];
 
 /// The committed project configuration file.
@@ -73,6 +75,7 @@ pub fn validate_config_table(table: &toml::Table, filename: &str) -> Result<(), 
             "identity" => validate_identity_section(val, filename)?,
             "preferences" => validate_preferences_section(val, filename)?,
             "leases" => validate_leases_section(val, filename)?,
+            "synthesis" => validate_synthesis_section(val, filename)?,
             _ => unreachable!(),
         }
     }
@@ -973,6 +976,60 @@ fn validate_leases_section(val: &toml::Value, filename: &str) -> Result<(), Qdev
     Ok(())
 }
 
+fn validate_synthesis_section(val: &toml::Value, filename: &str) -> Result<(), QdevError> {
+    let table = expect_table(val, "synthesis", filename)?;
+    let allowed = &["headings", "template"];
+    check_unknown_keys(table, allowed, "synthesis", filename)?;
+
+    if let Some(v) = table.get("template") {
+        match v.as_str() {
+            Some(s) if !s.trim().is_empty() => {}
+            Some(_) => {
+                return Err(QdevError::usage_error(format!(
+                    "Schema violation in {}: key 'template' in [synthesis] must not be empty",
+                    filename
+                ))
+                .with_details(serde_json::json!({
+                    "file": filename,
+                    "key": "synthesis.template",
+                })));
+            }
+            None => {
+                return Err(type_mismatch_error("template", "synthesis", "string", filename));
+            }
+        }
+    }
+    if let Some(v) = table.get("headings") {
+        validate_string_array(v, "headings", "synthesis", filename)?;
+        let arr = v.as_array().unwrap();
+        if arr.is_empty() {
+            return Err(QdevError::usage_error(format!(
+                "Schema violation in {}: key 'headings' in [synthesis] cannot be empty",
+                filename
+            ))
+            .with_details(serde_json::json!({
+                "file": filename,
+                "key": "synthesis.headings",
+            })));
+        }
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                if s.trim().is_empty() {
+                    return Err(QdevError::usage_error(format!(
+                        "Schema violation in {}: key 'headings' in [synthesis] cannot contain empty strings",
+                        filename
+                    ))
+                    .with_details(serde_json::json!({
+                        "file": filename,
+                        "key": "synthesis.headings",
+                    })));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn expect_table<'a>(
     val: &'a toml::Value,
     key: &str,
@@ -1565,6 +1622,26 @@ pub fn merge_configs(
     sources.insert("leases.stale_age_days".to_string(), src);
     if let Some(v) = stale_val.and_then(|v| v.as_integer().map(|i| i as u32)) {
         config.leases.stale_age_days = v;
+    }
+
+    // 16. [synthesis]
+    sources.insert("synthesis".to_string(), section_source("synthesis"));
+    let (tmpl_val, src) = get_val("synthesis", "template");
+    sources.insert("synthesis.template".to_string(), src);
+    if let Some(v) = tmpl_val.and_then(|v| v.as_str().map(|s| s.to_string())) {
+        config.synthesis.template = Some(v);
+    }
+
+    let (hdgs_val, src) = get_val("synthesis", "headings");
+    sources.insert("synthesis.headings".to_string(), src);
+    if let Some(v) = hdgs_val {
+        if let Some(arr) = v.as_array() {
+            let headings: Vec<String> = arr
+                .iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect();
+            config.synthesis.headings = Some(headings);
+        }
     }
 
     Ok(AnnotatedConfig::new(config, sources))
