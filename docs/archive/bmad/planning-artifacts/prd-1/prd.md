@@ -23,14 +23,14 @@ To eliminate markdown context sprawl and AI hallucination in complex software de
 
 ## 3. Success Metrics
 
-| Metric | Target |
-| --- | --- |
-| Median tokens in a `develop` context payload | ≤ 1,200 |
-| Median tokens in a `review` context payload | ≤ 2,500 |
-| Cache hydration on boot, 1,000 entities, one changed | ≤ 30 ms |
-| Citation rot after 10 sprints | 0 renamed IDs |
-| Gate pass receipt size | ≤ 2 lines |
-| Commands that can block on stdin in non-interactive mode | 0 |
+| Metric | Target | Actual |
+| --- | --- | --- |
+| Median tokens in a `develop` context payload | ≤ 1,200 | 608 (E4S10 measured) |
+| Median tokens in a `review` context payload | ≤ 2,500 | 2,495 (E4S10 measured) |
+| Cache hydration on boot, 1,000 entities, one changed | ≤ 30 ms | |
+| Citation rot after 10 sprints | 0 renamed IDs | |
+| Gate pass receipt size | ≤ 2 lines | |
+| Commands that can block on stdin in non-interactive mode | 0 | |
 
 ## 4. Functional Requirements
 

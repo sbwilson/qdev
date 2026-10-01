@@ -405,6 +405,12 @@ pub fn execute_scope_gate(
             || norm == "qdev.toml"
             || norm == ".qdev.local.toml"
             || norm.starts_with("docs/")
+            || norm == ".claude"
+            || norm.starts_with(".claude/")
+            || norm == ".agents"
+            || norm.starts_with(".agents/")
+            || norm == ".cursor"
+            || norm.starts_with(".cursor/")
             || norm.starts_with(&specs_prefix)
             || norm.starts_with(&state_prefix)
             || norm.starts_with(&cache_prefix)

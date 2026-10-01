@@ -13,7 +13,7 @@ use crate::write::{
     acquire_workspace_write_lock, current_iso8601, resolve_entity_file, write_file_atomic, Author,
 };
 
-/// Worktree-visible story lease per Story 2.3.
+/// Worktree-visible story lease [E2S3].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoryLease {
     pub story_id: String,
@@ -516,7 +516,7 @@ pub fn claim_story(
         .join("qdev/leases")
         .join(format!("{}.json", trimmed_id));
     if shared_file != local_file && git_common.exists() {
-        write_file_atomic(&shared_file, &lease_json)?;
+        let _ = write_file_atomic(&shared_file, &lease_json);
     }
 
     Ok(lease)

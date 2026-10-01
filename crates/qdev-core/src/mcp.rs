@@ -1,4 +1,4 @@
-//! Model Context Protocol (MCP) server implementation per Story 4.5.
+//! Model Context Protocol (MCP) server implementation [E4S5].
 //!
 //! Provides stdio-based MCP JSON-RPC 2.0 server exposing the 12 core operations
 //! documented in CLI reference §7, installation into editor settings (`.claude/settings.json`,
@@ -1414,7 +1414,7 @@ pub fn install_mcp(
 
 fn is_qdev_mcp_entry(qdev: &serde_json::Value) -> bool {
     let cmd_ok = qdev.get("command").and_then(|c| c.as_str()) == Some("qdev");
-    let args_ok = qdev.get("args").and_then(|a| a.as_array()).map_or(false, |arr| {
+    let args_ok = qdev.get("args").and_then(|a| a.as_array()).is_some_and(|arr| {
         let has_mcp = arr.iter().any(|v| v.as_str() == Some("mcp"));
         let has_serve = arr.iter().any(|v| v.as_str() == Some("serve"));
         has_mcp && has_serve

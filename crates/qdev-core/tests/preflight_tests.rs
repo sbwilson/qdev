@@ -125,6 +125,9 @@ fn test_is_metadata_exempt() {
         "docs/state/decisions/DEC-1.json",
         &storage
     ));
+    assert!(is_metadata_exempt(".claude/skills/qdev/SKILL.md", &storage));
+    assert!(is_metadata_exempt(".agents/skills/qdev/SKILL.md", &storage));
+    assert!(is_metadata_exempt(".cursor/rules/qdev.mdc", &storage));
 
     assert!(!is_metadata_exempt(
         "crates/foundation/src/lib.rs",

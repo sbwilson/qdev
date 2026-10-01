@@ -37,3 +37,7 @@ DerivedData/
 .bmad-loop/cache/
 .bmad-loop/policy.toml
 _bmad/render/
+.qdev/cache/
+.qdev/leases/
+.qdev/chores/
+.qdev.local.toml

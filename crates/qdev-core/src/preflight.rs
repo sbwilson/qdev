@@ -1,4 +1,4 @@
-//! Git Preflight Guard per Story 3.7.
+//! Git Preflight Guard [E3S7].
 //!
 //! Enforces working tree cleanliness within leased story module boundaries (or active chore
 //! allowlists), integration branch remote freshness, merge-base staleness limits, and zero
@@ -112,6 +112,15 @@ pub fn is_metadata_exempt(rel_path: &str, storage: &StorageConfig) -> bool {
         return true;
     }
     if normalized == "docs" || normalized.starts_with("docs/") {
+        return true;
+    }
+    if normalized == ".claude" || normalized.starts_with(".claude/") {
+        return true;
+    }
+    if normalized == ".agents" || normalized.starts_with(".agents/") {
+        return true;
+    }
+    if normalized == ".cursor" || normalized.starts_with(".cursor/") {
         return true;
     }
 

@@ -669,15 +669,15 @@ impl DoctorSection for GitDoctorSection {
         let ahead = integration.as_ref().and_then(|i| i.ahead);
         let behind = integration.as_ref().and_then(|i| i.behind);
 
-        let status = if !clean {
-            "mismatch"
-        } else if matches!(
-            int_state.as_deref(),
-            Some("diverged")
-                | Some("refs_missing")
-                | Some("integration_branch_missing")
-                | Some("remote_ref_missing")
-        ) {
+        let status = if !clean
+            || matches!(
+                int_state.as_deref(),
+                Some("diverged")
+                    | Some("refs_missing")
+                    | Some("integration_branch_missing")
+                    | Some("remote_ref_missing")
+            )
+        {
             "mismatch"
         } else {
             "ok"

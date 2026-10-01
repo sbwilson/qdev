@@ -6,6 +6,7 @@ use std::time::Duration;
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
+use tempfile::TempDir;
 
 #[test]
 fn test_offline_execution_with_blackhole_proxies() {
@@ -47,11 +48,13 @@ fn test_offline_execution_with_blackhole_proxies() {
     assert_eq!(val["schema_version"], "1");
     assert_eq!(val["version"], "0.1.0");
 
-    // 3. Status JSON in non-interactive mode — Story 2.12 replaced the
+    // 3. Status JSON in non-interactive mode — [E2S12] replaced the
     //    `PulseStatus` stub with the real pulse: outside a workspace that is
     //    `workspace: false` with every other field null, produced with zero network.
+    let empty_temp = TempDir::new().unwrap();
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     let assert = cmd
+        .current_dir(empty_temp.path())
         .env("HTTP_PROXY", proxy_url)
         .env("HTTPS_PROXY", proxy_url)
         .env("ALL_PROXY", proxy_url)

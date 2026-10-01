@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "gate": "qdev-scope",
+  "story": "E4S10",
+  "commit": "b326405",
+  "status": "pass",
+  "exit_code": 0,
+  "duration_ms": 60,
+  "metric": null,
+  "summary": "scope check passed: all changed files within target_modules",
+  "output_sha256": "f5ca50e228ca8e2e69f85550a9e5de8e9fea96905eca409d1ebf9c364aeec76c",
+  "run_by": {
+    "type": "human",
+    "id": "simon"
+  },
+  "ran_at": "2026-10-01T18:17:28Z",
+  "verifies": [],
+  "skipped_locally": false
+}

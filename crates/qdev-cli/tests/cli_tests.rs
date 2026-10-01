@@ -86,10 +86,12 @@ fn test_unknown_flag_json() {
 
 #[test]
 fn test_default_command_text() {
-    // Story 2.12 (D-1): outside an initialized workspace the default command is
+    // [E2S12] (D-1): outside an initialized workspace the default command is
+    let empty_temp = TempDir::new().unwrap();
     // the one-line init hint…
     let mut cmd = Command::cargo_bin("qdev").unwrap();
-    cmd.assert()
+    cmd.current_dir(empty_temp.path())
+        .assert()
         .success()
         .code(0)
         .stdout(predicate::str::starts_with(
@@ -125,9 +127,10 @@ fn test_default_command_text() {
 
 #[test]
 fn test_status_command_text() {
-    // `status` keeps the same behaviour as the default command (Story 2.12).
+    let empty_temp = TempDir::new().unwrap();
     let mut cmd = Command::cargo_bin("qdev").unwrap();
-    cmd.arg("status")
+    cmd.current_dir(empty_temp.path())
+        .arg("status")
         .assert()
         .success()
         .code(0)
@@ -164,7 +167,7 @@ fn test_status_command_text() {
 
 #[test]
 fn test_non_interactive_flag() {
-    // Story 2.12 replaced the `PulseStatus` stub (name/version/interactivity) with
+    // [E2S12] replaced the `PulseStatus` stub (name/version/interactivity) with
     // the real pulse: outside a workspace that is `workspace: false` with every
     // other field null, and the command still never prompts (AD-12).
     let temp = TempDir::new().unwrap();

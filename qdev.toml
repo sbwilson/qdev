@@ -1,0 +1,39 @@
+[project]
+name = "qdev"
+
+[teams]
+"core" = ["simon"]
+
+[models]
+specify = "claude-3-7-sonnet"
+develop = "claude-3-7-sonnet"
+review = "claude-3-7-sonnet"
+
+[[modules]]
+id = "qdev-core"
+paths = ["crates/qdev-core/**"]
+layer = 1
+
+[[modules]]
+id = "qdev-cli"
+paths = ["crates/qdev-cli/**"]
+layer = 2
+may_depend_on = ["qdev-core"]
+
+[[gates]]
+id = "check"
+command = "cargo check --workspace"
+kind = "check"
+on_transition = ["review"]
+
+[[gates]]
+id = "test"
+command = "cargo test -- --test-threads=4"
+kind = "check"
+on_transition = ["review"]
+
+[[gates]]
+id = "clippy"
+command = "cargo clippy"
+kind = "check"
+on_transition = ["review"]

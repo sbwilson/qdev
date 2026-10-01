@@ -121,7 +121,7 @@ impl RejectionAttribution {
         self.constraint_id.is_some()
             || self.gate_id.is_some()
             || self.policy.is_some()
-            || self.blocking_ids.as_ref().map_or(false, |b| !b.is_empty())
+            || self.blocking_ids.as_ref().is_some_and(|b| !b.is_empty())
             || self.holder.is_some()
     }
 

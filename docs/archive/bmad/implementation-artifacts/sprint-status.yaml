@@ -94,7 +94,7 @@ development_status:
   3-13-epic-sprint-reviews-sprint-close: done
   epic-3-retrospective: done
 
-  epic-4: in-progress
+  epic-4: done
   4-1-qdev-context-projection: review
   4-2-attributed-rejections: review
   4-3-hygiene-directive-citation-template: review
@@ -104,7 +104,7 @@ development_status:
   4-7-doctor-environment-skills-mcp-hooks-leases: review
   4-8-structured-multi-perspective-synthesis-template: review
   4-9-qdev-graph-rendering-options: done
-  4-10-self-hosting-handover: backlog
+  4-10-self-hosting-handover: done
   epic-4-retrospective: optional
 action_items:
   - id: "epic-1-retro-item-1-make-qdev-init-produce-a-cache-inspect_c"
