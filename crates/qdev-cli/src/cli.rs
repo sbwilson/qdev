@@ -493,13 +493,21 @@ pub struct ValidateArgs {
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]
 pub struct GraphArgs {
-    /// Emit Graphviz DOT (the only supported output format for now)
+    /// Emit Graphviz DOT
     #[arg(long)]
     pub dot: bool,
 
     /// Filter to one epic's stories (e.g. E12)
     #[arg(long = "epic")]
     pub epic: Option<String>,
+
+    /// Filter to stories assigned to a sprint (e.g. 5 or sprint-5)
+    #[arg(long = "sprint")]
+    pub sprint: Option<String>,
+
+    /// Highlight the longest dependency chain (critical path)
+    #[arg(long = "highlight-critical-path")]
+    pub highlight_critical_path: bool,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq, Eq, Default)]

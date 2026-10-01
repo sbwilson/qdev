@@ -1007,3 +1007,27 @@ fn test_round_trip_mcp_install_payload_against_actual_output() {
     validate_against_schema(&schema, &instance);
 }
 
+#[test]
+fn test_round_trip_graph_payload_against_actual_output() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+    write_story_fixture(root);
+
+    let schema_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .args(["schema", "payload", "graph", "--json"])
+        .assert()
+        .success();
+    let schema: Value = serde_json::from_slice(&schema_assert.get_output().stdout).unwrap();
+
+    let graph_assert = Command::cargo_bin("qdev")
+        .unwrap()
+        .current_dir(root)
+        .args(["graph", "--json"])
+        .assert()
+        .success()
+        .code(0);
+    let instance: Value = serde_json::from_slice(&graph_assert.get_output().stdout).unwrap();
+    validate_against_schema(&schema, &instance);
+}

@@ -275,9 +275,7 @@ fn run(raw_args: &[String]) -> i32 {
         _ => false,
     };
 
-    if root.join("qdev.toml").is_file()
-        && !skip_boot_ensure
-    {
+    if root.join("qdev.toml").is_file() && !skip_boot_ensure {
         match qdev_core::ensure_cache_with_summary(&root, &annotated_config.config.storage) {
             Ok((_, summary)) => boot_summary = Some(summary),
             Err(e) => {
@@ -406,9 +404,15 @@ fn run(raw_args: &[String]) -> i32 {
             boot_summary.as_ref(),
         )
         .as_i32(),
-        Some(Commands::Doctor(ref doctor_args)) => {
-            handle_doctor(doctor_args, &annotated_config, &cli, &output, &current_dir, interactivity).as_i32()
-        }
+        Some(Commands::Doctor(ref doctor_args)) => handle_doctor(
+            doctor_args,
+            &annotated_config,
+            &cli,
+            &output,
+            &current_dir,
+            interactivity,
+        )
+        .as_i32(),
         Some(Commands::Claim(ref claim_args)) => handlers::claim::handle_claim(
             claim_args,
             &annotated_config,
@@ -479,16 +483,14 @@ fn run(raw_args: &[String]) -> i32 {
             handlers::next::handle_next(next_args, &annotated_config, &cli, &output, &current_dir)
                 .as_i32()
         }
-        Some(Commands::Context(ref context_args)) => {
-            handlers::context::handle_context(
-                context_args,
-                &annotated_config,
-                &cli,
-                &output,
-                &current_dir,
-            )
-            .as_i32()
-        }
+        Some(Commands::Context(ref context_args)) => handlers::context::handle_context(
+            context_args,
+            &annotated_config,
+            &cli,
+            &output,
+            &current_dir,
+        )
+        .as_i32(),
         Some(Commands::Gate(ref gate_args)) => {
             handlers::gate::handle_gate(gate_args, &annotated_config, &cli, &output, &root).as_i32()
         }
@@ -1120,7 +1122,8 @@ pub(crate) fn check_governance_gate(
     }
 
     if interactivity.is_non_interactive() {
-        let (policy, rule, msg) = if classification.is_cross_team && classification.is_out_of_lease {
+        let (policy, rule, msg) = if classification.is_cross_team && classification.is_out_of_lease
+        {
             (
                 "cross_team_governance",
                 "Non-interactive mutations crossing team ownership boundaries and lease scope require override and justification",
@@ -2120,68 +2123,6 @@ fn handle_list(
     ExitCode::Success
 }
 
-/// Relation kinds rendered as graph edges; `traces_to`, `verifies`, `mitigates`, `closes_dw`,
-/// and `governed_by` connect stories to non-story entities and are out of scope for this
-/// story-only graph.
-const GRAPH_EDGE_RELATIONS: [&str; 3] = ["depends_on", "extends", "supersedes"];
-
-fn dot_status_style(status: Option<&str>) -> (&'static str, &'static str) {
-    match status {
-        Some("draft") => ("lightgray", "solid"),
-        Some("ready") => ("lightblue", "solid"),
-        Some("in-progress") => ("yellow", "solid"),
-        Some("review") => ("orange", "solid"),
-        Some("done") => ("green", "solid"),
-        Some("superseded") | Some("abandoned") => ("gray45", "dashed"),
-        _ => ("white", "solid"),
-    }
-}
-
-/// Escapes a value for use inside a double-quoted DOT string literal.
-fn dot_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn render_graph_dot(
-    nodes: &[qdev_core::ListEntryProjection],
-    relations: &[qdev_core::RelationRecord],
-) -> String {
-    let node_ids: std::collections::HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
-
-    let mut dot = String::from("digraph qdev {\n");
-    for node in nodes {
-        let (color, style) = dot_status_style(node.status.as_deref());
-        let label = match &node.title {
-            Some(title) => format!("{}\\n{}", dot_escape(&node.id), dot_escape(title)),
-            None => dot_escape(&node.id),
-        };
-        dot.push_str(&format!(
-            "  \"{}\" [label=\"{}\", style=\"filled,{}\", fillcolor=\"{}\"];\n",
-            dot_escape(&node.id),
-            label,
-            style,
-            color
-        ));
-    }
-    for rel in relations {
-        if !GRAPH_EDGE_RELATIONS.contains(&rel.relation.as_str()) {
-            continue;
-        }
-        if !node_ids.contains(rel.source_id.as_str()) || !node_ids.contains(rel.target_id.as_str())
-        {
-            continue;
-        }
-        dot.push_str(&format!(
-            "  \"{}\" -> \"{}\" [label=\"{}\"];\n",
-            dot_escape(&rel.source_id),
-            dot_escape(&rel.target_id),
-            dot_escape(&rel.relation)
-        ));
-    }
-    dot.push_str("}\n");
-    dot
-}
-
 fn handle_graph(
     graph_args: &cli::GraphArgs,
     annotated_config: &qdev_core::AnnotatedConfig,
@@ -2189,38 +2130,41 @@ fn handle_graph(
     output: &OutputEmitter,
     current_dir: &std::path::Path,
 ) -> ExitCode {
-    // Both refusals are about the shape of the flags, so they are usage errors (exit 2) like
-    // every other flag rejection in this binary — not policy refusals (exit 3), which AD-13
-    // reserves for preflight, lease, governance, and missing-confirmation refusals. A script
-    // branching on exit 3 must not be sent down the "a human has to confirm something" path by
-    // a plain typo.
-    if !graph_args.dot {
-        let err = QdevError::usage_error(
-            "qdev graph currently requires '--dot'; no other output format is supported yet",
-        )
-        .with_details(serde_json::json!({ "flag": "--dot" }));
+    if graph_args.dot && cli.json {
+        let err = QdevError::usage_error("Cannot combine '--dot' and '--json' output flags")
+            .with_details(serde_json::json!({ "flags": ["--dot", "--json"] }));
         let _ = output.emit_error(&err);
         return ExitCode::UsageError;
     }
 
-    if cli.json {
-        let err = QdevError::usage_error(
-            "qdev graph does not support '--json' yet; only '--dot' output is available",
-        )
-        .with_details(serde_json::json!({ "flag": "--json" }));
+    if !graph_args.dot && !cli.json {
+        let err =
+            QdevError::usage_error("qdev graph requires either '--dot' or '--json' output format")
+                .with_details(serde_json::json!({ "flag": "output_format" }));
         let _ = output.emit_error(&err);
         return ExitCode::UsageError;
     }
 
     let root = qdev_core::find_workspace_root(current_dir);
 
-    if let Err(e) = reject_empty_filter_values(&[("--epic", graph_args.epic.as_deref())]) {
+    if let Err(e) = reject_empty_filter_values(&[
+        ("--epic", graph_args.epic.as_deref()),
+        ("--sprint", graph_args.sprint.as_deref()),
+    ]) {
         let _ = output.emit_error(&e);
         return e.exit_code();
     }
 
-    let mut query_opts = qdev_core::ListQueryOptions::new(qdev_core::EntityKind::Story);
-    query_opts.epic_id = graph_args.epic.clone();
+    let normalized_sprint = match graph_args.sprint.as_deref() {
+        Some(s) => match qdev_core::normalize_sprint_id(s) {
+            Ok(num) => Some(num),
+            Err(e) => {
+                let _ = output.emit_error(&e);
+                return e.exit_code();
+            }
+        },
+        None => None,
+    };
 
     let store = match open_query_store(&root, annotated_config) {
         Ok(s) => s,
@@ -2230,30 +2174,45 @@ fn handle_graph(
         }
     };
 
-    let nodes = match qdev_core::query_list(&store, &query_opts) {
-        Ok(r) => r,
+    let options = qdev_core::StoryGraphOptions {
+        epic: graph_args.epic.clone(),
+        sprint: normalized_sprint,
+        highlight_critical_path: graph_args.highlight_critical_path,
+    };
+
+    let payload = match qdev_core::build_story_graph(
+        &store,
+        &root,
+        Some(&annotated_config.config.storage),
+        &options,
+    ) {
+        Ok(p) => p,
         Err(e) => {
             let _ = output.emit_error(&e);
             return e.exit_code();
         }
     };
 
-    let relations = match store.list_relations() {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = output.emit_error(&e);
-            return e.exit_code();
+    if cli.json {
+        let envelope = JsonEnvelope::new(payload);
+        if let Err(e) = output.emit_envelope(&envelope) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit graph JSON envelope: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
         }
-    };
-
-    let dot = render_graph_dot(&nodes, &relations);
-    if let Err(e) = output.emit_text(&dot) {
-        let err = QdevError::infrastructure_failure(
-            "io_error",
-            format!("Failed to emit graph output: {}", e),
-        );
-        let _ = output.emit_error(&err);
-        return ExitCode::InfrastructureFailure;
+    } else {
+        let dot = qdev_core::render_graph_dot(&payload);
+        if let Err(e) = output.emit_text(&dot) {
+            let err = QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to emit graph output: {}", e),
+            );
+            let _ = output.emit_error(&err);
+            return ExitCode::InfrastructureFailure;
+        }
     }
 
     ExitCode::Success
@@ -2977,7 +2936,11 @@ fn field_value<'a>(
     section: &'a qdev_core::DoctorSectionReport,
     key: &str,
 ) -> Option<&'a serde_json::Value> {
-    section.fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    section
+        .fields
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v)
 }
 
 fn field_str<'a>(section: &'a qdev_core::DoctorSectionReport, key: &str) -> Option<&'a str> {
@@ -3007,7 +2970,10 @@ fn render_doctor_text(
                 let int_branch = field_str(git, "integration_branch").unwrap_or("develop");
                 let int_state = field_str(git, "integration_state").unwrap_or("");
                 if branch == int_branch && int_state == "up_to_date" {
-                    format!("[✓] Git: {} tracks {}/{}; clean tree", branch, remote, int_branch)
+                    format!(
+                        "[✓] Git: {} tracks {}/{}; clean tree",
+                        branch, remote, int_branch
+                    )
                 } else {
                     format!("[✓] Git: {}; clean tree", branch)
                 }
@@ -3017,17 +2983,25 @@ fn render_doctor_text(
                 let remote = field_str(git, "remote").unwrap_or("origin");
                 let int_branch = field_str(git, "integration_branch").unwrap_or("develop");
                 let int_state = field_str(git, "integration_state").unwrap_or("");
-                let clean = field_value(git, "clean").and_then(|v| v.as_bool()).unwrap_or(false);
+                let clean = field_value(git, "clean")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let dirty_files = field_u64(git, "dirty_files").unwrap_or(0);
                 let is_tracks = branch == int_branch;
                 if clean {
                     if int_state == "diverged" {
-                        format!("[!] Git: {}; clean tree, diverged from {}/{}", branch, remote, int_branch)
+                        format!(
+                            "[!] Git: {}; clean tree, diverged from {}/{}",
+                            branch, remote, int_branch
+                        )
                     } else if int_state == "refs_missing"
                         || int_state == "integration_branch_missing"
                         || int_state == "remote_ref_missing"
                     {
-                        format!("[!] Git: {}; clean tree, integration ref missing ({})", branch, int_state)
+                        format!(
+                            "[!] Git: {}; clean tree, integration ref missing ({})",
+                            branch, int_state
+                        )
                     } else {
                         format!("[!] Git: {}; clean tree", branch)
                     }
@@ -3038,9 +3012,15 @@ fn render_doctor_text(
                         "dirty tree".to_string()
                     };
                     if is_tracks && int_state == "up_to_date" {
-                        format!("[!] Git: {} tracks {}/{}; {}", branch, remote, int_branch, tree_desc)
+                        format!(
+                            "[!] Git: {} tracks {}/{}; {}",
+                            branch, remote, int_branch, tree_desc
+                        )
                     } else if int_state == "diverged" {
-                        format!("[!] Git: {}; {}, diverged from {}/{}", branch, tree_desc, remote, int_branch)
+                        format!(
+                            "[!] Git: {}; {}, diverged from {}/{}",
+                            branch, tree_desc, remote, int_branch
+                        )
                     } else {
                         format!("[!] Git: {}; {}", branch, tree_desc)
                     }
@@ -3068,7 +3048,9 @@ fn render_doctor_text(
         let status = field_str(cache, "status").unwrap_or("mismatch");
         let version = field_u64(cache, "cache_schema_version").unwrap_or(3);
         let entity_count = field_u64(cache, "entity_count").unwrap_or(0);
-        let val_findings = val_sec.and_then(|v| field_u64(v, "finding_count")).unwrap_or(0);
+        let val_findings = val_sec
+            .and_then(|v| field_u64(v, "finding_count"))
+            .unwrap_or(0);
         let cache_path = storage
             .map(|s| format!("{}/cache.sqlite", s.cache_dir.trim_end_matches('/')))
             .unwrap_or_else(|| ".qdev/cache/cache.sqlite".to_string());
@@ -3114,9 +3096,15 @@ fn render_doctor_text(
         let declared = field_u64(modules, "declared_count").unwrap_or(0);
         let unmatched = field_u64(modules, "unmatched_count").unwrap_or(0);
         if status == "ok" {
-            format!("[✓] Modules: {} declared, all path globs match at least one file", declared)
+            format!(
+                "[✓] Modules: {} declared, all path globs match at least one file",
+                declared
+            )
         } else if status == "mismatch" {
-            format!("[!] Modules: {} declared, {} path glob(s) match zero files", declared, unmatched)
+            format!(
+                "[!] Modules: {} declared, {} path glob(s) match zero files",
+                declared, unmatched
+            )
         } else {
             "[x] Modules: unavailable".to_string()
         }
@@ -3139,9 +3127,15 @@ fn render_doctor_text(
             String::new()
         };
         if status == "ok" {
-            format!("[✓] Gates: {} configured, all executables found{}", configured, skip_clause)
+            format!(
+                "[✓] Gates: {} configured, all executables found{}",
+                configured, skip_clause
+            )
         } else if status == "mismatch" {
-            format!("[!] Gates: {} configured, {} missing executable(s){}", configured, missing, skip_clause)
+            format!(
+                "[!] Gates: {} configured, {} missing executable(s){}",
+                configured, missing, skip_clause
+            )
         } else {
             "[x] Gates: unavailable".to_string()
         }
@@ -3200,9 +3194,15 @@ fn render_doctor_text(
         let outdated = field_u64(skills, "outdated_count").unwrap_or(0);
         let binary_ver = field_str(skills, "binary_version").unwrap_or(env!("CARGO_PKG_VERSION"));
         if status == "ok" {
-            format!("[✓] Skills: {} installed, up to date with binary {}", installed, binary_ver)
+            format!(
+                "[✓] Skills: {} installed, up to date with binary {}",
+                installed, binary_ver
+            )
         } else if status == "mismatch" {
-            format!("[!] Skills: {} installed, {} outdated with binary {}", installed, outdated, binary_ver)
+            format!(
+                "[!] Skills: {} installed, {} outdated with binary {}",
+                installed, outdated, binary_ver
+            )
         } else {
             "[x] Skills: unavailable".to_string()
         }
@@ -3253,14 +3253,30 @@ fn render_doctor_text(
             if stale == 0 {
                 format!("[✓] Leases: {} active leases, 0 stale", active)
             } else {
-                let stale_list = leases.fields.iter().find(|(k, _)| k == "stale_leases").and_then(|(_, v)| v.as_array());
+                let stale_list = leases
+                    .fields
+                    .iter()
+                    .find(|(k, _)| k == "stale_leases")
+                    .and_then(|(_, v)| v.as_array());
                 if let Some(list) = stale_list {
                     if let Some(first) = list.first() {
-                        let story_id = first.get("story_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                        let holder = first.get("holder").and_then(|v| v.as_str()).unwrap_or("unknown");
-                        let worktree = first.get("worktree_path").and_then(|v| v.as_str()).unwrap_or("unknown");
+                        let story_id = first
+                            .get("story_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let holder = first
+                            .get("holder")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let worktree = first
+                            .get("worktree_path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
                         let age = first.get("age_days").and_then(|v| v.as_u64()).unwrap_or(0);
-                        format!("[!] Leases: {} held by {} in {}, {} days old", story_id, holder, worktree, age)
+                        format!(
+                            "[!] Leases: {} held by {} in {}, {} days old",
+                            story_id, holder, worktree, age
+                        )
                     } else {
                         format!("[!] Leases: {} stale lease(s)", stale)
                     }
@@ -3417,7 +3433,7 @@ fn handle_doctor(
 
     if doctor_args.fix {
         // 1. Rewrite git hook shims if in a git repository
-        if let Ok(_) = qdev_core::resolve_hooks_dir(&root) {
+        if qdev_core::resolve_hooks_dir(&root).is_ok() {
             if let Err(e) = qdev_core::install_hooks(&root) {
                 let _ = output.emit_error(&e);
                 return e.exit_code();
@@ -3465,7 +3481,10 @@ fn handle_doctor(
         if !cache_db_path.exists() {
             let storage = &annotated_config.config.storage;
             let lock_path = root.join(&storage.cache_dir).join("write.lock");
-            let _lock = match qdev_core::acquire_write_lock(&lock_path, std::time::Duration::from_millis(5000)) {
+            let _lock = match qdev_core::acquire_write_lock(
+                &lock_path,
+                std::time::Duration::from_millis(5000),
+            ) {
                 Ok(guard) => guard,
                 Err(e) => {
                     let _ = output.emit_error(&e);
@@ -3522,7 +3541,10 @@ fn handle_doctor(
                 if should_rebuild {
                     let storage = &annotated_config.config.storage;
                     let lock_path = root.join(&storage.cache_dir).join("write.lock");
-                    let _lock = match qdev_core::acquire_write_lock(&lock_path, std::time::Duration::from_millis(5000)) {
+                    let _lock = match qdev_core::acquire_write_lock(
+                        &lock_path,
+                        std::time::Duration::from_millis(5000),
+                    ) {
                         Ok(guard) => guard,
                         Err(e) => {
                             let _ = output.emit_error(&e);

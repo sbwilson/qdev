@@ -173,6 +173,7 @@ pub enum PayloadKind {
     Context,
     SkillInstall,
     McpInstall,
+    Graph,
 }
 
 impl PayloadKind {
@@ -203,6 +204,7 @@ impl PayloadKind {
             PayloadKind::Context => include_str!("../schemas/payload-context.json"),
             PayloadKind::SkillInstall => include_str!("../schemas/payload-skill-install.json"),
             PayloadKind::McpInstall => include_str!("../schemas/payload-mcp-install.json"),
+            PayloadKind::Graph => include_str!("../schemas/payload-graph.json"),
         }
     }
 
@@ -244,11 +246,12 @@ impl PayloadKind {
             PayloadKind::Context => "context",
             PayloadKind::SkillInstall => "skill_install",
             PayloadKind::McpInstall => "mcp_install",
+            PayloadKind::Graph => "graph",
         }
     }
 
     /// Returns an array of all currently-supported payload kinds.
-    pub const fn all() -> &'static [PayloadKind; 24] {
+    pub const fn all() -> &'static [PayloadKind; 25] {
         &[
             PayloadKind::Story,
             PayloadKind::Error,
@@ -274,6 +277,7 @@ impl PayloadKind {
             PayloadKind::Context,
             PayloadKind::SkillInstall,
             PayloadKind::McpInstall,
+            PayloadKind::Graph,
         ]
     }
 
@@ -322,6 +326,7 @@ impl PayloadKind {
                 Ok(PayloadKind::SkillInstall)
             }
             "mcp_install" | "install_mcp" | "mcpinstall" => Ok(PayloadKind::McpInstall),
+            "graph" | "graphs" => Ok(PayloadKind::Graph),
             _ => Err(QdevError::usage_error(format!(
                 "Unknown payload name '{}'. Valid payload names: {}",
                 s,

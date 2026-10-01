@@ -9,6 +9,7 @@ pub mod envelope;
 pub mod errors;
 pub mod gate;
 pub mod governance;
+pub mod graph;
 pub mod hook;
 pub mod hygiene;
 pub mod id;
@@ -134,6 +135,11 @@ pub use store::{
 pub use dag::{
     allowed_kind_pairs, find_dependency_cycle, is_known_relation, is_valid_kind_pair,
     relation_names, validate_proposed_relation_map, would_create_cycle,
+};
+
+pub use graph::{
+    build_story_graph, render_graph_dot, GraphEdge, GraphNode, GraphPayload, StoryGraphOptions,
+    GRAPH_EDGE_RELATIONS,
 };
 
 pub use doctor::{

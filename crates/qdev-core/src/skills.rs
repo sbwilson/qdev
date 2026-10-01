@@ -265,8 +265,20 @@ const ALL_COMMANDS: &[CommandDefinition] = &[
                 summary: "Emit Graphviz DOT",
             },
             OptionDefinition {
-                name: "--epic",
+                name: "--json",
+                summary: "Emit structured JSON envelope",
+            },
+            OptionDefinition {
+                name: "--epic <ID>",
                 summary: "Filter to one epic's stories",
+            },
+            OptionDefinition {
+                name: "--sprint <ID>",
+                summary: "Filter to one sprint's stories",
+            },
+            OptionDefinition {
+                name: "--highlight-critical-path",
+                summary: "Highlight critical path in output",
             },
         ],
     },

@@ -1,0 +1,92 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Graph Payload Schema",
+  "description": "Output shape of `qdev graph --json`. Reports story nodes and relation edges, with optional critical path highlighting. Schema changes follow semver on schema_version; additive fields do not bump the major.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "nodes",
+    "edges"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "nodes": {
+      "type": "array",
+      "description": "Story nodes matching query filters, ordered by id ascending.",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "status",
+          "blocked",
+          "lease_holder",
+          "critical_path",
+          "epic_id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": ["string", "null"]
+          },
+          "status": {
+            "type": ["string", "null"]
+          },
+          "blocked": {
+            "type": "boolean"
+          },
+          "lease_holder": {
+            "type": ["string", "null"]
+          },
+          "critical_path": {
+            "type": "boolean"
+          },
+          "epic_id": {
+            "type": ["string", "null"]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "edges": {
+      "type": "array",
+      "description": "Story relation edges between included nodes, ordered by source, target, relation.",
+      "items": {
+        "type": "object",
+        "required": [
+          "source",
+          "target",
+          "relation",
+          "critical_path"
+        ],
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "relation": {
+            "type": "string"
+          },
+          "critical_path": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "critical_path": {
+      "type": "array",
+      "description": "Ordered story IDs forming the longest directed dependency chain when --highlight-critical-path is requested.",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}
