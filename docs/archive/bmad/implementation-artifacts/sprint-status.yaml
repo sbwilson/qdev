@@ -16,7 +16,7 @@
 # story_location: "{project-root}/docs/bmad/implementation-artifacts"
 
 generated: 09-06-2026 08:48
-last_updated: 10-01-2026 21:26
+last_updated: 10-02-2026 08:32
 project: qdev
 project_key: NOKEY
 tracking_system: file-system
@@ -95,17 +95,17 @@ development_status:
   epic-3-retrospective: done
 
   epic-4: done
-  4-1-qdev-context-projection: review
-  4-2-attributed-rejections: review
-  4-3-hygiene-directive-citation-template: review
-  4-4-skill-generation-install: review
-  4-5-mcp-server: review
-  4-6-the-five-skills: review
-  4-7-doctor-environment-skills-mcp-hooks-leases: review
-  4-8-structured-multi-perspective-synthesis-template: review
+  4-1-qdev-context-projection: done
+  4-2-attributed-rejections: done
+  4-3-hygiene-directive-citation-template: done
+  4-4-skill-generation-install: done
+  4-5-mcp-server: done
+  4-6-the-five-skills: done
+  4-7-doctor-environment-skills-mcp-hooks-leases: done
+  4-8-structured-multi-perspective-synthesis-template: done
   4-9-qdev-graph-rendering-options: done
   4-10-self-hosting-handover: done
-  epic-4-retrospective: optional
+  epic-4-retrospective: done
 action_items:
   - id: "epic-1-retro-item-1-make-qdev-init-produce-a-cache-inspect_c"
     epic: 1
@@ -241,3 +241,35 @@ action_items:
     owner: "Simon"
     status: done
     ref: "docs/bmad/implementation-artifacts/epic-3-retro-2026-09-27.md"
+  - id: "epic-4-retro-item-19-resolve-12-test-clippy-warnings-in-crate"
+    epic: 4
+    action: "Resolve 12 test clippy warnings in crates/qdev-core/tests/"
+    owner: "Simon"
+    status: open
+    ref: "docs/bmad/implementation-artifacts/epic-4-retro-2026-10-02.md"
+  - id: "epic-4-retro-item-20-apply-cargo-fmt-to-clean-test-formatting"
+    epic: 4
+    action: "Apply cargo fmt to clean test formatting drift in skills_tests.rs and
+      suite.rs"
+    owner: "Simon"
+    status: open
+    ref: "docs/bmad/implementation-artifacts/epic-4-retro-2026-10-02.md"
+  - id: "epic-4-retro-item-21-decompose-main-rs-by-extracting-graph-an"
+    epic: 4
+    action: "Decompose main.rs by extracting graph and doctor handlers into crates/qdev-cli/src/handlers/"
+    owner: "Simon"
+    status: open
+    ref: "docs/bmad/implementation-artifacts/epic-4-retro-2026-10-02.md"
+  - id: "epic-4-retro-item-22-close-resolved-entries-in-deferred-work"
+    epic: 4
+    action: "Close resolved entries in deferred work ledger (graph DOT, context schema,
+      next schema, gate_run schema, corrupt cache init)"
+    owner: "Simon"
+    status: open
+    ref: "docs/bmad/implementation-artifacts/epic-4-retro-2026-10-02.md"
+  - id: "epic-4-retro-item-23-install-git-hook-shims-in-workspace-via"
+    epic: 4
+    action: "Install Git hook shims in workspace via qdev install hooks"
+    owner: "Simon"
+    status: open
+    ref: "docs/bmad/implementation-artifacts/epic-4-retro-2026-10-02.md"

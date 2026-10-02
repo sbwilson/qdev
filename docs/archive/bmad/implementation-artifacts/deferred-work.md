@@ -1,5 +1,7 @@
 # Deferred Work
 
+**Version / Release Milestone:** `v0.1.0` (commit `8a9405a`, verified with `qdev --version` / `qdev --version --json`)
+
 Items deferred from reviews and implementation, kept out of the story they surfaced in.
 
 **Every entry carries a `Review by:` point** — a story, an epic-planning moment, or a measurable
@@ -25,6 +27,7 @@ summary full of markup and an evidence field that contradicts itself.
 - source_spec: `docs/bmad/implementation-artifacts/spec-1-10-relations-dag-computed-blocked.md`
   summary: `qdev graph --dot [--epic E12]` — render the story dependency graph as Graphviz DOT, nodes colored by status, edges labelled by relation.
   evidence: Spec 1.10 combined relation validation (kind-pairs, dangling/cycle findings, `relate`/`unrelate` write path) with DOT graph rendering at ~2811 tokens, well over the 900–1600 target. Graph rendering is a read-only visualization layered on top of the relation/DAG work and isn't required by any downstream story (1.11 `qdev validate` and Epic 2 only need relations, cycle detection, and computed `blocked`), so it was split out as the smaller, independently shippable piece. Review by: epic 4 story 4.9 (`qdev graph` rendering options), which owns this surface.
+  resolved: 2026-10-02 — by story 4.9 (`spec-4-9-qdev-graph-rendering-options.md`, commit `b326405`): implemented `qdev graph --dot` with sprint filtering, distinct styling for blocked/leased stories, and critical-path highlighting.
 
 ## Deferred from: code review of spec-1-10-relations-dag-computed-blocked (2026-09-09)
 
@@ -44,14 +47,17 @@ summary full of markup and an evidence field that contradicts itself.
 - source_spec: `docs/bmad/implementation-artifacts/spec-1-13-qdev-schema.md`
   summary: Hand-author and ship `qdev schema payload context` once `qdev context` (Epic 2/3 scope) has a live command to verify the schema against.
   evidence: Spec 1.13 intentionally scoped payload schemas to `story`, `error`, and `validate` — the three payload kinds with a live command today. `context` has no command yet, so there is no real output to round-trip test against; hand-authoring it now would be unverifiable. Review by: with the story that implements `qdev context` (epic 2/3 scope).
+  resolved: 2026-10-02 — by story 4.1 (`spec-4-1-qdev-context-projection.md`, commit `151e64e`): context payload schema defined in `crates/qdev-core/src/schema.rs` and printable via `qdev schema payload context`.
 
 - source_spec: `docs/bmad/implementation-artifacts/spec-1-13-qdev-schema.md`
   summary: Hand-author and ship `qdev schema payload next` once `qdev next` (Epic 2/3 scope) has a live command to verify the schema against.
   evidence: Same rationale as `context` above — `qdev next` is not implemented yet, so its payload schema cannot be round-trip verified and was deferred rather than hand-authored blind. Review by: with the story that implements `qdev next` (epic 2 story 2.11).
+  resolved: 2026-09-20 — by story 2.11 (`spec-2-11-qdev-next.md`): next payload schema registered in `schema.rs` and printable via `qdev schema payload next`.
 
 - source_spec: `docs/bmad/implementation-artifacts/spec-1-13-qdev-schema.md`
   summary: Hand-author and ship `qdev schema payload gate_run` (as an output payload, distinct from the existing `EntityKind::Evidence` frontmatter schema aliased to `gate_run`) once `qdev gate run` (Epic 3 scope) has a live command whose `--json` output payload can be verified.
   evidence: Same rationale as `context`/`next` above — Story 1.13 only ships payload schemas with a real command to round-trip test against; `gate run`'s output-payload shape (as opposed to its evidence-record frontmatter, already schema-printable via `qdev schema gate_run`) is Epic 3 scope.
+  resolved: 2026-09-25 — by story 3.5 (`spec-3-5-evidence-bundles.md`): gate_run output payload schema registered in `schema.rs` and printable via `qdev schema payload gate_run`.
 
 ## Deferred from: code review of spec-1-14-cache-version-stamp-hardening (2026-09-10) Review by: with the story that implements `qdev gate run` (epic 3 story 3.1).
 
@@ -408,9 +414,11 @@ document is not a work list. Nothing below may be marked done without a spec nam
 - source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-11-pass-3.md`
   summary: `qdev graph` refuses `--json` with exit 2, contradicting AD-13 and the CLI reference's "every command accepts `--json`".
   evidence: `main.rs:1338-1346`. `qdev graph --dot --json` → exit 2 `usage_error`. The refusal is undocumented: `cli-reference.md:54` mentions only that `--dot` is required. Either the contract admits an exception for a format-bearing command, or `graph` needs a JSON shape; nobody has decided which. Review by: epic 2 story 2.7 (graph/impact work), which is the next change to that command.
+  resolved: 2026-10-02 — by story 4.9 (`spec-4-9-qdev-graph-rendering-options.md`, commit `b326405`): `qdev graph --json` emits structured nodes and edges conforming to `payload-graph.json`; `--dot` and `--json` remain mutually exclusive format options.
 - source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-11-pass-3.md`
   summary: `qdev schema payload` serves 7 of the 13 payload shapes the binary emits, and `qdev get <entity>/<constraint>` returns a second shape that fails the only `get` schema.
   evidence: `schema.rs:151-233` registers story, error, validate, fix_ids, list, sync, doctor; nothing exists for `init`, `config show`, `status`, `--version`, `create story`, `update`, `relate`, `unrelate`. The constraint projection `{id, owner_id, kind, text}` validated against `payload-story.json` gives seven errors. AD-13 says `qdev schema` prints the schema for any payload, so this is a contract shortfall rather than a missing nicety. Review by: epic 3 story 3.1 (MCP surface), which makes every payload machine-consumed, or the next payload added — whichever comes first.
+  resolved: 2026-10-02 — by stories 2.11, 3.1-3.13, 4.1, 4.4, 4.5, 4.9: `qdev schema payload` now supports 25 payload shapes covering all commands and MCP payloads.
 - source_spec: `docs/bmad/implementation-artifacts/epic-1-cross-story-review-2026-09-11-pass-3.md`
   summary: `qdev update` and `qdev unrelate` report "Entity file not found" for a file that exists and is readable but is off-convention, while `validate` names both the file and the rename that would fix it.
   evidence: `write.rs:1381,1434`. A story with `id: E1S9` in `docs/specs/stories/random-name.md`: `qdev get E1S9` exits 0 with a full projection, `qdev update E1S9 --title Zed` exits 2 "Entity file not found for 'E1S9'". The remedy is wrong — the file is not missing — and the message names neither the path nor the rename, both of which `validate` already computes for `entity_file_off_convention`. **Scheduled 2026-09-11 into `1-24-identity-answers-from-the-rule`**, which folds this in. Review by: with P3-2/P3-6, the identity-resolution work — the message and the resolver are the same rule.
@@ -459,6 +467,7 @@ document is not a work list. Nothing below may be marked done without a spec nam
 - source_spec: `docs/bmad/implementation-artifacts/spec-2-1-state-machine-lifecycle-hooks.md`
   summary: CLI `qdev transition` registers zero hooks, so AC #1's "registered pre/post hooks run" is only satisfiable against the library API.
   evidence: `handle_transition` builds the engine with `qdev_core::TransitionEngine::new()`; no config key or CLI flag resolves hook implementations, and every "hooks run" test constructs the engine in-process. Already ruled Epic 3 scope in the pass-1 review triage log; still true, still unimplemented.
+  resolved: 2026-09-25 — by story 3.6 (`spec-3-6-transition-bound-gates.md`): `TransitionGateHook` implemented and registered in `crates/qdev-cli/src/handlers/transition.rs` and MCP server, executing on-transition gates and justification validation.
 
 ## Deferred from: planning of story 2.10 (2026-09-17)
 
