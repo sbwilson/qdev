@@ -5,10 +5,10 @@ use std::path::Path;
 
 use qdev_core::store::{SqliteStore, Store};
 use qdev_core::{
-    classify_mutation, close_sprint, get_refusal_entry, load_config,
-    run_pre_push, Author, DeferredWorkRecord, EntityKind, EntityRecord, ExitCode, GateConfig, Interactivity, JsonErrorEnvelope,
-    QdevError, RejectionAttribution, SprintCloseOptions,
-    TransitionEngine, TransitionGateHook, TransitionOptions, REFUSAL_CATALOG,
+    classify_mutation, close_sprint, get_refusal_entry, load_config, run_pre_push, Author,
+    DeferredWorkRecord, EntityKind, EntityRecord, ExitCode, GateConfig, Interactivity,
+    JsonErrorEnvelope, QdevError, RejectionAttribution, SprintCloseOptions, TransitionEngine,
+    TransitionGateHook, TransitionOptions, REFUSAL_CATALOG,
 };
 use tempfile::TempDir;
 
@@ -111,17 +111,20 @@ fn test_conformance_refusal_catalog_iteration() {
             code
         );
         let entry = entry.unwrap();
-        assert!(!entry.default_rule.is_empty(), "Rule text must not be empty");
+        assert!(
+            !entry.default_rule.is_empty(),
+            "Rule text must not be empty"
+        );
         assert!(
             entry.required_fields.contains(&"rule"),
             "Entry '{}' must require 'rule' field",
             code
         );
         assert!(
-            entry
-                .required_fields
-                .iter()
-                .any(|f| matches!(*f, "constraint_id" | "gate_id" | "policy" | "blocking_ids" | "holder")),
+            entry.required_fields.iter().any(|f| matches!(
+                *f,
+                "constraint_id" | "gate_id" | "policy" | "blocking_ids" | "holder"
+            )),
             "Entry '{}' must require at least one structured attribution key",
             code
         );
@@ -611,7 +614,7 @@ fn test_conformance_path_blocked_dependency() {
     let root = tmp.path();
     setup_git_workspace(root);
 
-    // Dependency story E12S1 in ready (not done)
+    // [E12S1] Dependency in ready (not done)
     write_story_file(
         root,
         "E12S1",
@@ -634,7 +637,7 @@ updated_by:
 "#,
     );
 
-    // Target story E12S4 depends on E12S1
+    // [E12S4] Target depends on E12S1
     write_story_file(
         root,
         "E12S4",
@@ -872,7 +875,7 @@ fn test_conformance_path_preflight_push_refusal() {
     let root = tmp.path();
     setup_git_workspace(root);
 
-    // Story E12S4 with bridge module leased
+    // [E12S4] Bridge module leased
     write_story_file(
         root,
         "E12S4",

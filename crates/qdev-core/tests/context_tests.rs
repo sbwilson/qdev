@@ -1,4 +1,4 @@
-//! Story 4.1: `qdev context` projection tests — reference-fixture budgets, per-phase section
+//! Context projection tests — reference-fixture budgets, per-phase section
 //! sets, the budget walk (truncation order, first-section exemption), `--stats` numbers,
 //! byte-identical repeated builds, and the I/O-matrix error cases.
 
@@ -51,7 +51,7 @@ fn base_entity(id: &str, kind: EntityKind, source_path: &str) -> EntityRecord {
     }
 }
 
-/// The reference fixture: story E12S4 under epic E12 with the cli-reference `get` envelope's
+/// The reference fixture: entity E12S4 under epic E12 with the cli-reference `get` envelope's
 /// shape — own no_go + inherited rabbit_hole constraints, depends_on/traces_to/governed_by
 /// relations, two target modules — plus the files and a scratchpad entry it re-reads.
 fn setup_reference(root: &Path, store: &SqliteStore) {
@@ -84,7 +84,11 @@ fn setup_reference(root: &Path, store: &SqliteStore) {
     store
         .upsert_entity(&EntityRecord {
             title: Some("Response Buffering".to_string()),
-            ..base_entity("FR-102", EntityKind::Requirement, "docs/specs/requirements/FR-102.md")
+            ..base_entity(
+                "FR-102",
+                EntityKind::Requirement,
+                "docs/specs/requirements/FR-102.md",
+            )
         })
         .unwrap();
     store
@@ -291,11 +295,7 @@ fn test_develop_reference_fixture_section_set_and_priority() {
     .unwrap();
 
     // The develop section set, in fixed priority order (architecture.md §12).
-    let names: Vec<&str> = payload
-        .sections
-        .iter()
-        .map(|s| s.name.as_str())
-        .collect();
+    let names: Vec<&str> = payload.sections.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
         vec![
@@ -324,7 +324,11 @@ fn test_develop_reference_fixture_section_set_and_priority() {
 
     // Every section is non-empty for this fixture.
     for section in &payload.sections {
-        assert_ne!(section.content, "(none)", "section {} unexpectedly empty", section.name);
+        assert_ne!(
+            section.content, "(none)",
+            "section {} unexpectedly empty",
+            section.name
+        );
     }
 }
 
@@ -375,10 +379,7 @@ fn test_develop_sections_carry_the_right_content() {
     let modules = section("modules");
     let bridge_pos = modules.find("bridge ->").unwrap();
     let foundation_pos = modules.find("foundation ->").unwrap();
-    assert!(
-        bridge_pos < foundation_pos,
-        "module ids must be sorted"
-    );
+    assert!(bridge_pos < foundation_pos, "module ids must be sorted");
     assert!(modules.contains("crates/bridge/**"));
 
     // 4. ADR excerpt: Rule from frontmatter `decision`, Prevents from `prevents`.
@@ -395,7 +396,10 @@ fn test_develop_sections_carry_the_right_content() {
     // 6. Scratchpad summary: the key decision entry, seq-ordered, no timestamps.
     let scratchpad = section("scratchpad");
     assert!(scratchpad.contains("#1 (decision): Keep the buffer ring at 16 entries"));
-    assert!(!scratchpad.contains("2026-09-08"), "no timestamps in output");
+    assert!(
+        !scratchpad.contains("2026-09-08"),
+        "no timestamps in output"
+    );
 
     // 7. Bound gates: built-ins in execution order first, then configured, id-sorted.
     let gates = section("gates");
@@ -427,7 +431,11 @@ fn test_develop_dangling_relation_targets_are_marked_unresolved() {
     )
     .unwrap();
     store
-        .upsert_entity(&base_entity("E12S4", EntityKind::Story, "docs/specs/stories/E12S4.md"))
+        .upsert_entity(&base_entity(
+            "E12S4",
+            EntityKind::Story,
+            "docs/specs/stories/E12S4.md",
+        ))
         .unwrap();
     // No rows for AD-99 / FR-999: both dangling.
     store
@@ -454,24 +462,20 @@ fn test_develop_dangling_relation_targets_are_marked_unresolved() {
     )
     .unwrap();
 
-    assert!(
-        payload
-            .sections
-            .iter()
-            .find(|s| s.name == "adr_excerpts")
-            .unwrap()
-            .content
-            .contains("AD-99 (unresolved)")
-    );
-    assert!(
-        payload
-            .sections
-            .iter()
-            .find(|s| s.name == "requirements")
-            .unwrap()
-            .content
-            .contains("FR-999 (unresolved)")
-    );
+    assert!(payload
+        .sections
+        .iter()
+        .find(|s| s.name == "adr_excerpts")
+        .unwrap()
+        .content
+        .contains("AD-99 (unresolved)"));
+    assert!(payload
+        .sections
+        .iter()
+        .find(|s| s.name == "requirements")
+        .unwrap()
+        .content
+        .contains("FR-999 (unresolved)"));
 }
 
 #[test]
@@ -486,7 +490,11 @@ fn test_develop_empty_sections_stay_present_with_none_marker() {
     )
     .unwrap();
     store
-        .upsert_entity(&base_entity("E12S4", EntityKind::Story, "docs/specs/stories/E12S4.md"))
+        .upsert_entity(&base_entity(
+            "E12S4",
+            EntityKind::Story,
+            "docs/specs/stories/E12S4.md",
+        ))
         .unwrap();
 
     let payload = build_context(
@@ -500,11 +508,16 @@ fn test_develop_empty_sections_stay_present_with_none_marker() {
 
     // The section set depends only on the phase, never on the data shape.
     assert_eq!(payload.sections.len(), 8);
-    for name in ["constraints", "modules", "adr_excerpts", "requirements", "scratchpad"] {
+    for name in [
+        "constraints",
+        "modules",
+        "adr_excerpts",
+        "requirements",
+        "scratchpad",
+    ] {
         let section = payload.sections.iter().find(|s| s.name == name).unwrap();
         assert_eq!(
-            section.content,
-            "(none)",
+            section.content, "(none)",
             "empty {} must be (none)-marked, not dropped",
             name
         );
@@ -663,7 +676,11 @@ fn test_review_gate_receipts_and_evidence_use_latest_runs_per_gate() {
     )
     .unwrap();
     store
-        .upsert_entity(&base_entity("E12S4", EntityKind::Story, "docs/specs/stories/E12S4.md"))
+        .upsert_entity(&base_entity(
+            "E12S4",
+            EntityKind::Story,
+            "docs/specs/stories/E12S4.md",
+        ))
         .unwrap();
 
     store
@@ -805,7 +822,11 @@ fn test_review_diff_summary_counts_changes_since_integration_branch() {
     fs::write(root.join("c.txt"), "u1\nu2\nu3\n").unwrap();
 
     store
-        .upsert_entity(&base_entity("E12S4", EntityKind::Story, "docs/specs/stories/E12S4.md"))
+        .upsert_entity(&base_entity(
+            "E12S4",
+            EntityKind::Story,
+            "docs/specs/stories/E12S4.md",
+        ))
         .unwrap();
 
     let payload = build_context(
@@ -865,7 +886,11 @@ fn test_first_section_alone_over_budget_is_kept_whole() {
     )
     .unwrap();
     store
-        .upsert_entity(&base_entity("E12S4", EntityKind::Story, "docs/specs/stories/E12S4.md"))
+        .upsert_entity(&base_entity(
+            "E12S4",
+            EntityKind::Story,
+            "docs/specs/stories/E12S4.md",
+        ))
         .unwrap();
 
     let payload = build_context(
@@ -890,15 +915,16 @@ fn test_first_section_alone_over_budget_is_kept_whole() {
     );
 
     // Every other section is dropped, recorded in drop order.
-    let truncated_names: Vec<&str> = payload
-        .truncated
-        .iter()
-        .map(|t| t.name.as_str())
-        .collect();
+    let truncated_names: Vec<&str> = payload.truncated.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(
         truncated_names,
         vec![
-            "constraints", "modules", "adr_excerpts", "requirements", "scratchpad", "gates",
+            "constraints",
+            "modules",
+            "adr_excerpts",
+            "requirements",
+            "scratchpad",
+            "gates",
             "hygiene"
         ]
     );
@@ -940,14 +966,18 @@ fn test_over_budget_trims_and_drops_lowest_priority_first_in_order() {
     )
     .unwrap();
     store
-        .upsert_entity(&base_entity("E12S4", EntityKind::Story, "docs/specs/stories/E12S4.md"))
+        .upsert_entity(&base_entity(
+            "E12S4",
+            EntityKind::Story,
+            "docs/specs/stories/E12S4.md",
+        ))
         .unwrap();
 
     // constraints: ten 20-char lines; the rendered section (with the `id (kind): ` prefix)
     // is 228 chars -> 57 tokens, and the 45 tokens remaining cannot hold it whole.
     let constraint_line = "a".repeat(20);
     let full_constraint_text = std::iter::once(format!("E12S4/NG-1 (no_go): {constraint_line}"))
-        .chain(std::iter::repeat(constraint_line.clone()).take(9))
+        .chain(std::iter::repeat_n(constraint_line.clone(), 9))
         .collect::<Vec<_>>()
         .join("\n");
     store
@@ -955,8 +985,7 @@ fn test_over_budget_trims_and_drops_lowest_priority_first_in_order() {
             id: "E12S4/NG-1".to_string(),
             owner_id: "E12S4".to_string(),
             kind: "no_go".to_string(),
-            text: vec![constraint_line.as_str(); 10]
-                .join("\n"),
+            text: [constraint_line.as_str(); 10].join("\n"),
         })
         .unwrap();
 
@@ -969,11 +998,7 @@ fn test_over_budget_trims_and_drops_lowest_priority_first_in_order() {
     )
     .unwrap();
 
-    let names: Vec<&str> = payload
-        .sections
-        .iter()
-        .map(|s| s.name.as_str())
-        .collect();
+    let names: Vec<&str> = payload.sections.iter().map(|s| s.name.as_str()).collect();
     // story_spec (18 chars = 5 tokens) + trimmed constraints (7 lines = 165 chars = 42
     // tokens) + modules "(none)" (2) = 49 <= 50; everything lower priority drops.
     assert_eq!(names, vec!["story_spec", "constraints", "modules"]);
@@ -988,23 +1013,31 @@ fn test_over_budget_trims_and_drops_lowest_priority_first_in_order() {
         "a partially fitting section is flagged truncated"
     );
     let lines: Vec<&str> = constraints.content.lines().collect();
-    assert_eq!(lines.len(), 7, "deterministic line trim keeps 7 of 10 lines");
+    assert_eq!(
+        lines.len(),
+        7,
+        "deterministic line trim keeps 7 of 10 lines"
+    );
     assert!(
         lines[0].starts_with("E12S4/NG-1 (no_go): "),
         "trimming keeps the head of the section"
     );
-    assert_eq!(estimate_tokens(&constraints.content) as u32, constraints.tokens);
+    assert_eq!(
+        estimate_tokens(&constraints.content) as u32,
+        constraints.tokens
+    );
 
     // Drop order: the trimmed section first (walk order), then the dropped ones.
-    let truncated_names: Vec<&str> = payload
-        .truncated
-        .iter()
-        .map(|t| t.name.as_str())
-        .collect();
+    let truncated_names: Vec<&str> = payload.truncated.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(
         truncated_names,
         vec![
-            "constraints", "adr_excerpts", "requirements", "scratchpad", "gates", "hygiene"
+            "constraints",
+            "adr_excerpts",
+            "requirements",
+            "scratchpad",
+            "gates",
+            "hygiene"
         ]
     );
     // The record carries each section's full pre-trim token count.
@@ -1055,7 +1088,10 @@ fn test_stats_numbers_match_the_payload() {
     )
     .unwrap();
 
-    let stats = payload.stats.as_ref().expect("--stats must set the stats object");
+    let stats = payload
+        .stats
+        .as_ref()
+        .expect("--stats must set the stats object");
     assert_eq!(stats.budget, payload.budget);
     assert_eq!(stats.total_tokens, payload.total_tokens);
     assert!(!stats.over_budget);
@@ -1069,8 +1105,7 @@ fn test_stats_numbers_match_the_payload() {
         assert_eq!(section.tokens, estimate_tokens(&section.content) as u32);
     }
     assert!(
-        stats.total_tokens
-            == stats.sections.values().sum::<u32>(),
+        stats.total_tokens == stats.sections.values().sum::<u32>(),
         "stats total must be the per-section sum"
     );
 }
@@ -1231,7 +1266,11 @@ fn test_adr_body_sections_win_over_frontmatter() {
 
     // A second ADR whose body carries `## Rule` / `## Prevents` headings: the body wins.
     store
-        .upsert_entity(&base_entity("AD-44", EntityKind::Adr, "docs/specs/adrs/AD-44.md"))
+        .upsert_entity(&base_entity(
+            "AD-44",
+            EntityKind::Adr,
+            "docs/specs/adrs/AD-44.md",
+        ))
         .unwrap();
     store
         .upsert_relation(&RelationRecord {
@@ -1321,10 +1360,13 @@ fn test_payload_validates_against_its_own_schema() {
     )
     .unwrap();
 
-    let instance = serde_json::to_value(&qdev_core::JsonEnvelope::new(payload)).unwrap();
+    let instance = serde_json::to_value(qdev_core::JsonEnvelope::new(payload)).unwrap();
     let schema = qdev_core::PayloadKind::Context.schema_json();
     let validator = jsonschema::validator_for(&schema).expect("context schema must compile");
-    let errors: Vec<String> = validator.iter_errors(&instance).map(|e| e.to_string()).collect();
+    let errors: Vec<String> = validator
+        .iter_errors(&instance)
+        .map(|e| e.to_string())
+        .collect();
     assert!(
         errors.is_empty(),
         "payload failed its own schema: {errors:?}"
@@ -1402,7 +1444,9 @@ fn test_hygiene_section_with_custom_per_language_templates() {
     setup_reference(temp.path(), &store);
 
     let mut cfg = test_config();
-    cfg.hygiene.citation_templates.insert("rust".to_string(), "// [{entity_id}]".to_string());
+    cfg.hygiene
+        .citation_templates
+        .insert("rust".to_string(), "// [{entity_id}]".to_string());
 
     let payload = build_context(
         temp.path(),
@@ -1453,7 +1497,11 @@ fn test_review_hygiene_findings_clean_diff_and_violations() {
 
     setup_reference(root, &store);
     fs::create_dir_all(root.join("src")).unwrap();
-    fs::write(root.join("src/lib.rs"), "// standard clean code\npub fn foo() {}\n").unwrap();
+    fs::write(
+        root.join("src/lib.rs"),
+        "// standard clean code\npub fn foo() {}\n",
+    )
+    .unwrap();
     git(&["add", "."]);
     git(&["commit", "-m", "initial baseline"]);
 
@@ -1512,7 +1560,9 @@ fn test_review_hygiene_findings_clean_diff_and_violations() {
         .find(|s| s.name == "hygiene_findings")
         .unwrap();
     assert!(
-        hygiene_findings.content.contains("src/lib.rs:1: [story_banner]"),
+        hygiene_findings
+            .content
+            .contains("src/lib.rs:1: [story_banner]"),
         "expected violation in hygiene_findings: {}",
         hygiene_findings.content
     );
@@ -1590,6 +1640,3 @@ fn test_review_hygiene_findings_unresolvable_diff_baseline() {
         "(empty: cannot resolve a diff baseline against 'develop')"
     );
 }
-
-
-

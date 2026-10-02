@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "gate": "qdev-scope",
+  "story": "E5S1",
+  "commit": "e998f49",
+  "status": "fail",
+  "exit_code": 1,
+  "duration_ms": 87,
+  "metric": null,
+  "summary": "scope check failed: 8 path(s) outside target_modules",
+  "output_sha256": "8c52b9a70f668749788a3cc0208b249c935f1a34ad9547207b4bc00744f4254c",
+  "run_by": {
+    "type": "human",
+    "id": "simon"
+  },
+  "ran_at": "2026-10-02T06:58:25Z",
+  "verifies": [],
+  "skipped_locally": false
+}

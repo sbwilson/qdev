@@ -17,8 +17,8 @@ pub mod impact;
 pub mod init;
 pub mod interactivity;
 pub mod lease;
-pub mod modules;
 pub mod mcp;
+pub mod modules;
 pub mod next;
 pub mod preflight;
 pub mod pulse;
@@ -144,14 +144,14 @@ pub use graph::{
 
 pub use doctor::{
     default_doctor_sections, CacheDoctorSection, DoctorSection, DoctorSectionReport,
-    GatesDoctorSection, GitDoctorSection, HooksDoctorSection, LeasesDoctorSection, McpDoctorSection,
-    ModulesDoctorSection, SkillsDoctorSection, ValidationDoctorSection,
+    GatesDoctorSection, GitDoctorSection, HooksDoctorSection, LeasesDoctorSection,
+    McpDoctorSection, ModulesDoctorSection, SkillsDoctorSection, ValidationDoctorSection,
 };
 
 pub use mcp::{
     inspect_mcp, inspect_mcp_with_handshake_override, install_mcp, CallToolResult, JsonRpcError,
-    JsonRpcRequest, JsonRpcResponse, McpDoctorStatus, McpInstallReport, McpServer,
-    ToolContentItem, ToolDefinition,
+    JsonRpcRequest, JsonRpcResponse, McpDoctorStatus, McpInstallReport, McpServer, ToolContentItem,
+    ToolDefinition,
 };
 
 pub use skills::{
@@ -180,6 +180,10 @@ pub use config::{
     ProjectConfig, RegulatoryConfig, SoupConfig, StorageConfig, SynthesisConfig, TeamsConfig,
     DEFAULT_CITATION_PATTERN, LOCAL_CONFIG_FILENAME, PROJECT_CONFIG_FILENAME,
 };
+pub use context::{
+    build_context, render_context_markdown, render_context_text, ContextOptions, ContextPayload,
+    ContextPhase, ContextSection, ContextStats, TruncatedSection, HYGIENE_DIRECTIVE,
+};
 pub use envelope::{ErrorPayload, JsonEnvelope, JsonErrorEnvelope, SCHEMA_VERSION};
 pub use errors::{
     get_refusal_entry, ExitCode, QdevError, RefusalCatalogEntry, RejectionAttribution,
@@ -199,10 +203,6 @@ pub use init::{
     STATE_SUBDIRECTORIES,
 };
 pub use interactivity::Interactivity;
-pub use context::{
-    build_context, render_context_markdown, render_context_text, ContextOptions, ContextPayload,
-    ContextPhase, ContextSection, ContextStats, TruncatedSection, HYGIENE_DIRECTIVE,
-};
 pub use query::{
     query_entity, query_list, ConstraintProjection, EntityProjection, EvidenceProjection,
     GetResult, ListEntryProjection, ListQueryOptions, QueryOptions, ScratchEntryProjection,

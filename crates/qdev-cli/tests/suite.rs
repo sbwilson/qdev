@@ -48,10 +48,10 @@ mod install_skills_cli_tests;
 mod lease_cli_tests;
 #[path = "list_cli_tests.rs"]
 mod list_cli_tests;
-#[path = "modules_cli_tests.rs"]
-mod modules_cli_tests;
 #[path = "mcp_cli_tests.rs"]
 mod mcp_cli_tests;
+#[path = "modules_cli_tests.rs"]
+mod modules_cli_tests;
 #[path = "network_tests.rs"]
 mod network_tests;
 #[path = "next_cli_tests.rs"]

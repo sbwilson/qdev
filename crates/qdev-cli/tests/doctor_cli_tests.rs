@@ -317,14 +317,9 @@ fn test_doctor_reports_ok_after_a_stale_cache_is_healed_at_boot() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The `validation` section (spec-doctor-sees-computed-findings)
-//
-// The `cache` section's `finding_count` reads the `findings` table, which structurally holds
-// only the findings hydration wrote. Four of `qdev validate`'s eight checks are computed fresh
-// and never persisted, so `doctor` reported `finding_count: 0` on a workspace `validate` found
-// defects in. The `validation` section runs `run_validation` — the same checks `validate` runs.
-// ---------------------------------------------------------------------------
+// The `validation` section (spec-doctor-sees-computed-findings):
+// The `validation` section runs `run_validation` — the same checks `validate` runs,
+// surfacing computed-fresh checks that are never persisted into cache.
 
 /// Writes a second file declaring an id another file already declares — the retrospective's
 /// exact reproduction (finding C3): two `duplicate_planning_id` findings from `validate`, zero
@@ -859,21 +854,65 @@ fn test_doctor_text_output_renders_eight_check_summary_block() {
     let text = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
 
     // Summary block must render the 8 checks matching CLI ref §7 with glyphs
-    assert!(text.contains("[x] Git:"), "text must contain '[x] Git:': {}", text);
-    assert!(text.contains("[✓] Cache:"), "text must contain '[✓] Cache:': {}", text);
-    assert!(text.contains("[✓] Modules:"), "text must contain '[✓] Modules:': {}", text);
-    assert!(text.contains("[✓] Gates:"), "text must contain '[✓] Gates:': {}", text);
-    assert!(text.contains("[x] Hooks:"), "text must contain '[x] Hooks:': {}", text);
-    assert!(text.contains("[✓] Skills:"), "text must contain '[✓] Skills:': {}", text);
-    assert!(text.contains("[!] MCP:"), "text must contain '[!] MCP:': {}", text);
-    assert!(text.contains("[✓] Leases:"), "text must contain '[✓] Leases:': {}", text);
+    assert!(
+        text.contains("[x] Git:"),
+        "text must contain '[x] Git:': {}",
+        text
+    );
+    assert!(
+        text.contains("[✓] Cache:"),
+        "text must contain '[✓] Cache:': {}",
+        text
+    );
+    assert!(
+        text.contains("[✓] Modules:"),
+        "text must contain '[✓] Modules:': {}",
+        text
+    );
+    assert!(
+        text.contains("[✓] Gates:"),
+        "text must contain '[✓] Gates:': {}",
+        text
+    );
+    assert!(
+        text.contains("[x] Hooks:"),
+        "text must contain '[x] Hooks:': {}",
+        text
+    );
+    assert!(
+        text.contains("[✓] Skills:"),
+        "text must contain '[✓] Skills:': {}",
+        text
+    );
+    assert!(
+        text.contains("[!] MCP:"),
+        "text must contain '[!] MCP:': {}",
+        text
+    );
+    assert!(
+        text.contains("[✓] Leases:"),
+        "text must contain '[✓] Leases:': {}",
+        text
+    );
 
     // Followed by detailed sections
-    assert!(text.contains("[cache]"), "text must contain [cache] section");
-    assert!(text.contains("[validation]"), "text must contain [validation] section");
+    assert!(
+        text.contains("[cache]"),
+        "text must contain [cache] section"
+    );
+    assert!(
+        text.contains("[validation]"),
+        "text must contain [validation] section"
+    );
     assert!(text.contains("[git]"), "text must contain [git] section");
-    assert!(text.contains("[modules]"), "text must contain [modules] section");
-    assert!(text.contains("[gates]"), "text must contain [gates] section");
+    assert!(
+        text.contains("[modules]"),
+        "text must contain [modules] section"
+    );
+    assert!(
+        text.contains("[gates]"),
+        "text must contain [gates] section"
+    );
 }
 
 #[test]
@@ -952,12 +991,36 @@ fn test_doctor_text_output_in_clean_git_workspace() {
         "text must contain clean hooks line: {}",
         text
     );
-    assert!(text.contains("[✓] Cache:"), "text must contain Cache check: {}", text);
-    assert!(text.contains("[✓] Modules:"), "text must contain Modules check: {}", text);
-    assert!(text.contains("[✓] Gates:"), "text must contain Gates check: {}", text);
-    assert!(text.contains("[✓] Skills:"), "text must contain Skills check: {}", text);
-    assert!(text.contains("[!] MCP:"), "text must contain MCP check: {}", text);
-    assert!(text.contains("[✓] Leases:"), "text must contain Leases check: {}", text);
+    assert!(
+        text.contains("[✓] Cache:"),
+        "text must contain Cache check: {}",
+        text
+    );
+    assert!(
+        text.contains("[✓] Modules:"),
+        "text must contain Modules check: {}",
+        text
+    );
+    assert!(
+        text.contains("[✓] Gates:"),
+        "text must contain Gates check: {}",
+        text
+    );
+    assert!(
+        text.contains("[✓] Skills:"),
+        "text must contain Skills check: {}",
+        text
+    );
+    assert!(
+        text.contains("[!] MCP:"),
+        "text must contain MCP check: {}",
+        text
+    );
+    assert!(
+        text.contains("[✓] Leases:"),
+        "text must contain Leases check: {}",
+        text
+    );
 }
 
 #[test]
@@ -1011,7 +1074,8 @@ fn test_doctor_fix_regenerates_outdated_skills_with_custom_synthesis() {
     // Plant an outdated skill
     let skill_path = root.join(".claude/skills/qdev-plan/SKILL.md");
     fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
-    let outdated_content = "---\nname: qdev-plan\nversion: \"0.0.9\"\nqdev_version: \"0.0.9\"\n---\nOutdated content";
+    let outdated_content =
+        "---\nname: qdev-plan\nversion: \"0.0.9\"\nqdev_version: \"0.0.9\"\n---\nOutdated content";
     fs::write(&skill_path, outdated_content).unwrap();
 
     // Run doctor --fix
@@ -1024,7 +1088,9 @@ fn test_doctor_fix_regenerates_outdated_skills_with_custom_synthesis() {
     // Verify skill is regenerated and includes the custom synthesis heading and rejection directive
     let regenerated = fs::read_to_string(&skill_path).unwrap();
     assert!(regenerated.contains("Clinical efficacy"));
-    assert!(regenerated.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+    assert!(regenerated.contains(
+        "Reject any model response or proposal missing any required heading and re-prompt"
+    ));
 }
 
 #[test]
@@ -1048,7 +1114,8 @@ fn test_doctor_fix_corrupt_cache_requires_confirmation_in_non_interactive_mode()
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     let combined = format!("{}{}", stdout, stderr);
     assert!(
-        combined.contains("needs_confirmation") || combined.contains("Rebuilding corrupt cache requires"),
+        combined.contains("needs_confirmation")
+            || combined.contains("Rebuilding corrupt cache requires"),
         "output must explain confirmation requirement: {}",
         combined
     );
@@ -1081,4 +1148,3 @@ fn test_doctor_fix_corrupt_cache_with_yes_rebuilds_cache() {
     assert_eq!(cache_sec["schema_status"], "ok");
     assert_eq!(cache_sec["entity_count"], 1);
 }
-

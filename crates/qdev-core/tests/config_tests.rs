@@ -1130,8 +1130,10 @@ citation_format = "[{id}] {summary}"
 #[test]
 fn test_hygiene_citation_derivation_comment_leaders() {
     // 1. Base starts with //
-    let mut config = qdev_core::config::HygieneConfig::default();
-    config.citation_template = Some("// [{id}]".to_string());
+    let mut config = qdev_core::config::HygieneConfig {
+        citation_template: Some("// [{id}]".to_string()),
+        ..Default::default()
+    };
     let templates = config.resolved_citation_templates();
     assert_eq!(templates.get("rust").unwrap(), "// [{id}]");
     assert_eq!(templates.get("python").unwrap(), "# [{id}]");
@@ -1143,14 +1145,18 @@ fn test_hygiene_citation_derivation_comment_leaders() {
     assert_eq!(templates.get("python").unwrap(), "# [{id}]");
 
     // 3. Case-insensitive language lookup in citation_templates
-    config.citation_templates.insert("RUST".to_string(), "// [RUST-{id}]".to_string());
+    config
+        .citation_templates
+        .insert("RUST".to_string(), "// [RUST-{id}]".to_string());
     let templates = config.resolved_citation_templates();
     assert_eq!(templates.get("rust").unwrap(), "// [RUST-{id}]");
 
     // 4. py language alias and doc-comment prefix stripping
-    let mut py_cfg = qdev_core::config::HygieneConfig::default();
-    py_cfg.languages = vec!["py".to_string(), "rust".to_string()];
-    py_cfg.citation_template = Some("/// [{id}] {summary}".to_string());
+    let mut py_cfg = qdev_core::config::HygieneConfig {
+        languages: vec!["py".to_string(), "rust".to_string()],
+        citation_template: Some("/// [{id}] {summary}".to_string()),
+        ..Default::default()
+    };
     let templates = py_cfg.resolved_citation_templates();
     assert_eq!(templates.get("py").unwrap(), "# [{id}] {summary}");
     assert_eq!(templates.get("rust").unwrap(), "/// [{id}] {summary}");
@@ -1213,14 +1219,46 @@ fn test_hygiene_config_schema_violations() {
     let invalid_cases = [
         ("[hygiene]\ndirective = 123\n", "directive", "hygiene"),
         ("[hygiene]\ndirective = \"   \"\n", "directive", "hygiene"),
-        ("[hygiene]\ncitation_template = true\n", "citation_template", "hygiene"),
-        ("[hygiene]\ncitation_template = \"\"\n", "citation_template", "hygiene"),
-        ("[hygiene]\ncitation_format = false\n", "citation_format", "hygiene"),
-        ("[hygiene]\ncitation_format = \"  \t  \"\n", "citation_format", "hygiene"),
-        ("[hygiene]\ncitation_template = \"[{id}]\"\ncitation_format = \"[{id}]\"\n", "citation_template", "hygiene"),
-        ("[hygiene]\ncitation_templates = \"not-a-table\"\n", "citation_templates", "hygiene"),
-        ("[hygiene.citation_templates]\nrust = 123\n", "rust", "hygiene"),
-        ("[hygiene.citation_templates]\nrust = \"   \"\n", "rust", "hygiene"),
+        (
+            "[hygiene]\ncitation_template = true\n",
+            "citation_template",
+            "hygiene",
+        ),
+        (
+            "[hygiene]\ncitation_template = \"\"\n",
+            "citation_template",
+            "hygiene",
+        ),
+        (
+            "[hygiene]\ncitation_format = false\n",
+            "citation_format",
+            "hygiene",
+        ),
+        (
+            "[hygiene]\ncitation_format = \"  \t  \"\n",
+            "citation_format",
+            "hygiene",
+        ),
+        (
+            "[hygiene]\ncitation_template = \"[{id}]\"\ncitation_format = \"[{id}]\"\n",
+            "citation_template",
+            "hygiene",
+        ),
+        (
+            "[hygiene]\ncitation_templates = \"not-a-table\"\n",
+            "citation_templates",
+            "hygiene",
+        ),
+        (
+            "[hygiene.citation_templates]\nrust = 123\n",
+            "rust",
+            "hygiene",
+        ),
+        (
+            "[hygiene.citation_templates]\nrust = \"   \"\n",
+            "rust",
+            "hygiene",
+        ),
     ];
 
     for (content, key, section) in invalid_cases {
@@ -1228,7 +1266,8 @@ fn test_hygiene_config_schema_violations() {
         let root = temp.path();
         fs::write(root.join("qdev.toml"), content).unwrap();
 
-        let err = load_config(root).expect_err(&format!("expected error for invalid {}: {}", key, content));
+        let err = load_config(root)
+            .expect_err(&format!("expected error for invalid {}: {}", key, content));
         assert_eq!(err.exit_code(), ExitCode::UsageError);
         assert!(
             err.message().contains(key) && err.message().contains(section),
@@ -1255,10 +1294,18 @@ fn test_synthesis_config_defaults() {
         qdev_core::default_synthesis_headings()
     );
     assert_eq!(synthesis.resolved_headings().len(), 4);
-    assert!(synthesis.resolved_headings().contains(&"Product & domain value".to_string()));
-    assert!(synthesis.resolved_headings().contains(&"Architectural constraints".to_string()));
-    assert!(synthesis.resolved_headings().contains(&"Safety & risk profile".to_string()));
-    assert!(synthesis.resolved_headings().contains(&"Implementation directives".to_string()));
+    assert!(synthesis
+        .resolved_headings()
+        .contains(&"Product & domain value".to_string()));
+    assert!(synthesis
+        .resolved_headings()
+        .contains(&"Architectural constraints".to_string()));
+    assert!(synthesis
+        .resolved_headings()
+        .contains(&"Safety & risk profile".to_string()));
+    assert!(synthesis
+        .resolved_headings()
+        .contains(&"Implementation directives".to_string()));
 
     let rendered = synthesis.render_template();
     assert!(rendered.contains("### Structured Multi-Perspective Synthesis Template"));
@@ -1363,16 +1410,29 @@ Must evaluate risk according to ISO 14971.
     let cfg = &annotated.config;
 
     let headings = cfg.synthesis.resolved_headings();
-    assert_eq!(headings, vec!["Primary Clinical Outcomes", "Secondary Safety Profile"]);
+    assert_eq!(
+        headings,
+        vec!["Primary Clinical Outcomes", "Secondary Safety Profile"]
+    );
 
     // Output validation against extracted headings
-    assert!(cfg.synthesis.validate_output("primary clinical outcomes: good. secondary safety profile: verified.").is_ok());
-    assert_eq!(cfg.synthesis.validate_output("primary clinical outcomes: good.").unwrap_err(), vec!["Secondary Safety Profile"]);
+    assert!(cfg
+        .synthesis
+        .validate_output("primary clinical outcomes: good. secondary safety profile: verified.")
+        .is_ok());
+    assert_eq!(
+        cfg.synthesis
+            .validate_output("primary clinical outcomes: good.")
+            .unwrap_err(),
+        vec!["Secondary Safety Profile"]
+    );
 
     // Render template appends rejection directive since it was absent
     let rendered = cfg.synthesis.render_template();
     assert!(rendered.contains("Primary Clinical Outcomes"));
-    assert!(rendered.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+    assert!(rendered.contains(
+        "Reject any model response or proposal missing any required heading and re-prompt"
+    ));
     assert!(rendered.ends_with("\n\n"));
 }
 
@@ -1384,7 +1444,11 @@ fn test_synthesis_config_schema_violations() {
         ("[synthesis]\nheadings = [123]\n", "headings", "synthesis"),
         ("[synthesis]\nheadings = []\n", "headings", "synthesis"),
         ("[synthesis]\nheadings = [\"\"]\n", "headings", "synthesis"),
-        ("[synthesis]\nheadings = [\"   \"]\n", "headings", "synthesis"),
+        (
+            "[synthesis]\nheadings = [\"   \"]\n",
+            "headings",
+            "synthesis",
+        ),
         ("[synthesis]\ntemplate = 123\n", "template", "synthesis"),
         ("[synthesis]\ntemplate = true\n", "template", "synthesis"),
         ("[synthesis]\ntemplate = \"\"\n", "template", "synthesis"),
@@ -1396,7 +1460,8 @@ fn test_synthesis_config_schema_violations() {
         let root = temp.path();
         fs::write(root.join("qdev.toml"), content).unwrap();
 
-        let err = load_config(root).expect_err(&format!("expected error for invalid {}: {}", key, content));
+        let err = load_config(root)
+            .expect_err(&format!("expected error for invalid {}: {}", key, content));
         assert_eq!(err.exit_code(), ExitCode::UsageError);
         assert!(
             err.message().contains(key) && err.message().contains(section),
@@ -1407,4 +1472,3 @@ fn test_synthesis_config_schema_violations() {
         );
     }
 }
-

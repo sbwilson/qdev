@@ -1,4 +1,4 @@
-//! Token-budgeted context projection backing `qdev context` (Story 4.1).
+//! Token-budgeted context projection backing `qdev context`.
 //!
 //! `qdev context <story-id> --phase <specify|develop|review> [--budget N] [--stats]
 //! [--format md]` is the single source of agent context: it projects a deterministic,
@@ -210,9 +210,7 @@ fn extract_markdown_section(body: &str, headings: &[&str]) -> Option<String> {
         }
         if let Some(heading) = trimmed.strip_prefix("## ") {
             let heading = heading.trim();
-            if start.is_none()
-                && headings.iter().any(|h| h.eq_ignore_ascii_case(heading))
-            {
+            if start.is_none() && headings.iter().any(|h| h.eq_ignore_ascii_case(heading)) {
                 start = Some(idx);
             } else if start.is_some() {
                 break; // reached the next level-2 heading
@@ -271,7 +269,10 @@ fn resolve_story(store: &dyn Store, id: &str) -> Result<EntityRecord, QdevError>
     let entity = entity.ok_or_else(|| {
         QdevError::logical_failure(
             "entity_not_found",
-            format!("Entity '{}' not found — no story with that id in the workspace", trimmed),
+            format!(
+                "Entity '{}' not found — no story with that id in the workspace",
+                trimmed
+            ),
         )
     })?;
     if entity.kind != EntityKind::Story {
@@ -297,8 +298,7 @@ fn story_spec_section(workspace_root: &Path, entity: &EntityRecord) -> String {
                     trimmed.to_string()
                 }
             }
-            Err(_) => "(spec file has no parseable frontmatter — run `qdev sync`)"
-                .to_string(),
+            Err(_) => "(spec file has no parseable frontmatter — run `qdev sync`)".to_string(),
         },
         Err(_) => "(spec file unreadable — run `qdev sync`)".to_string(),
     }
@@ -416,13 +416,19 @@ fn adr_sections(
 }
 
 /// The (Rule, Prevents) pair for a resolved ADR: body sections win over frontmatter.
-fn adr_rule_prevents(workspace_root: &Path, adr: &EntityRecord) -> (Option<String>, Option<String>) {
+fn adr_rule_prevents(
+    workspace_root: &Path,
+    adr: &EntityRecord,
+) -> (Option<String>, Option<String>) {
     let (rule, prevents) = match read_entity_content(workspace_root, &adr.source_path) {
         Some((frontmatter, body)) => {
             let body_rule = extract_markdown_section(&body, &["Rule", "Decision"]);
-            let rule = body_rule
-                .clone()
-                .or_else(|| frontmatter.get("decision").and_then(|v| v.as_str()).map(str::to_string));
+            let rule = body_rule.clone().or_else(|| {
+                frontmatter
+                    .get("decision")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            });
             let body_prevents = extract_markdown_section(&body, &["Prevents"]);
             let prevents = body_prevents.or_else(|| {
                 frontmatter
@@ -482,10 +488,7 @@ fn requirements_section(
 
 /// The scratchpad summary: key decisions, transitions, and the last five entries, via the
 /// documented `summarize_scratch_entries` — never the full ledger.
-fn scratchpad_section(
-    store: &dyn Store,
-    story_id: &str,
-) -> Result<String, QdevError> {
+fn scratchpad_section(store: &dyn Store, story_id: &str) -> Result<String, QdevError> {
     let records = store.get_scratchpad_entries(story_id)?;
     let entries: Vec<ScratchpadEntry> = records.iter().map(ScratchpadEntry::from_record).collect();
     if entries.is_empty() {
@@ -523,10 +526,7 @@ fn gates_section(config: &Config) -> String {
         if builtin_ids.contains(&gate.id) {
             continue; // a configured gate shadowing a built-in is listed once, above
         }
-        let kind = gate
-            .kind
-            .clone()
-            .unwrap_or_else(|| "command".to_string());
+        let kind = gate.kind.clone().unwrap_or_else(|| "command".to_string());
         let transitions = if gate.on_transition.is_empty() {
             "(none)".to_string()
         } else {
@@ -545,10 +545,7 @@ fn gates_section(config: &Config) -> String {
 /// Sibling story titles for the specify phase: every story in the owning epic (the target
 /// marked `(current)`), seq-then-id-sorted. Reporting path: a retained stale row still
 /// carries its last-known title.
-fn sibling_stories_section(
-    store: &dyn Store,
-    entity: &EntityRecord,
-) -> Result<String, QdevError> {
+fn sibling_stories_section(store: &dyn Store, entity: &EntityRecord) -> Result<String, QdevError> {
     let Some(epic_id) = entity.epic_id.as_deref().filter(|e| !e.is_empty()) else {
         return Ok(NONE_MARKER.to_string());
     };
@@ -560,7 +557,10 @@ fn sibling_stories_section(
     })?;
     let mut stories = stories;
     stories.sort_by(|a, b| {
-        a.seq.unwrap_or(u32::MAX).cmp(&b.seq.unwrap_or(u32::MAX)).then(a.id.cmp(&b.id))
+        a.seq
+            .unwrap_or(u32::MAX)
+            .cmp(&b.seq.unwrap_or(u32::MAX))
+            .then(a.id.cmp(&b.id))
     });
     let lines: Vec<String> = stories
         .iter()
@@ -607,10 +607,7 @@ fn epic_goal_section(
 }
 
 /// Epic constraints for the specify phase, id-ordered: full ids with kind and text.
-fn epic_constraints_section(
-    store: &dyn Store,
-    epic_id: Option<&str>,
-) -> Result<String, QdevError> {
+fn epic_constraints_section(store: &dyn Store, epic_id: Option<&str>) -> Result<String, QdevError> {
     let Some(epic_id) = epic_id.filter(|e| !e.is_empty()) else {
         return Ok(NONE_MARKER.to_string());
     };
@@ -680,8 +677,9 @@ fn diff_section(workspace_root: &Path, config: &Config) -> String {
         return "(empty: not inside a git work tree)".to_string();
     }
 
-    let diff_target = merge_base_commit(workspace_root, integration_branch)
-        .or_else(|| ref_exists(workspace_root, integration_branch).then(|| integration_branch.to_string()));
+    let diff_target = merge_base_commit(workspace_root, integration_branch).or_else(|| {
+        ref_exists(workspace_root, integration_branch).then(|| integration_branch.to_string())
+    });
 
     let Some(target) = diff_target else {
         return format!(
@@ -692,7 +690,8 @@ fn diff_section(workspace_root: &Path, config: &Config) -> String {
 
     let mut changes: BTreeMap<String, (u32, u32)> = BTreeMap::new();
 
-    let parse_numstat = |output: &std::process::Output, changes: &mut BTreeMap<String, (u32, u32)>| {
+    let parse_numstat = |output: &std::process::Output,
+                         changes: &mut BTreeMap<String, (u32, u32)>| {
         if !output.status.success() {
             return; // a failed diff contributes nothing; the baseline itself resolved fine
         }
@@ -733,7 +732,13 @@ fn diff_section(workspace_root: &Path, config: &Config) -> String {
     }
     if let Ok(output) = run_git_unquoted(
         workspace_root,
-        &["diff", "--cached", "--numstat", "--no-renames", "--relative"],
+        &[
+            "diff",
+            "--cached",
+            "--numstat",
+            "--no-renames",
+            "--relative",
+        ],
     ) {
         parse_numstat(&output, &mut changes);
     }
@@ -817,8 +822,11 @@ fn hygiene_findings_section(workspace_root: &Path, config: &Config) -> String {
         return "(empty: not inside a git work tree)".to_string();
     }
 
-    let diff_target = merge_base_commit(workspace_root, &config.git.integration_branch)
-        .or_else(|| ref_exists(workspace_root, &config.git.integration_branch).then(|| config.git.integration_branch.clone()));
+    let diff_target =
+        merge_base_commit(workspace_root, &config.git.integration_branch).or_else(|| {
+            ref_exists(workspace_root, &config.git.integration_branch)
+                .then(|| config.git.integration_branch.clone())
+        });
 
     let Some(_) = diff_target else {
         return format!(
@@ -862,10 +870,7 @@ fn hygiene_findings_section(workspace_root: &Path, config: &Config) -> String {
 /// flagged `truncated`, and is likewise recorded. The first section is exempt: when it
 /// alone exceeds the budget it is kept whole (the payload may then overrun; `--stats`
 /// surfaces it).
-fn apply_budget(
-    sections: &mut Vec<ContextSection>,
-    budget: u32,
-) -> Vec<TruncatedSection> {
+fn apply_budget(sections: &mut Vec<ContextSection>, budget: u32) -> Vec<TruncatedSection> {
     let mut truncated: Vec<TruncatedSection> = Vec::new();
     let mut used: u32 = 0;
 
@@ -972,10 +977,7 @@ pub fn build_context(
                 "epic_constraints",
                 &epic_constraints_section(store, entity.epic_id.as_deref())?,
             ),
-            SectionDraft::text(
-                "sibling_stories",
-                &sibling_stories_section(store, &entity)?,
-            ),
+            SectionDraft::text("sibling_stories", &sibling_stories_section(store, &entity)?),
             SectionDraft::text(
                 "adr_summaries",
                 &adr_sections(workspace_root, store, &relation_rows, true)?,
@@ -1110,11 +1112,7 @@ pub fn render_context_text(payload: &ContextPayload) -> String {
         for (name, tokens) in &stats.sections {
             text.push_str(&format!("  {:<16} {}\n", name, tokens));
         }
-        text.push_str(&format!(
-            "  {:<16} {}\n",
-            "budget",
-            stats.budget
-        ));
+        text.push_str(&format!("  {:<16} {}\n", "budget", stats.budget));
         text.push_str(&format!(
             "  {:<16} {} ({})\n",
             "total",

@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "gate": "qdev-hygiene",
+  "story": "E5S1",
+  "commit": "e998f49",
+  "status": "fail",
+  "exit_code": 1,
+  "duration_ms": 96,
+  "metric": null,
+  "summary": "hygiene check failed with 23 finding(s)",
+  "output_sha256": "3a0d064e69cd55f0f6d9e5e6ff09d77f628003c8b49c8cc43ca1113453017bd7",
+  "run_by": {
+    "type": "human",
+    "id": "simon"
+  },
+  "ran_at": "2026-10-02T06:58:48Z",
+  "verifies": [],
+  "skipped_locally": false
+}

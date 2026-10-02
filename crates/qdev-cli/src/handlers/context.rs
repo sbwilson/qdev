@@ -1,4 +1,4 @@
-//! `qdev context` handler (Story 4.1): thin CLI wiring around the pure core projection.
+//! Context handler: thin CLI wiring around the pure core projection.
 //!
 //! The handler mirrors `handle_get`'s boot sequence — workspace guard (shared, in `run`),
 //! open the query store, call the core, emit through the `OutputEmitter` — and adds the
@@ -7,8 +7,8 @@
 //! itself is read-only: no cache writes, no file writes, no git mutations, no prompts.
 
 use crate::cli::{self, Cli};
-use crate::output::OutputEmitter;
 use crate::open_query_store;
+use crate::output::OutputEmitter;
 use qdev_core::{ExitCode, JsonEnvelope, QdevError};
 
 pub fn handle_context(

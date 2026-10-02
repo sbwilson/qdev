@@ -17,15 +17,15 @@ use crate::decision::{log_decision_with_store, DecisionInput, VALID_DECISION_TYP
 use crate::dw::{add_deferred_work_with_store, validate_safety_risk, AddDeferredWorkInput};
 use crate::envelope::{JsonEnvelope, JsonErrorEnvelope};
 use crate::errors::QdevError;
-use crate::gate::{
-    execute_gate_set, resolve_gate_execution_order, GateRunOptions,
-};
+use crate::gate::{execute_gate_set, resolve_gate_execution_order, GateRunOptions};
 use crate::interactivity::Interactivity;
 use crate::lease::claim_story;
 use crate::next::{select_next, NextOptions, NextOwnerFilter};
 use crate::query::{query_entity, query_list, GetResult, ListQueryOptions, QueryOptions};
 use crate::schema::{EntityKind, PayloadKind};
-use crate::scratch::{append_scratch_entry, read_scratch_entries, ScratchAppendPayload, ScratchReadPayload};
+use crate::scratch::{
+    append_scratch_entry, read_scratch_entries, ScratchAppendPayload, ScratchReadPayload,
+};
 use crate::store::sqlite::SqliteStore;
 use crate::store::FindingRecord;
 use crate::transition::{StoryState, TransitionEngine, TransitionGateHook, TransitionOptions};
@@ -133,9 +133,8 @@ impl CallToolResult {
 
     pub fn error(error: &QdevError) -> Self {
         let envelope = JsonErrorEnvelope::from(error);
-        let text = serde_json::to_string_pretty(&envelope).unwrap_or_else(|_| {
-            format!("{{\"error\": \"{}\"}}", error.message())
-        });
+        let text = serde_json::to_string_pretty(&envelope)
+            .unwrap_or_else(|_| format!("{{\"error\": \"{}\"}}", error.message()));
         Self {
             content: vec![ToolContentItem {
                 r#type: "text".to_string(),
@@ -195,7 +194,10 @@ impl McpServer {
     }
 
     /// Creates a server instance with an explicit `AnnotatedConfig`.
-    pub fn with_annotated_config(workspace_root: PathBuf, annotated_config: AnnotatedConfig) -> Self {
+    pub fn with_annotated_config(
+        workspace_root: PathBuf,
+        annotated_config: AnnotatedConfig,
+    ) -> Self {
         Self {
             workspace_root,
             annotated_config,
@@ -285,7 +287,8 @@ impl McpServer {
             },
             ToolDefinition {
                 name: "context".to_string(),
-                description: "Retrieve assembled context projection for a story and workflow phase".to_string(),
+                description: "Retrieve assembled context projection for a story and workflow phase"
+                    .to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -314,7 +317,8 @@ impl McpServer {
             },
             ToolDefinition {
                 name: "next".to_string(),
-                description: "Select the next actionable story in active sprint or backlog".to_string(),
+                description: "Select the next actionable story in active sprint or backlog"
+                    .to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -333,7 +337,8 @@ impl McpServer {
             },
             ToolDefinition {
                 name: "claim".to_string(),
-                description: "Claim exclusive story lease for current developer/session".to_string(),
+                description: "Claim exclusive story lease for current developer/session"
+                    .to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -435,7 +440,8 @@ impl McpServer {
             },
             ToolDefinition {
                 name: "scratch_read".to_string(),
-                description: "Read scratchpad entries for a story with optional budget limit".to_string(),
+                description: "Read scratchpad entries for a story with optional budget limit"
+                    .to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -573,7 +579,8 @@ impl McpServer {
             },
             ToolDefinition {
                 name: "gate_run".to_string(),
-                description: "Execute verification gates (by ID, for a transition, or all)".to_string(),
+                description: "Execute verification gates (by ID, for a transition, or all)"
+                    .to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -847,16 +854,26 @@ impl McpServer {
 
         let mut query_opts = ListQueryOptions::new(kind);
         query_opts.epic_id = args.get("epic").and_then(|v| v.as_str()).map(String::from);
-        query_opts.status = args.get("status").and_then(|v| v.as_str()).map(String::from);
-        query_opts.module = args.get("module").and_then(|v| v.as_str()).map(String::from);
+        query_opts.status = args
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        query_opts.module = args
+            .get("module")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         query_opts.sprint = args.get("sprint").and_then(|v| v.as_i64());
-        query_opts.subject = args.get("subject").and_then(|v| v.as_str()).map(String::from);
+        query_opts.subject = args
+            .get("subject")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         query_opts.decision_type = args.get("type").and_then(|v| v.as_str()).map(String::from);
         query_opts.safety_risk = args.get("risk").and_then(|v| v.as_str()).map(String::from);
 
         if let Some(owner_val) = args.get("owner").and_then(|v| v.as_str()) {
             if owner_val.trim() == "me" {
-                let author = resolve_author(None, None, &self.annotated_config, &self.workspace_root)?;
+                let author =
+                    resolve_author(None, None, &self.annotated_config, &self.workspace_root)?;
                 query_opts.owner = Some(author.id);
             } else {
                 query_opts.owner = Some(owner_val.trim().to_string());
@@ -890,7 +907,10 @@ impl McpServer {
             .ok_or_else(|| QdevError::usage_error("Missing required argument 'phase'"))?;
 
         let phase = ContextPhase::from_str_loose(phase_str)?;
-        let budget = args.get("budget").and_then(|v| v.as_u64()).map(|b| b as u32);
+        let budget = args
+            .get("budget")
+            .and_then(|v| v.as_u64())
+            .map(|b| b as u32);
         let stats = args.get("stats").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let store = self.open_store()?;
@@ -951,7 +971,12 @@ impl McpServer {
 
         let author_type = args.get("author_type").and_then(|v| v.as_str());
         let author_id = args.get("author_id").and_then(|v| v.as_str());
-        let author = resolve_author(author_type, author_id, &self.annotated_config, &self.workspace_root)?;
+        let author = resolve_author(
+            author_type,
+            author_id,
+            &self.annotated_config,
+            &self.workspace_root,
+        )?;
 
         let opt_store = self.open_store().ok();
         let lease = claim_story(
@@ -984,11 +1009,22 @@ impl McpServer {
 
         let author_type = args.get("author_type").and_then(|v| v.as_str());
         let author_id = args.get("author_id").and_then(|v| v.as_str());
-        let author = resolve_author(author_type, author_id, &self.annotated_config, &self.workspace_root)?;
+        let author = resolve_author(
+            author_type,
+            author_id,
+            &self.annotated_config,
+            &self.workspace_root,
+        )?;
 
-        let justification = args.get("justification").and_then(|v| v.as_str()).map(String::from);
+        let justification = args
+            .get("justification")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let if_version = args.get("if_version").and_then(|v| v.as_u64());
-        let skip_gates = args.get("skip_gates").and_then(|v| v.as_bool()).unwrap_or(false);
+        let skip_gates = args
+            .get("skip_gates")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let options = TransitionOptions {
             workspace_root: self.workspace_root.clone(),
@@ -1004,7 +1040,9 @@ impl McpServer {
         };
 
         let mut engine = TransitionEngine::new();
-        engine.add_pre_hook(TransitionGateHook::new(self.annotated_config.config.clone()));
+        engine.add_pre_hook(TransitionGateHook::new(
+            self.annotated_config.config.clone(),
+        ));
         let res = engine.transition(&options)?;
 
         let envelope = JsonEnvelope::new(res);
@@ -1036,7 +1074,12 @@ impl McpServer {
 
         let author_type = args.get("author_type").and_then(|v| v.as_str());
         let author_id = args.get("author_id").and_then(|v| v.as_str());
-        let author = resolve_author(author_type, author_id, &self.annotated_config, &self.workspace_root)?;
+        let author = resolve_author(
+            author_type,
+            author_id,
+            &self.annotated_config,
+            &self.workspace_root,
+        )?;
         let opt_store = self.open_store().ok();
         let entry = append_scratch_entry(
             &self.workspace_root,
@@ -1069,7 +1112,10 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .ok_or_else(|| QdevError::usage_error("Missing required argument 'story_id'"))?;
 
-        let budget = args.get("budget").and_then(|v| v.as_u64()).map(|b| b as usize);
+        let budget = args
+            .get("budget")
+            .and_then(|v| v.as_u64())
+            .map(|b| b as usize);
         let kind = args.get("kind").and_then(|v| v.as_str());
 
         let (_entity_kind, canonical_story_id, _story_path) = resolve_entity_file(
@@ -1130,12 +1176,23 @@ impl McpServer {
             .ok_or_else(|| QdevError::usage_error("Missing required argument 'risk'"))?;
         validate_safety_risk(risk)?;
 
-        let rationale = args.get("rationale").and_then(|v| v.as_str()).map(String::from);
-        let origin_story = args.get("origin_story").and_then(|v| v.as_str()).map(String::from);
+        let rationale = args
+            .get("rationale")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let origin_story = args
+            .get("origin_story")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         let author_type = args.get("author_type").and_then(|v| v.as_str());
         let author_id = args.get("author_id").and_then(|v| v.as_str());
-        let author = resolve_author(author_type, author_id, &self.annotated_config, &self.workspace_root)?;
+        let author = resolve_author(
+            author_type,
+            author_id,
+            &self.annotated_config,
+            &self.workspace_root,
+        )?;
         let opt_store = self.open_store().ok();
 
         let input = AddDeferredWorkInput {
@@ -1167,7 +1224,9 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .ok_or_else(|| QdevError::usage_error("Missing required argument 'topic'"))?;
         if topic.trim().is_empty() {
-            return Err(QdevError::usage_error("--topic cannot be empty or whitespace-only"));
+            return Err(QdevError::usage_error(
+                "--topic cannot be empty or whitespace-only",
+            ));
         }
 
         let ruling = args
@@ -1175,7 +1234,9 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .ok_or_else(|| QdevError::usage_error("Missing required argument 'ruling'"))?;
         if ruling.trim().is_empty() {
-            return Err(QdevError::usage_error("--ruling cannot be empty or whitespace-only"));
+            return Err(QdevError::usage_error(
+                "--ruling cannot be empty or whitespace-only",
+            ));
         }
 
         let decision_type = args
@@ -1200,13 +1261,20 @@ impl McpServer {
             .trim()
             .to_string();
         if subject_id.is_empty() {
-            return Err(QdevError::usage_error("'subject_id' cannot be empty or whitespace-only"));
+            return Err(QdevError::usage_error(
+                "'subject_id' cannot be empty or whitespace-only",
+            ));
         }
         let validate_subject = true;
 
         let author_type = args.get("author_type").and_then(|v| v.as_str());
         let author_id = args.get("author_id").and_then(|v| v.as_str());
-        let author = resolve_author(author_type, author_id, &self.annotated_config, &self.workspace_root)?;
+        let author = resolve_author(
+            author_type,
+            author_id,
+            &self.annotated_config,
+            &self.workspace_root,
+        )?;
 
         let opt_store = self.open_store().ok();
         let input = DecisionInput {
@@ -1236,10 +1304,18 @@ impl McpServer {
     fn execute_gate_run(&self, args: &serde_json::Value) -> Result<String, QdevError> {
         let id_opt = args.get("id").and_then(|v| v.as_str()).map(String::from);
         let all_opt = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
-        let trans_opt = args.get("for_transition").and_then(|v| v.as_str()).map(String::from);
-        let story_opt = args.get("story_id").or_else(|| args.get("story")).and_then(|v| v.as_str()).map(String::from);
+        let trans_opt = args
+            .get("for_transition")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let story_opt = args
+            .get("story_id")
+            .or_else(|| args.get("story"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
-        let count = (id_opt.is_some() as usize) + (all_opt as usize) + (trans_opt.is_some() as usize);
+        let count =
+            (id_opt.is_some() as usize) + (all_opt as usize) + (trans_opt.is_some() as usize);
         if count > 1 {
             return Err(QdevError::usage_error(
                 "Conflicting invocation: specify only one of gate ID, all, or for_transition",
@@ -1292,7 +1368,11 @@ impl McpServer {
         )?;
 
         if let Some(ref target_id) = id_opt {
-            if let Some(target_outcome) = set_outcome.outcomes.iter().find(|o| &o.gate_id == target_id) {
+            if let Some(target_outcome) = set_outcome
+                .outcomes
+                .iter()
+                .find(|o| &o.gate_id == target_id)
+            {
                 let envelope = JsonEnvelope::new(target_outcome.to_payload());
                 return serde_json::to_string_pretty(&envelope).map_err(|e| {
                     QdevError::infrastructure_failure("serialization_error", e.to_string())
@@ -1306,10 +1386,14 @@ impl McpServer {
     }
 
     fn execute_validate(&self, args: &serde_json::Value) -> Result<String, QdevError> {
-        let changed = args.get("changed").and_then(|v| v.as_bool()).unwrap_or(false);
+        let changed = args
+            .get("changed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let store = self.open_store()?;
 
-        let mut findings = run_validation(&store, &self.workspace_root, &self.annotated_config.config)?;
+        let mut findings =
+            run_validation(&store, &self.workspace_root, &self.annotated_config.config)?;
         if changed {
             let changed_paths = crate::validate::git_changed_files(
                 &self.workspace_root,
@@ -1334,7 +1418,10 @@ impl McpServer {
 fn update_mcp_config_file(path: &Path) -> Result<(), QdevError> {
     let mut root_val = if path.is_file() {
         let content = std::fs::read_to_string(path).map_err(|e| {
-            QdevError::infrastructure_failure("io_error", format!("Failed to read {}: {}", path.display(), e))
+            QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to read {}: {}", path.display(), e),
+            )
         })?;
         serde_json::from_str::<serde_json::Value>(&content).map_err(|e| {
             QdevError::infrastructure_failure(
@@ -1368,9 +1455,8 @@ fn update_mcp_config_file(path: &Path) -> Result<(), QdevError> {
         }),
     );
 
-    let serialized = serde_json::to_string_pretty(&root_val).map_err(|e| {
-        QdevError::infrastructure_failure("serialization_error", e.to_string())
-    })?;
+    let serialized = serde_json::to_string_pretty(&root_val)
+        .map_err(|e| QdevError::infrastructure_failure("serialization_error", e.to_string()))?;
 
     write_file_atomic(path, &format!("{}\n", serialized))
 }
@@ -1414,11 +1500,14 @@ pub fn install_mcp(
 
 fn is_qdev_mcp_entry(qdev: &serde_json::Value) -> bool {
     let cmd_ok = qdev.get("command").and_then(|c| c.as_str()) == Some("qdev");
-    let args_ok = qdev.get("args").and_then(|a| a.as_array()).is_some_and(|arr| {
-        let has_mcp = arr.iter().any(|v| v.as_str() == Some("mcp"));
-        let has_serve = arr.iter().any(|v| v.as_str() == Some("serve"));
-        has_mcp && has_serve
-    });
+    let args_ok = qdev
+        .get("args")
+        .and_then(|a| a.as_array())
+        .is_some_and(|arr| {
+            let has_mcp = arr.iter().any(|v| v.as_str() == Some("mcp"));
+            let has_serve = arr.iter().any(|v| v.as_str() == Some("serve"));
+            has_mcp && has_serve
+        });
     cmd_ok && args_ok
 }
 
@@ -1521,7 +1610,10 @@ fn inspect_mcp_impl(
     let (status, unavailable_reason) = if registered && handshake_ok {
         ("ok".to_string(), None)
     } else if registered && !handshake_ok {
-        ("unavailable".to_string(), Some("handshake_failed".to_string()))
+        (
+            "unavailable".to_string(),
+            Some("handshake_failed".to_string()),
+        )
     } else {
         ("unregistered".to_string(), None)
     };

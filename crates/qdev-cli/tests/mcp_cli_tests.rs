@@ -1,4 +1,4 @@
-//! Integration tests for `qdev mcp serve` and `qdev install mcp` CLI per Story 4.5.
+//! Integration tests for `qdev mcp serve` and `qdev install mcp` CLI.
 
 use std::fs;
 use std::path::Path;
@@ -98,7 +98,10 @@ fn test_mcp_install_claude_and_cursor_human_and_json() {
     let schema_str = PayloadKind::McpInstall.schema_str();
     let schema_json: Value = serde_json::from_str(schema_str).unwrap();
     let validator = jsonschema::validator_for(&schema_json).unwrap();
-    let errors: Vec<String> = validator.iter_errors(&payload).map(|e| e.to_string()).collect();
+    let errors: Vec<String> = validator
+        .iter_errors(&payload)
+        .map(|e| e.to_string())
+        .collect();
     assert!(
         errors.is_empty(),
         "Payload must match payload-mcp-install.json schema: {:?}",
@@ -138,10 +141,7 @@ fn test_mcp_install_preserves_existing_config() {
     let val: Value = serde_json::from_str(&content).unwrap();
     assert_eq!(val["theme"], "dark");
     assert_eq!(val["mcpServers"]["other-server"]["command"], "node");
-    assert_eq!(
-        val["mcpServers"]["qdev"]["args"],
-        json!(["mcp", "serve"])
-    );
+    assert_eq!(val["mcpServers"]["qdev"]["args"], json!(["mcp", "serve"]));
 }
 
 #[test]

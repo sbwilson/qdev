@@ -1,4 +1,4 @@
-//! Git Hook Shims & qdev hook runner per Story 3.8.
+//! Git Hook Shims & qdev hook runner.
 //!
 //! Provides two-line POSIX hook shims (`pre-commit`, `pre-push`, `prepare-commit-msg`)
 //! delegating to `qdev hook <name>`, preserving and chaining existing non-qdev hooks,
@@ -397,7 +397,7 @@ pub fn run_legacy_hook(
 }
 
 /// Executes `qdev hook pre-commit` checks:
-/// 1. Hygiene comment linter (stubbed / pass for Story 3.8).
+/// 1. Hygiene comment linter.
 /// 2. Changed validation (`validate --changed`).
 /// 3. NFR-404 secret pattern scan over staged scratchpad/evidence files.
 /// 4. Chained `.git/hooks/pre-commit.legacy` execution.
@@ -550,17 +550,16 @@ pub fn run_pre_push(
         )
         .with_policy("preflight_guard");
 
-        return Err(QdevError::policy_refusal(
-            "preflight_refusal",
-            text.trim_end(),
-        )
-        .with_details(serde_json::json!({
-            "status": "refusal",
-            "summary": outcome.summary,
-            "diagnostics": outcome.diagnostics,
-            "remediation_commands": outcome.remediation_commands,
-        }))
-        .with_attribution(attribution));
+        return Err(
+            QdevError::policy_refusal("preflight_refusal", text.trim_end())
+                .with_details(serde_json::json!({
+                    "status": "refusal",
+                    "summary": outcome.summary,
+                    "diagnostics": outcome.diagnostics,
+                    "remediation_commands": outcome.remediation_commands,
+                }))
+                .with_attribution(attribution),
+        );
     }
 
     // 2. Legacy hook chaining (with stdin forwarded)
@@ -570,7 +569,7 @@ pub fn run_pre_push(
 
 /// Executes `qdev hook prepare-commit-msg`:
 /// 1. If `config.commit_messages.enabled` is false, no-op.
-/// 2. If enabled, draft message (Story 3.11).
+/// 2. If enabled, draft message.
 /// 3. Chained `.git/hooks/prepare-commit-msg.legacy` execution.
 pub fn run_prepare_commit_msg(
     workspace_root: &Path,

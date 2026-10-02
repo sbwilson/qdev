@@ -120,10 +120,7 @@ impl DoctorSection for CacheDoctorSection {
         Ok(DoctorSectionReport {
             name: self.name().to_string(),
             fields: vec![
-                (
-                    "status".to_string(),
-                    serde_json::Value::from(schema_status),
-                ),
+                ("status".to_string(), serde_json::Value::from(schema_status)),
                 // Named `cache_schema_version`, not `schema_version`: the envelope already
                 // has a `schema_version` (a string, the payload contract version), and a
                 // section field of the same name but a different type and meaning would be a
@@ -207,19 +204,10 @@ impl DoctorSection for ValidationDoctorSection {
     }
 
     fn run(&self, store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
-        // `doctor` is the command a user runs when something is already wrong, so a validation
-        // pass that cannot complete — a half-migrated cache missing a table one of the checks
-        // reads — is reported as `status: unavailable` rather than aborting the command and
-        // taking the rest of the diagnostic down with it. The error's code travels with it in
-        // `unavailable_reason`: the `cache` section's `schema_status` explains a cache-shaped
-        // failure, but nothing else in the payload would explain any other kind.
-        //
-        // The duplicate-id scan still skips a file or directory it cannot read and returns
-        // what it found, but the hydration sweep records a `read_error` finding for every
-        // unreadable directory it hits (and clears them again once the directory reads) and
-        // this command passes the store to the check, so a `chmod 000`'d specs directory
-        // surfaces in the counts above via the merged cache findings. The residual blind spot
-        // is the cache-unavailable path only — `deferred-work.md` tracks it against the check.
+        // `doctor` reports validation failures as `unavailable` rather than aborting,
+        // preserving the rest of the diagnostics. The error code travels in `unavailable_reason`.
+        // The duplicate-id scan skips unreadable files, while the sweep records `read_error`
+        // findings so unreadable directories surface in findings counts.
         let (status, unavailable_reason, finding_count, by_code) =
             match run_validation(store, &self.workspace_root, &self.config) {
                 Ok(findings) => {
@@ -441,11 +429,7 @@ impl DoctorSection for SkillsDoctorSection {
     fn run(&self, _store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
         match crate::skills::inspect_skills(&self.workspace_root) {
             Ok(status) => {
-                let status_str = if status.up_to_date {
-                    "ok"
-                } else {
-                    "mismatch"
-                };
+                let status_str = if status.up_to_date { "ok" } else { "mismatch" };
                 Ok(DoctorSectionReport {
                     name: self.name().to_string(),
                     fields: vec![
@@ -604,7 +588,8 @@ impl DoctorSection for GitDoctorSection {
             });
         }
 
-        let status_output = crate::gate::git::run_git(&self.workspace_root, &["status", "--porcelain"]);
+        let status_output =
+            crate::gate::git::run_git(&self.workspace_root, &["status", "--porcelain"]);
         let (clean, dirty_files) = match status_output {
             Ok(out) if out.status.success() => {
                 let text = String::from_utf8_lossy(&out.stdout);
@@ -644,7 +629,10 @@ impl DoctorSection for GitDoctorSection {
             }
         };
 
-        let branch = match crate::gate::git::run_git(&self.workspace_root, &["rev-parse", "--abbrev-ref", "HEAD"]) {
+        let branch = match crate::gate::git::run_git(
+            &self.workspace_root,
+            &["rev-parse", "--abbrev-ref", "HEAD"],
+        ) {
             Ok(out) if out.status.success() => {
                 let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if b.is_empty() {
@@ -676,8 +664,7 @@ impl DoctorSection for GitDoctorSection {
                     | Some("refs_missing")
                     | Some("integration_branch_missing")
                     | Some("remote_ref_missing")
-            )
-        {
+            ) {
             "mismatch"
         } else {
             "ok"
@@ -689,7 +676,10 @@ impl DoctorSection for GitDoctorSection {
                 ("status".to_string(), serde_json::Value::from(status)),
                 ("unavailable_reason".to_string(), serde_json::Value::Null),
                 ("clean".to_string(), serde_json::Value::from(clean)),
-                ("dirty_files".to_string(), serde_json::Value::from(dirty_files)),
+                (
+                    "dirty_files".to_string(),
+                    serde_json::Value::from(dirty_files),
+                ),
                 (
                     "branch".to_string(),
                     match branch {
@@ -760,7 +750,8 @@ impl DoctorSection for ModulesDoctorSection {
 
     fn run(&self, _store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
         let declared_count = self.config.modules.len();
-        let findings = crate::validate::find_unmatched_module_globs(&self.workspace_root, &self.config)?;
+        let findings =
+            crate::validate::find_unmatched_module_globs(&self.workspace_root, &self.config)?;
         let mut unmatched_globs = Vec::new();
         for finding in &findings {
             if let Some(msg) = &finding.message {
@@ -852,11 +843,7 @@ impl DoctorSection for GatesDoctorSection {
         }
 
         let missing_count = missing_executables.len();
-        let status = if missing_count == 0 {
-            "ok"
-        } else {
-            "mismatch"
-        };
+        let status = if missing_count == 0 { "ok" } else { "mismatch" };
 
         Ok(DoctorSectionReport {
             name: self.name().to_string(),
@@ -918,4 +905,3 @@ pub fn default_doctor_sections(
         )),
     ]
 }
-

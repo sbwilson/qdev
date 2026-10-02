@@ -44,10 +44,10 @@ mod impact_tests;
 mod init_tests;
 #[path = "lease_tests.rs"]
 mod lease_tests;
-#[path = "modules_tests.rs"]
-mod modules_tests;
 #[path = "mcp_tests.rs"]
 mod mcp_tests;
+#[path = "modules_tests.rs"]
+mod modules_tests;
 #[path = "next_tests.rs"]
 mod next_tests;
 #[path = "preflight_tests.rs"]

@@ -1,4 +1,4 @@
-//! Unit tests for skills generation, CommandCatalog, version stamping, and installation per Story 4.4.
+//! Unit tests for skills generation, CommandCatalog, version stamping, and installation.
 
 use std::fs;
 use tempfile::TempDir;
@@ -31,7 +31,11 @@ fn test_command_catalog_all_contains_commands() {
         let found = CommandCatalog::find(name);
         assert!(found.is_some(), "command '{}' must exist in catalog", name);
         let cmd = found.unwrap();
-        assert!(!cmd.summary.is_empty(), "command '{}' must have a summary", name);
+        assert!(
+            !cmd.summary.is_empty(),
+            "command '{}' must have a summary",
+            name
+        );
     }
 }
 
@@ -44,8 +48,14 @@ fn test_skill_template_generation_claude() {
 
     for (rel_path, content) in &skills {
         let path_str = rel_path.to_string_lossy();
-        assert!(path_str.starts_with(".claude/skills/"), "path must start with .claude/skills/");
-        assert!(path_str.ends_with("/SKILL.md"), "path must end with /SKILL.md");
+        assert!(
+            path_str.starts_with(".claude/skills/"),
+            "path must start with .claude/skills/"
+        );
+        assert!(
+            path_str.ends_with("/SKILL.md"),
+            "path must end with /SKILL.md"
+        );
 
         // Frontmatter verification
         assert!(
@@ -94,8 +104,14 @@ fn test_skill_template_generation_agents() {
 
     for (rel_path, content) in &skills {
         let path_str = rel_path.to_string_lossy();
-        assert!(path_str.starts_with(".agents/skills/"), "path must start with .agents/skills/");
-        assert!(path_str.ends_with("/SKILL.md"), "path must end with /SKILL.md");
+        assert!(
+            path_str.starts_with(".agents/skills/"),
+            "path must start with .agents/skills/"
+        );
+        assert!(
+            path_str.ends_with("/SKILL.md"),
+            "path must end with /SKILL.md"
+        );
         assert!(content.contains(&format!("version: \"{}\"", version)));
         assert!(content.contains(&format!("qdev_version: \"{}\"", version)));
         assert!(content.contains("--json"));
@@ -115,7 +131,8 @@ fn test_install_skills_requires_at_least_one_target() {
     let err = install_skills(temp.path(), &options).unwrap_err();
     assert_eq!(err.exit_code(), ExitCode::UsageError);
     assert!(
-        err.message().contains("specify at least one of --claude, --cursor, or --agents"),
+        err.message()
+            .contains("specify at least one of --claude, --cursor, or --agents"),
         "error message: {}",
         err.message()
     );
@@ -136,7 +153,11 @@ fn test_install_skills_claude() {
     assert_eq!(report.version, env!("CARGO_PKG_VERSION"));
 
     for name in CORE_SKILL_NAMES {
-        let file = temp.path().join(".claude/skills").join(name).join("SKILL.md");
+        let file = temp
+            .path()
+            .join(".claude/skills")
+            .join(name)
+            .join("SKILL.md");
         assert!(file.is_file(), "file {:?} must exist", file);
     }
 
@@ -183,7 +204,11 @@ fn test_install_skills_agents() {
     assert_eq!(report.installed_files.len(), 5);
 
     for name in CORE_SKILL_NAMES {
-        let file = temp.path().join(".agents/skills").join(name).join("SKILL.md");
+        let file = temp
+            .path()
+            .join(".agents/skills")
+            .join(name)
+            .join("SKILL.md");
         assert!(file.is_file());
     }
 
@@ -411,7 +436,9 @@ fn test_qdev_plan_multi_perspective_synthesis_template() {
     assert!(plan.contains("qdev relate"));
 
     // Must contain rejection directive
-    assert!(plan.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+    assert!(plan.contains(
+        "Reject any model response or proposal missing any required heading and re-prompt"
+    ));
 }
 
 #[test]
@@ -434,7 +461,9 @@ fn test_qdev_create_story_workflow() {
     assert!(create.contains("Architectural constraints"));
     assert!(create.contains("Safety & risk profile"));
     assert!(create.contains("Implementation directives"));
-    assert!(create.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+    assert!(create.contains(
+        "Reject any model response or proposal missing any required heading and re-prompt"
+    ));
     assert!(create.contains("qdev create story"));
     assert!(create.contains("qdev constraint add"));
     assert!(create.contains("qdev transition story <story-id> ready --json"));
@@ -474,7 +503,9 @@ fn test_cursor_rule_synthesis_template_and_models() {
     assert!(content.contains("Architectural constraints"));
     assert!(content.contains("Safety & risk profile"));
     assert!(content.contains("Implementation directives"));
-    assert!(content.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+    assert!(content.contains(
+        "Reject any model response or proposal missing any required heading and re-prompt"
+    ));
     assert!(content.contains("model_hint: \"reasoning\""));
     assert!(content.contains("model: \"reasoning\""));
 }
@@ -508,7 +539,9 @@ headings = [
     let plan_file = temp.path().join(".claude/skills/qdev-plan/SKILL.md");
     let plan_content = fs::read_to_string(plan_file).unwrap();
     assert!(plan_content.contains("Clinical efficacy"));
-    assert!(plan_content.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+    assert!(plan_content.contains(
+        "Reject any model response or proposal missing any required heading and re-prompt"
+    ));
 
     let cursor_file = temp.path().join(".cursor/rules/qdev.mdc");
     let cursor_content = fs::read_to_string(cursor_file).unwrap();
@@ -566,7 +599,8 @@ fn test_install_skills_with_explicit_models() {
         cursor: true,
         agents: true,
     };
-    let report = qdev_core::install_skills_with_models(temp.path(), &options, Some(&models)).unwrap();
+    let report =
+        qdev_core::install_skills_with_models(temp.path(), &options, Some(&models)).unwrap();
     assert_eq!(report.installed_files.len(), 11);
     let dev_file = temp.path().join(".claude/skills/qdev-develop/SKILL.md");
     let dev_content = fs::read_to_string(dev_file).unwrap();
@@ -600,11 +634,16 @@ fn test_skills_synthesis_custom_headings() {
 
     let plan = qdev_core::generate_skill_content_configured("qdev-plan", None, Some(&synthesis));
     assert!(plan.contains("Clinical value"));
-    assert!(plan.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+    assert!(plan.contains(
+        "Reject any model response or proposal missing any required heading and re-prompt"
+    ));
 
-    let create = qdev_core::generate_skill_content_configured("qdev-create-story", None, Some(&synthesis));
+    let create =
+        qdev_core::generate_skill_content_configured("qdev-create-story", None, Some(&synthesis));
     assert!(create.contains("Clinical value"));
-    assert!(create.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+    assert!(create.contains(
+        "Reject any model response or proposal missing any required heading and re-prompt"
+    ));
 
     let (_, cursor) = qdev_core::generate_cursor_rule_configured(None, Some(&synthesis));
     assert!(cursor.contains("Clinical value"));
@@ -613,7 +652,9 @@ fn test_skills_synthesis_custom_headings() {
 #[test]
 fn test_skills_synthesis_custom_template() {
     let synthesis = qdev_core::SynthesisConfig {
-        template: Some("### Custom Synthesis Block\nRequired: {headings}\nReject if incomplete.\n".to_string()),
+        template: Some(
+            "### Custom Synthesis Block\nRequired: {headings}\nReject if incomplete.\n".to_string(),
+        ),
         headings: None,
     };
 
@@ -622,7 +663,8 @@ fn test_skills_synthesis_custom_template() {
     assert!(plan.contains("Required: Product & domain value, Architectural constraints, Safety & risk profile, Implementation directives"));
     assert!(plan.contains("Reject if incomplete."));
 
-    let create = qdev_core::generate_skill_content_configured("qdev-create-story", None, Some(&synthesis));
+    let create =
+        qdev_core::generate_skill_content_configured("qdev-create-story", None, Some(&synthesis));
     assert!(create.contains("### Custom Synthesis Block"));
 }
 
@@ -682,4 +724,3 @@ fn test_synthesis_validate_output() {
         Ok(())
     );
 }
-

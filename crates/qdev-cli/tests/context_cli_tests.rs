@@ -1,4 +1,4 @@
-//! `qdev context` CLI tests (Story 4.1): the I/O matrix through the real binary — envelope
+//! Context CLI tests: the I/O matrix through the real binary — envelope
 //! shape against the printed schema, output modes, default budgets, and the error cases.
 
 use std::fs;
@@ -41,7 +41,7 @@ fn write_file(root: &Path, rel_path: &str, content: &str) {
     fs::write(path, content).unwrap();
 }
 
-/// The reference fixture: epic E12 + story E12S4 + a requirement and an ADR it links to.
+/// The reference fixture: epic E12 + entity E12S4 + a requirement and an ADR it links to.
 fn write_story_fixture(root: &Path) {
     write_file(
         root,
@@ -174,13 +174,7 @@ fn test_develop_json_envelope_shape_and_order() {
         .unwrap()
         .current_dir(root)
         .args([
-            "context",
-            "E12S4",
-            "--phase",
-            "develop",
-            "--budget",
-            "1200",
-            "--json",
+            "context", "E12S4", "--phase", "develop", "--budget", "1200", "--json",
         ])
         .assert()
         .success()
@@ -245,14 +239,7 @@ fn test_stats_object_only_with_flag_and_under_budget_for_reference_fixture() {
         .unwrap()
         .current_dir(root)
         .args([
-            "context",
-            "E12S4",
-            "--phase",
-            "develop",
-            "--budget",
-            "1200",
-            "--stats",
-            "--json",
+            "context", "E12S4", "--phase", "develop", "--budget", "1200", "--stats", "--json",
         ])
         .assert()
         .success()
@@ -316,14 +303,7 @@ fn test_text_and_markdown_renderings_are_deterministic() {
     let markdown = Command::cargo_bin("qdev")
         .unwrap()
         .current_dir(root)
-        .args([
-            "context",
-            "E12S4",
-            "--phase",
-            "develop",
-            "--format",
-            "md",
-        ])
+        .args(["context", "E12S4", "--phase", "develop", "--format", "md"])
         .assert()
         .success()
         .code(0);
@@ -358,13 +338,7 @@ fn test_json_and_format_md_together_is_usage_error_exit_2() {
         .unwrap()
         .current_dir(root)
         .args([
-            "context",
-            "E12S4",
-            "--phase",
-            "develop",
-            "--json",
-            "--format",
-            "md",
+            "context", "E12S4", "--phase", "develop", "--json", "--format", "md",
         ])
         .assert()
         .failure()
@@ -384,9 +358,7 @@ fn test_unknown_format_is_usage_error() {
     let assert = Command::cargo_bin("qdev")
         .unwrap()
         .current_dir(root)
-        .args([
-            "context", "E12S4", "--phase", "develop", "--format", "html",
-        ])
+        .args(["context", "E12S4", "--phase", "develop", "--format", "html"])
         .assert()
         .failure()
         .code(2);
@@ -475,8 +447,7 @@ fn test_missing_phase_is_clap_usage_error_exit_2() {
         .assert()
         .failure()
         .code(2);
-    assert!(!assert.get_output().stdout.is_empty()
-        || !assert.get_output().stderr.is_empty());
+    assert!(!assert.get_output().stdout.is_empty() || !assert.get_output().stderr.is_empty());
 }
 
 /// The `qdev context --json` envelope validates against the printed schema for every phase.
@@ -533,8 +504,7 @@ fn test_review_diff_empty_without_git_baseline() {
         .unwrap()
         .iter()
         .find(|s| s["name"] == "diff")
-        .expect("the diff section must be present for review")
-        ["content"]
+        .expect("the diff section must be present for review")["content"]
         .as_str()
         .unwrap()
         .to_string();
@@ -584,7 +554,12 @@ fn test_truncation_lists_dropped_sections_in_order() {
     assert_eq!(
         truncated_names,
         vec![
-            "constraints", "modules", "adr_excerpts", "requirements", "scratchpad", "gates",
+            "constraints",
+            "modules",
+            "adr_excerpts",
+            "requirements",
+            "scratchpad",
+            "gates",
             "hygiene"
         ]
     );
@@ -614,19 +589,16 @@ fn test_context_is_read_only_across_repeated_runs() {
     let cache_db_path = root.join(".qdev/cache/cache.sqlite");
     let store = SqliteStore::open(&cache_db_path).unwrap();
     let stamp_before = store.get_last_synced_at().unwrap();
-    assert!(stamp_before.is_some(), "workspace must be synced before test");
+    assert!(
+        stamp_before.is_some(),
+        "workspace must be synced before test"
+    );
 
     let run = || {
         let output = Command::cargo_bin("qdev")
             .unwrap()
             .current_dir(root)
-            .args([
-                "context",
-                "E12S4",
-                "--phase",
-                "develop",
-                "--stats",
-            ])
+            .args(["context", "E12S4", "--phase", "develop", "--stats"])
             .output()
             .unwrap();
         assert!(output.status.success());
@@ -655,13 +627,7 @@ fn test_markdown_stats_table_rendering() {
         .unwrap()
         .current_dir(root)
         .args([
-            "context",
-            "E12S4",
-            "--phase",
-            "develop",
-            "--stats",
-            "--format",
-            "md",
+            "context", "E12S4", "--phase", "develop", "--stats", "--format", "md",
         ])
         .assert()
         .success()
@@ -699,8 +665,7 @@ fn test_develop_context_cli_hygiene_directive_and_citation_templates() {
         .unwrap()
         .iter()
         .find(|s| s["name"] == "hygiene")
-        .expect("hygiene section must be present")
-        ["content"]
+        .expect("hygiene section must be present")["content"]
         .as_str()
         .unwrap();
 
@@ -747,8 +712,7 @@ rust = "// [{entity_id}]"
         .unwrap()
         .iter()
         .find(|s| s["name"] == "hygiene")
-        .expect("hygiene section must be present")
-        ["content"]
+        .expect("hygiene section must be present")["content"]
         .as_str()
         .unwrap();
 
@@ -866,4 +830,3 @@ fn test_review_context_cli_hygiene_findings() {
         findings_content
     );
 }
-

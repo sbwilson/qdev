@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use qdev_core::{
-    find_workspace_root, install_hooks, install_mcp, install_skills_configured,
-    ExitCode, JsonEnvelope, QdevError, SkillInstallOptions,
+    find_workspace_root, install_hooks, install_mcp, install_skills_configured, ExitCode,
+    JsonEnvelope, QdevError, SkillInstallOptions,
 };
 
 use crate::cli;

@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "gate": "clippy",
+  "story": "E5S1",
+  "commit": "e998f49",
+  "status": "pass",
+  "exit_code": 0,
+  "duration_ms": 1799,
+  "metric": null,
+  "summary": "gate passed",
+  "output_sha256": "cda3534feb7e7639c669cf1ecb44df65c6b4f9e0cdcfe700670097e01ccd50ef",
+  "run_by": {
+    "type": "human",
+    "id": "simon"
+  },
+  "ran_at": "2026-10-02T07:05:01Z",
+  "verifies": [],
+  "skipped_locally": false
+}

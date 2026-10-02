@@ -432,14 +432,7 @@ fn sprint_review_gate_failure_attaches_attribution() {
         skip: None,
     });
 
-    let error = review_sprint(
-        root,
-        &StorageConfig::default(),
-        &store,
-        &config,
-        1,
-    )
-    .unwrap_err();
+    let error = review_sprint(root, &StorageConfig::default(), &store, &config, 1).unwrap_err();
 
     assert_eq!(error.code(), "gate_failed");
     let details = error.details().expect("details must be present");

@@ -1,4 +1,4 @@
-//! CLI integration tests for scope enforcement and cross-team overrides (Story 2.4).
+//! CLI integration tests for scope enforcement and cross-team overrides.
 
 use std::fs;
 use std::path::Path;
@@ -222,8 +222,14 @@ fn test_cli_update_non_interactive_json_refusal() {
     let stdout = std::str::from_utf8(&output.stdout).unwrap();
     let parsed: Value = serde_json::from_str(stdout).unwrap();
     assert_eq!(parsed["error"]["code"], "needs_confirmation");
-    assert_eq!(parsed["error"]["details"]["policy"], "cross_team_governance");
-    assert!(!parsed["error"]["details"]["rule"].as_str().unwrap().is_empty());
+    assert_eq!(
+        parsed["error"]["details"]["policy"],
+        "cross_team_governance"
+    );
+    assert!(!parsed["error"]["details"]["rule"]
+        .as_str()
+        .unwrap()
+        .is_empty());
     let msg = parsed["error"]["message"].as_str().unwrap();
     assert!(msg.contains("--override"));
     assert!(msg.contains("--justification"));
@@ -374,7 +380,7 @@ fn test_cli_transition_scope_enforcement() {
         .assert()
         .success();
 
-    // Transitioning sibling story E12S5 refuses without override
+    // [E12S5] Sibling transition refuses without override
     let mut trans_cmd = Command::cargo_bin("qdev").unwrap();
     trans_cmd
         .current_dir(root)

@@ -1,0 +1,2 @@
+{"seq":1,"at":"2026-10-02T06:54:30Z","author":{"type":"human","id":"simon"},"kind":"note","text":"Starting implementation of E5S1: resolving 12 clippy test warnings across config_tests, context_tests, mcp_tests, and formatting drift"}
+{"seq":2,"at":"2026-10-02T06:58:18Z","author":{"type":"human","id":"simon"},"kind":"note","text":"Resolved all 12 clippy test warnings in config_tests, context_tests, and mcp_tests without allowances. Ran cargo fmt to eliminate test formatting differences. Verification gates check, clippy, and test passed cleanly."}

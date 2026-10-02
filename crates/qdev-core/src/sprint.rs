@@ -1,6 +1,6 @@
 //! Sprint lifecycle domain logic and story assignment handling.
 //!
-//! Conforms to AD-7, AD-8, and Story 2.9: Decouples story identity from sprint
+//! [AD-7] [AD-8] Decouples story identity from sprint
 //! membership via `docs/state/sprints/sprint-{n}.md` frontmatter and `sprint_assignments`
 //! SQLite table. Sprints are written atomically under the workspace advisory write lock,
 //! keeping markdown files and SQLite cache synchronized in lock-step.
@@ -634,10 +634,9 @@ pub fn close_sprint(options: &SprintCloseOptions) -> Result<SprintCloseResult, Q
         .unwrap_or("")
         .trim();
     if matches!(current_status, "completed" | "paused" | "abandoned") {
-        let attribution = crate::errors::RejectionAttribution::new(
-            "Terminal sprints cannot be closed again",
-        )
-        .with_policy("sprint_lifecycle");
+        let attribution =
+            crate::errors::RejectionAttribution::new("Terminal sprints cannot be closed again")
+                .with_policy("sprint_lifecycle");
 
         return Err(QdevError::policy_refusal(
             "sprint_already_closed",
@@ -653,10 +652,9 @@ pub fn close_sprint(options: &SprintCloseOptions) -> Result<SprintCloseResult, Q
         .with_attribution(attribution));
     }
     if current_status != "active" {
-        let attribution = crate::errors::RejectionAttribution::new(
-            "Only active sprints can be closed",
-        )
-        .with_policy("sprint_lifecycle");
+        let attribution =
+            crate::errors::RejectionAttribution::new("Only active sprints can be closed")
+                .with_policy("sprint_lifecycle");
 
         return Err(QdevError::policy_refusal(
             "sprint_not_active",
@@ -818,7 +816,8 @@ pub fn close_sprint(options: &SprintCloseOptions) -> Result<SprintCloseResult, Q
             .as_deref()
             == Some("in-progress")
         {
-            if let Some(matching_lease) = leases.iter().find(|l| l.story_id == assignment.story_id) {
+            if let Some(matching_lease) = leases.iter().find(|l| l.story_id == assignment.story_id)
+            {
                 let attribution = crate::errors::RejectionAttribution::new(
                     "Stories in progress with active leases must be released or completed before closing sprint",
                 )

@@ -282,14 +282,9 @@ fn validate_storage_section(val: &toml::Value, filename: &str) -> Result<(), Qde
                     "must name a directory, but is empty",
                 ));
             }
-            // Judged the same way on every platform, deliberately, and so not by
-            // `Path::is_absolute` or `Path::components`: both answer for the host. `qdev.toml` is
-            // committed and shared, so a value the loader accepts on Linux and refuses on Windows
-            // is a workspace that builds for one developer and not the next. `/absolute/path` is
-            // not "absolute" to Windows — it has no drive prefix — yet joining it onto the root
-            // still lands outside the workspace, on whatever drive is current; `C:\x` is an
-            // ordinary relative name to Unix and an escape to Windows. Both are refused
-            // everywhere.
+            // Judged consistently across platforms rather than via host-specific Path::is_absolute.
+            // Both Unix `/absolute/path` (lands on arbitrary Windows drive) and Windows `C:\x`
+            // (escapes root) are uniformly refused across all environments.
             let segments: Vec<&str> = trimmed.split(['/', '\\']).collect();
             let drive_prefixed = {
                 let first = segments[0];
@@ -995,7 +990,12 @@ fn validate_synthesis_section(val: &toml::Value, filename: &str) -> Result<(), Q
                 })));
             }
             None => {
-                return Err(type_mismatch_error("template", "synthesis", "string", filename));
+                return Err(type_mismatch_error(
+                    "template",
+                    "synthesis",
+                    "string",
+                    filename,
+                ));
             }
         }
     }
@@ -1351,13 +1351,15 @@ pub fn merge_configs(
     let loc_hygiene = local_table.and_then(|t| t.get("hygiene"));
     let proj_hygiene = project_table.and_then(|t| t.get("hygiene"));
 
-    let (cit_val, cit_src) = if let Some(v) = loc_hygiene
-        .and_then(|h| h.get("citation_template").or_else(|| h.get("citation_format")))
-    {
+    let (cit_val, cit_src) = if let Some(v) = loc_hygiene.and_then(|h| {
+        h.get("citation_template")
+            .or_else(|| h.get("citation_format"))
+    }) {
         (Some(v.clone()), ConfigSource::Local)
-    } else if let Some(v) = proj_hygiene
-        .and_then(|h| h.get("citation_template").or_else(|| h.get("citation_format")))
-    {
+    } else if let Some(v) = proj_hygiene.and_then(|h| {
+        h.get("citation_template")
+            .or_else(|| h.get("citation_format"))
+    }) {
         (Some(v.clone()), ConfigSource::Project)
     } else {
         (None, ConfigSource::Default)
@@ -1378,7 +1380,10 @@ pub fn merge_configs(
         for (k, v) in loc_tmpls {
             if let Some(s) = v.as_str() {
                 merged_tmpls.insert(k.clone(), s.to_string());
-                sources.insert(format!("hygiene.citation_templates.{}", k), ConfigSource::Local);
+                sources.insert(
+                    format!("hygiene.citation_templates.{}", k),
+                    ConfigSource::Local,
+                );
             }
         }
     }
@@ -1390,10 +1395,16 @@ pub fn merge_configs(
             tmpls_src = ConfigSource::Project;
         }
         for (k, v) in proj_tmpls {
-            if !merged_tmpls.keys().any(|existing| existing.eq_ignore_ascii_case(k)) {
+            if !merged_tmpls
+                .keys()
+                .any(|existing| existing.eq_ignore_ascii_case(k))
+            {
                 if let Some(s) = v.as_str() {
                     merged_tmpls.insert(k.clone(), s.to_string());
-                    sources.insert(format!("hygiene.citation_templates.{}", k), ConfigSource::Project);
+                    sources.insert(
+                        format!("hygiene.citation_templates.{}", k),
+                        ConfigSource::Project,
+                    );
                 }
             }
         }

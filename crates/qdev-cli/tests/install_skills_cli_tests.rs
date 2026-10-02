@@ -1,4 +1,4 @@
-//! Integration tests for `qdev install skills` CLI and doctor skill detection per Story 4.4.
+//! Integration tests for `qdev install skills` CLI and doctor skill detection.
 
 use std::fs;
 use std::path::Path;
@@ -38,9 +38,12 @@ fn test_command_catalog_aligned_with_clap_cli() {
 
     // Direction 1: Every command in CommandCatalog exists in clap's Cli::command()
     for cmd in CommandCatalog::all() {
-        let sub = clap_cmd
-            .find_subcommand(cmd.name)
-            .unwrap_or_else(|| panic!("command '{}' from CommandCatalog not found in clap CLI", cmd.name));
+        let sub = clap_cmd.find_subcommand(cmd.name).unwrap_or_else(|| {
+            panic!(
+                "command '{}' from CommandCatalog not found in clap CLI",
+                cmd.name
+            )
+        });
 
         for subcmd in cmd.subcommands {
             assert!(
@@ -87,7 +90,9 @@ fn test_install_skills_missing_flags_exits_2_usage_error() {
         .assert()
         .failure()
         .code(2)
-        .stderr(predicates::str::contains("specify at least one of --claude, --cursor, or --agents"));
+        .stderr(predicates::str::contains(
+            "specify at least one of --claude, --cursor, or --agents",
+        ));
 
     // Also test in --json mode
     let mut cmd_json = Command::cargo_bin("qdev").unwrap();
@@ -118,11 +123,17 @@ fn test_install_skills_claude() {
         .assert()
         .success()
         .code(0)
-        .stdout(predicates::str::contains("Installed 5 skill/rule file(s) across target(s) [claude]"));
+        .stdout(predicates::str::contains(
+            "Installed 5 skill/rule file(s) across target(s) [claude]",
+        ));
 
     let version = env!("CARGO_PKG_VERSION");
     for skill in CORE_SKILL_NAMES {
-        let path = temp.path().join(".claude/skills").join(skill).join("SKILL.md");
+        let path = temp
+            .path()
+            .join(".claude/skills")
+            .join(skill)
+            .join("SKILL.md");
         assert!(path.is_file(), "file {:?} must exist", path);
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains(&format!("version: \"{}\"", version)));
@@ -143,7 +154,9 @@ fn test_install_skills_cursor() {
         .assert()
         .success()
         .code(0)
-        .stdout(predicates::str::contains("Installed 1 skill/rule file(s) across target(s) [cursor]"));
+        .stdout(predicates::str::contains(
+            "Installed 1 skill/rule file(s) across target(s) [cursor]",
+        ));
 
     let rule_file = temp.path().join(".cursor/rules/qdev.mdc");
     assert!(rule_file.is_file());
@@ -164,10 +177,16 @@ fn test_install_skills_agents() {
         .assert()
         .success()
         .code(0)
-        .stdout(predicates::str::contains("Installed 5 skill/rule file(s) across target(s) [agents]"));
+        .stdout(predicates::str::contains(
+            "Installed 5 skill/rule file(s) across target(s) [agents]",
+        ));
 
     for skill in CORE_SKILL_NAMES {
-        let path = temp.path().join(".agents/skills").join(skill).join("SKILL.md");
+        let path = temp
+            .path()
+            .join(".agents/skills")
+            .join(skill)
+            .join("SKILL.md");
         assert!(path.is_file());
     }
 }
@@ -180,7 +199,9 @@ fn test_install_skills_all_targets_json() {
     let mut cmd = Command::cargo_bin("qdev").unwrap();
     let assert = cmd
         .current_dir(temp.path())
-        .args(["install", "skills", "--claude", "--cursor", "--agents", "--json"])
+        .args([
+            "install", "skills", "--claude", "--cursor", "--agents", "--json",
+        ])
         .assert()
         .success()
         .code(0);
@@ -204,7 +225,11 @@ fn test_install_skills_all_targets_json() {
     let schema_json = PayloadKind::SkillInstall.schema_json();
     let validator = jsonschema::validator_for(&schema_json).unwrap();
     let errors: Vec<String> = validator.iter_errors(&val).map(|e| e.to_string()).collect();
-    assert!(errors.is_empty(), "payload must validate against schema: {:?}", errors);
+    assert!(
+        errors.is_empty(),
+        "payload must validate against schema: {:?}",
+        errors
+    );
 }
 
 #[test]
@@ -358,8 +383,16 @@ fn test_doctor_text_clean_skills() {
         .code(0);
 
     let text = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    assert!(text.contains("[skills]"), "output must contain [skills]: {}", text);
-    assert!(text.contains("status = ok"), "output must contain status = ok: {}", text);
+    assert!(
+        text.contains("[skills]"),
+        "output must contain [skills]: {}",
+        text
+    );
+    assert!(
+        text.contains("status = ok"),
+        "output must contain status = ok: {}",
+        text
+    );
     assert!(
         text.contains("outdated_skills = none"),
         "output must contain outdated_skills = none: {}",
@@ -403,7 +436,11 @@ qdev_version: "0.0.9"
         .code(0);
 
     let text = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    assert!(text.contains("[skills]"), "output must contain [skills]: {}", text);
+    assert!(
+        text.contains("[skills]"),
+        "output must contain [skills]: {}",
+        text
+    );
     assert!(
         text.contains("status = mismatch"),
         "output must contain status = mismatch: {}",
@@ -443,18 +480,26 @@ fn test_installed_skills_have_synthesis_template_and_default_model_hints() {
     assert!(plan.contains("Architectural constraints"));
     assert!(plan.contains("Safety & risk profile"));
     assert!(plan.contains("Implementation directives"));
-    assert!(plan.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+    assert!(plan.contains(
+        "Reject any model response or proposal missing any required heading and re-prompt"
+    ));
     assert!(plan.contains("qdev create story"));
     assert!(plan.contains("qdev relate"));
 
-    let create = fs::read_to_string(temp.path().join(".claude/skills/qdev-create-story/SKILL.md")).unwrap();
+    let create = fs::read_to_string(
+        temp.path()
+            .join(".claude/skills/qdev-create-story/SKILL.md"),
+    )
+    .unwrap();
     assert!(create.contains("model_hint: \"reasoning\""));
     assert!(create.contains("Structured Multi-Perspective Synthesis Template"));
     assert!(create.contains("Product & domain value"));
     assert!(create.contains("Architectural constraints"));
     assert!(create.contains("Safety & risk profile"));
     assert!(create.contains("Implementation directives"));
-    assert!(create.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+    assert!(create.contains(
+        "Reject any model response or proposal missing any required heading and re-prompt"
+    ));
     assert!(create.contains("qdev context <epic-id> --phase specify --json"));
     assert!(create.contains("qdev create story"));
     assert!(create.contains("qdev constraint add"));
@@ -494,7 +539,8 @@ fn test_installed_skills_have_synthesis_template_and_default_model_hints() {
     assert!(agent_qdev.contains("Workspace status"));
     assert!(agent_qdev.contains("Sprint state"));
 
-    let agent_plan = fs::read_to_string(temp.path().join(".agents/skills/qdev-plan/SKILL.md")).unwrap();
+    let agent_plan =
+        fs::read_to_string(temp.path().join(".agents/skills/qdev-plan/SKILL.md")).unwrap();
     assert!(agent_plan.contains("model_hint: \"reasoning\""));
     assert!(agent_plan.contains("model: \"reasoning\""));
     assert!(agent_plan.contains("Structured Multi-Perspective Synthesis Template"));
@@ -505,7 +551,11 @@ fn test_installed_skills_have_synthesis_template_and_default_model_hints() {
     assert!(agent_plan.contains("qdev create story"));
     assert!(agent_plan.contains("qdev relate"));
 
-    let agent_create = fs::read_to_string(temp.path().join(".agents/skills/qdev-create-story/SKILL.md")).unwrap();
+    let agent_create = fs::read_to_string(
+        temp.path()
+            .join(".agents/skills/qdev-create-story/SKILL.md"),
+    )
+    .unwrap();
     assert!(agent_create.contains("model_hint: \"reasoning\""));
     assert!(agent_create.contains("model: \"reasoning\""));
     assert!(agent_create.contains("qdev context <epic-id> --phase specify --json"));
@@ -513,7 +563,8 @@ fn test_installed_skills_have_synthesis_template_and_default_model_hints() {
     assert!(agent_create.contains("qdev constraint add"));
     assert!(agent_create.contains("qdev transition story <story-id> ready --json"));
 
-    let agent_dev = fs::read_to_string(temp.path().join(".agents/skills/qdev-develop/SKILL.md")).unwrap();
+    let agent_dev =
+        fs::read_to_string(temp.path().join(".agents/skills/qdev-develop/SKILL.md")).unwrap();
     assert!(agent_dev.contains("model_hint: \"fast-coding\""));
     assert!(agent_dev.contains("model: \"fast-coding\""));
     assert!(agent_dev.contains("qdev preflight --story <story-id> --json"));
@@ -525,7 +576,8 @@ fn test_installed_skills_have_synthesis_template_and_default_model_hints() {
     assert!(agent_dev.contains("constraint_id"));
     assert!(agent_dev.contains("gate_id"));
 
-    let agent_rev = fs::read_to_string(temp.path().join(".agents/skills/qdev-review/SKILL.md")).unwrap();
+    let agent_rev =
+        fs::read_to_string(temp.path().join(".agents/skills/qdev-review/SKILL.md")).unwrap();
     assert!(agent_rev.contains("model_hint: \"strongest\""));
     assert!(agent_rev.contains("model: \"strongest\""));
     assert!(agent_rev.contains("qdev context <story-id> --phase review --json"));
@@ -569,7 +621,11 @@ review = "custom-review-llm"
     assert!(plan.contains("model_hint: \"custom-specify-llm\""));
     assert!(plan.contains("model: \"custom-specify-llm\""));
 
-    let create = fs::read_to_string(temp.path().join(".claude/skills/qdev-create-story/SKILL.md")).unwrap();
+    let create = fs::read_to_string(
+        temp.path()
+            .join(".claude/skills/qdev-create-story/SKILL.md"),
+    )
+    .unwrap();
     assert!(create.contains("model_hint: \"custom-specify-llm\""));
     assert!(create.contains("model: \"custom-specify-llm\""));
 
@@ -591,19 +647,26 @@ review = "custom-review-llm"
     assert!(agent_qdev.contains("model_hint: \"custom-specify-llm\""));
     assert!(agent_qdev.contains("model: \"custom-specify-llm\""));
 
-    let agent_plan = fs::read_to_string(temp.path().join(".agents/skills/qdev-plan/SKILL.md")).unwrap();
+    let agent_plan =
+        fs::read_to_string(temp.path().join(".agents/skills/qdev-plan/SKILL.md")).unwrap();
     assert!(agent_plan.contains("model_hint: \"custom-specify-llm\""));
     assert!(agent_plan.contains("model: \"custom-specify-llm\""));
 
-    let agent_create = fs::read_to_string(temp.path().join(".agents/skills/qdev-create-story/SKILL.md")).unwrap();
+    let agent_create = fs::read_to_string(
+        temp.path()
+            .join(".agents/skills/qdev-create-story/SKILL.md"),
+    )
+    .unwrap();
     assert!(agent_create.contains("model_hint: \"custom-specify-llm\""));
     assert!(agent_create.contains("model: \"custom-specify-llm\""));
 
-    let agent_dev = fs::read_to_string(temp.path().join(".agents/skills/qdev-develop/SKILL.md")).unwrap();
+    let agent_dev =
+        fs::read_to_string(temp.path().join(".agents/skills/qdev-develop/SKILL.md")).unwrap();
     assert!(agent_dev.contains("model_hint: \"custom-develop-llm\""));
     assert!(agent_dev.contains("model: \"custom-develop-llm\""));
 
-    let agent_rev = fs::read_to_string(temp.path().join(".agents/skills/qdev-review/SKILL.md")).unwrap();
+    let agent_rev =
+        fs::read_to_string(temp.path().join(".agents/skills/qdev-review/SKILL.md")).unwrap();
     assert!(agent_rev.contains("model_hint: \"custom-review-llm\""));
     assert!(agent_rev.contains("model: \"custom-review-llm\""));
 }
@@ -639,27 +702,44 @@ headings = [
     // Verify Claude /qdev-plan skill
     let plan = fs::read_to_string(temp.path().join(".claude/skills/qdev-plan/SKILL.md")).unwrap();
     assert!(plan.contains("Clinical value"));
-    assert!(plan.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+    assert!(plan.contains(
+        "Reject any model response or proposal missing any required heading and re-prompt"
+    ));
 
     // Verify Claude /qdev-create-story skill
-    let create = fs::read_to_string(temp.path().join(".claude/skills/qdev-create-story/SKILL.md")).unwrap();
+    let create = fs::read_to_string(
+        temp.path()
+            .join(".claude/skills/qdev-create-story/SKILL.md"),
+    )
+    .unwrap();
     assert!(create.contains("Structured Multi-Perspective Synthesis Template"));
     assert!(create.contains("Clinical value"));
-    assert!(create.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+    assert!(create.contains(
+        "Reject any model response or proposal missing any required heading and re-prompt"
+    ));
 
     // Verify Cursor rule
     let cursor = fs::read_to_string(temp.path().join(".cursor/rules/qdev.mdc")).unwrap();
     assert!(cursor.contains("Clinical value"));
 
     // Verify Agent skills
-    let agent_plan = fs::read_to_string(temp.path().join(".agents/skills/qdev-plan/SKILL.md")).unwrap();
+    let agent_plan =
+        fs::read_to_string(temp.path().join(".agents/skills/qdev-plan/SKILL.md")).unwrap();
     assert!(agent_plan.contains("Clinical value"));
-    assert!(agent_plan.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+    assert!(agent_plan.contains(
+        "Reject any model response or proposal missing any required heading and re-prompt"
+    ));
 
-    let agent_create = fs::read_to_string(temp.path().join(".agents/skills/qdev-create-story/SKILL.md")).unwrap();
+    let agent_create = fs::read_to_string(
+        temp.path()
+            .join(".agents/skills/qdev-create-story/SKILL.md"),
+    )
+    .unwrap();
     assert!(agent_create.contains("Structured Multi-Perspective Synthesis Template"));
     assert!(agent_create.contains("Clinical value"));
-    assert!(agent_create.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+    assert!(agent_create.contains(
+        "Reject any model response or proposal missing any required heading and re-prompt"
+    ));
 }
 
 #[test]
@@ -690,7 +770,9 @@ Headings required: {headings}
     assert!(plan.contains("### Bespoke Synthesis Framework"));
     assert!(plan.contains("Headings required: Product & domain value, Architectural constraints, Safety & risk profile, Implementation directives"));
     // Rejection directive should be automatically appended since custom template lacked it
-    assert!(plan.contains("Reject any model response or proposal missing any required heading and re-prompt"));
+    assert!(plan.contains(
+        "Reject any model response or proposal missing any required heading and re-prompt"
+    ));
 }
 
 #[test]
@@ -724,5 +806,3 @@ headings = []
         combined
     );
 }
-
-

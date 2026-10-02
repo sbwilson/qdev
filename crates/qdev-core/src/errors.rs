@@ -1,5 +1,5 @@
-use std::fmt;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Standard exit codes conforming strictly to AD-13.
 /// 0: Success
@@ -136,10 +136,16 @@ impl RejectionAttribution {
         }
         if let serde_json::Value::Object(map) = value {
             if let Some(cid) = &self.constraint_id {
-                map.insert("constraint_id".to_string(), serde_json::Value::String(cid.clone()));
+                map.insert(
+                    "constraint_id".to_string(),
+                    serde_json::Value::String(cid.clone()),
+                );
             }
             if let Some(gid) = &self.gate_id {
-                map.insert("gate_id".to_string(), serde_json::Value::String(gid.clone()));
+                map.insert(
+                    "gate_id".to_string(),
+                    serde_json::Value::String(gid.clone()),
+                );
             }
             if let Some(pol) = &self.policy {
                 map.insert("policy".to_string(), serde_json::Value::String(pol.clone()));
@@ -150,7 +156,10 @@ impl RejectionAttribution {
             if let Some(h) = &self.holder {
                 map.insert("holder".to_string(), serde_json::Value::String(h.clone()));
             }
-            map.insert("rule".to_string(), serde_json::Value::String(self.rule.clone()));
+            map.insert(
+                "rule".to_string(),
+                serde_json::Value::String(self.rule.clone()),
+            );
         }
     }
 
@@ -342,10 +351,16 @@ impl QdevError {
             None => serde_json::Map::new(),
         };
         if let Some(cid) = &attribution.constraint_id {
-            map.insert("constraint_id".to_string(), serde_json::Value::String(cid.clone()));
+            map.insert(
+                "constraint_id".to_string(),
+                serde_json::Value::String(cid.clone()),
+            );
         }
         if let Some(gid) = &attribution.gate_id {
-            map.insert("gate_id".to_string(), serde_json::Value::String(gid.clone()));
+            map.insert(
+                "gate_id".to_string(),
+                serde_json::Value::String(gid.clone()),
+            );
         }
         if let Some(pol) = &attribution.policy {
             map.insert("policy".to_string(), serde_json::Value::String(pol.clone()));
@@ -356,7 +371,10 @@ impl QdevError {
         if let Some(h) = &attribution.holder {
             map.insert("holder".to_string(), serde_json::Value::String(h.clone()));
         }
-        map.insert("rule".to_string(), serde_json::Value::String(attribution.rule));
+        map.insert(
+            "rule".to_string(),
+            serde_json::Value::String(attribution.rule),
+        );
         self.details = Some(serde_json::Value::Object(map));
         self
     }
@@ -565,4 +583,3 @@ mod tests {
         assert!(codes.contains(&"scope_violation"));
     }
 }
-

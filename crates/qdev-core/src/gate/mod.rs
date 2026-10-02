@@ -156,7 +156,8 @@ impl GateRunOutcome {
                 (
                     Some("workspace_hygiene".to_string()),
                     None,
-                    "Hygiene checks must pass without unresolved lint or formatting warnings".to_string(),
+                    "Hygiene checks must pass without unresolved lint or formatting warnings"
+                        .to_string(),
                 )
             } else if let Some(cid) = self.constraint_ids.first() {
                 (
@@ -175,7 +176,8 @@ impl GateRunOutcome {
             (
                 Some("gate_infrastructure".to_string()),
                 None,
-                "Gate execution infrastructure must succeed without timeouts or system errors".to_string(),
+                "Gate execution infrastructure must succeed without timeouts or system errors"
+                    .to_string(),
             )
         } else {
             (

@@ -274,10 +274,7 @@ impl AnnotatedConfig {
                 .sources
                 .get("hygiene.directive")
                 .unwrap_or(&ConfigSource::Default);
-            out.push_str(&format!(
-                "  directive = {:?} (source: {})\n",
-                dir, src
-            ));
+            out.push_str(&format!("  directive = {:?} (source: {})\n", dir, src));
         }
         if let Some(cit) = &self.config.hygiene.citation_template {
             let src = self

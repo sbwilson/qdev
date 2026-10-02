@@ -1,4 +1,4 @@
-//! Assistant skill and editor rule generation and installation per Story 4.4.
+//! Assistant skill and editor rule generation and installation.
 //!
 //! Centralizes CLI commands and options into a `CommandCatalog`, generates assistant
 //! skills for Claude Code and Agent frameworks, generates Cursor rules, stamps version
@@ -334,12 +334,10 @@ const ALL_COMMANDS: &[CommandDefinition] = &[
             SubcommandDefinition {
                 name: "append",
                 summary: "Append an entry to a story's scratchpad",
-                options: &[
-                    OptionDefinition {
-                        name: "--kind",
-                        summary: "Scratchpad entry kind",
-                    },
-                ],
+                options: &[OptionDefinition {
+                    name: "--kind",
+                    summary: "Scratchpad entry kind",
+                }],
             },
             SubcommandDefinition {
                 name: "read",
@@ -433,12 +431,10 @@ const ALL_COMMANDS: &[CommandDefinition] = &[
             SubcommandDefinition {
                 name: "open",
                 summary: "Open a new sprint",
-                options: &[
-                    OptionDefinition {
-                        name: "--title",
-                        summary: "Sprint title",
-                    },
-                ],
+                options: &[OptionDefinition {
+                    name: "--title",
+                    summary: "Sprint title",
+                }],
             },
             SubcommandDefinition {
                 name: "assign",
@@ -701,7 +697,10 @@ fn render_command_catalog_markdown() -> String {
             out.push_str(&format!("  - `{}`: {}\n", opt.name, opt.summary));
         }
         for sub in cmd.subcommands {
-            out.push_str(&format!("  - `qdev {} {}`: {}\n", cmd.name, sub.name, sub.summary));
+            out.push_str(&format!(
+                "  - `qdev {} {}`: {}\n",
+                cmd.name, sub.name, sub.summary
+            ));
             for opt in sub.options {
                 out.push_str(&format!("    - `{}`: {}\n", opt.name, opt.summary));
             }
@@ -1132,9 +1131,7 @@ pub fn generate_claude_skills_configured(
     CORE_SKILL_NAMES
         .iter()
         .map(|name| {
-            let path = PathBuf::from(".claude/skills")
-                .join(name)
-                .join("SKILL.md");
+            let path = PathBuf::from(".claude/skills").join(name).join("SKILL.md");
             let content = generate_skill_content_configured(name, models, synthesis);
             (path, content)
         })
@@ -1180,9 +1177,7 @@ pub fn generate_agent_skills_configured(
     CORE_SKILL_NAMES
         .iter()
         .map(|name| {
-            let path = PathBuf::from(".agents/skills")
-                .join(name)
-                .join("SKILL.md");
+            let path = PathBuf::from(".agents/skills").join(name).join("SKILL.md");
             let content = generate_skill_content_configured(name, models, synthesis);
             (path, content)
         })
@@ -1315,7 +1310,9 @@ pub fn install_skills_configured(
 
     if options.claude {
         targets.push("claude".to_string());
-        for (rel_path, content) in generate_claude_skills_configured(effective_models, effective_synthesis) {
+        for (rel_path, content) in
+            generate_claude_skills_configured(effective_models, effective_synthesis)
+        {
             let written = write_managed_file(workspace_root, &rel_path, &content)?;
             installed_files.push(written);
         }
@@ -1323,14 +1320,17 @@ pub fn install_skills_configured(
 
     if options.cursor {
         targets.push("cursor".to_string());
-        let (rel_path, content) = generate_cursor_rule_configured(effective_models, effective_synthesis);
+        let (rel_path, content) =
+            generate_cursor_rule_configured(effective_models, effective_synthesis);
         let written = write_managed_file(workspace_root, &rel_path, &content)?;
         installed_files.push(written);
     }
 
     if options.agents {
         targets.push("agents".to_string());
-        for (rel_path, content) in generate_agent_skills_configured(effective_models, effective_synthesis) {
+        for (rel_path, content) in
+            generate_agent_skills_configured(effective_models, effective_synthesis)
+        {
             let written = write_managed_file(workspace_root, &rel_path, &content)?;
             installed_files.push(written);
         }

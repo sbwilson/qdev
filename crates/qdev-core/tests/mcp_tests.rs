@@ -1,4 +1,4 @@
-//! Unit tests for MCP server protocol, tool execution, installation, and inspection per Story 4.5.
+//! Unit tests for MCP server protocol, tool execution, installation, and inspection.
 
 use std::fs;
 use std::path::Path;
@@ -59,7 +59,9 @@ fn test_mcp_initialize_handshake() {
     let server = McpServer::new(temp.path().to_path_buf(), Config::default());
 
     let req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test-client","version":"1.0"}}}"#;
-    let resp_str = server.handle_request_str(req).expect("must produce response");
+    let resp_str = server
+        .handle_request_str(req)
+        .expect("must produce response");
     let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
 
     assert_eq!(resp["jsonrpc"], "2.0");
@@ -89,7 +91,9 @@ fn test_mcp_tools_list_advertises_all_12_tools_with_schemas() {
     let server = McpServer::new(temp.path().to_path_buf(), Config::default());
 
     let req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
-    let resp_str = server.handle_request_str(req).expect("must produce response");
+    let resp_str = server
+        .handle_request_str(req)
+        .expect("must produce response");
     let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
 
     let tools = resp["result"]["tools"].as_array().expect("tools array");
@@ -116,7 +120,11 @@ fn test_mcp_tools_list_advertises_all_12_tools_with_schemas() {
     ];
 
     for exp in &expected {
-        assert!(tool_names.contains(exp), "tool '{}' missing from catalog", exp);
+        assert!(
+            tool_names.contains(exp),
+            "tool '{}' missing from catalog",
+            exp
+        );
     }
 
     // Every advertised tool must have inputSchema and outputSchema
@@ -146,7 +154,9 @@ fn test_mcp_malformed_json_returns_parse_error() {
     let server = McpServer::new(temp.path().to_path_buf(), Config::default());
 
     let req = "this is not json { [";
-    let resp_str = server.handle_request_str(req).expect("must produce parse error response");
+    let resp_str = server
+        .handle_request_str(req)
+        .expect("must produce parse error response");
     let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
 
     assert_eq!(resp["jsonrpc"], "2.0");
@@ -160,7 +170,9 @@ fn test_mcp_unknown_method_returns_method_not_found() {
     let server = McpServer::new(temp.path().to_path_buf(), Config::default());
 
     let req = r#"{"jsonrpc":"2.0","id":99,"method":"unknown_rpc_method"}"#;
-    let resp_str = server.handle_request_str(req).expect("must produce error response");
+    let resp_str = server
+        .handle_request_str(req)
+        .expect("must produce error response");
     let resp: serde_json::Value = serde_json::from_str(&resp_str).unwrap();
 
     assert_eq!(resp["id"], 99);
@@ -316,16 +328,16 @@ fn test_mcp_doctor_inspection_unregistered_and_registered() {
     // In fresh workspace, MCP is unregistered but handshake succeeds
     let status = inspect_mcp(root).unwrap();
     assert_eq!(status.status, "unregistered");
-    assert_eq!(status.registered, false);
-    assert_eq!(status.handshake_ok, true);
+    assert!(!status.registered);
+    assert!(status.handshake_ok);
     assert!(status.registered_targets.is_empty());
 
     // After install, status is ok and registered is true
     install_mcp(root, true, false).unwrap();
     let status_after = inspect_mcp(root).unwrap();
     assert_eq!(status_after.status, "ok");
-    assert_eq!(status_after.registered, true);
-    assert_eq!(status_after.handshake_ok, true);
+    assert!(status_after.registered);
+    assert!(status_after.handshake_ok);
     assert_eq!(status_after.registered_targets, vec!["claude"]);
 }
 
@@ -361,9 +373,12 @@ fn test_mcp_inspect_handshake_failure_when_registered() {
 
     let status = inspect_mcp_with_handshake_override(root, false).unwrap();
     assert_eq!(status.status, "unavailable");
-    assert_eq!(status.unavailable_reason, Some("handshake_failed".to_string()));
-    assert_eq!(status.registered, true);
-    assert_eq!(status.handshake_ok, false);
+    assert_eq!(
+        status.unavailable_reason,
+        Some("handshake_failed".to_string())
+    );
+    assert!(status.registered);
+    assert!(!status.handshake_ok);
     assert_eq!(status.registered_targets, vec!["claude"]);
 }
 
@@ -378,11 +393,12 @@ fn test_mcp_inspect_ignores_wrong_args() {
     fs::write(
         claude_dir.join("settings.json"),
         r#"{"mcpServers":{"qdev":{"command":"qdev","args":["wrong","subcommand"]}}}"#,
-    ).unwrap();
+    )
+    .unwrap();
 
     let status = inspect_mcp(root).unwrap();
     assert_eq!(status.status, "unregistered");
-    assert_eq!(status.registered, false);
+    assert!(!status.registered);
     assert!(status.registered_targets.is_empty());
 }
 
@@ -480,12 +496,16 @@ fn test_mcp_tool_call_scratch_append_and_read() {
 
     // 1. scratch_append with author attribution
     let append_req = r#"{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"scratch_append","arguments":{"story_id":"E1S1","content":"Test scratch note","kind":"note","author_type":"agent","author_id":"bot-1"}}}"#;
-    let append_resp_str = server.handle_request_str(append_req).expect("append response");
+    let append_resp_str = server
+        .handle_request_str(append_req)
+        .expect("append response");
     let append_resp: serde_json::Value = serde_json::from_str(&append_resp_str).unwrap();
 
     assert_eq!(append_resp["id"], 14);
     assert_eq!(append_resp["result"]["isError"], false);
-    let append_text = append_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let append_text = append_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     let append_payload: serde_json::Value = serde_json::from_str(append_text).unwrap();
     assert_eq!(append_payload["story_id"], "E1S1");
     assert_eq!(append_payload["author"]["id"], "bot-1");
