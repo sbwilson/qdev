@@ -12,6 +12,7 @@ use crate::config::{AnnotatedConfig, StorageConfig};
 use crate::errors::QdevError;
 use crate::id::{Identifier, IdentifierKind};
 use crate::schema::{validate_frontmatter, validate_frontmatter_detailed, EntityKind};
+use crate::store::Store;
 
 /// Advisory lock guard releasing the file lock on drop.
 #[derive(Debug)]
@@ -1048,36 +1049,55 @@ pub fn purge_entity_row_for_moved_file(
     })
 }
 
+/// Describes the relation change to apply alongside an entity upsert.
+#[derive(Debug, Clone)]
+pub enum RelationCacheUpdate<'a> {
+    None,
+    Single(&'a RelationRowChange),
+    Full(&'a BTreeMap<String, Vec<String>>),
+}
+
 /// Upserts an updated entity into the SQLite cache `entities` (and kind-specific) table,
 /// records its dirty status in `dirty_entities`, and invalidates `sync_state`.
 /// Configures WAL mode and `busy_timeout = 5000ms`.
-///
-/// When `entity.kind` differs from the kind the cache already holds for this id, the *previous*
-/// kind's detail rows are deleted in the same transaction — see [`upsert_cache_with_relation`].
 pub fn upsert_cache_and_mark_dirty(
     cache_db_path: &Path,
     entity: &EntityRecord,
 ) -> Result<(), QdevError> {
-    upsert_cache_with_relation(cache_db_path, entity, None)
+    upsert_cache_with_relation_update(cache_db_path, entity, RelationCacheUpdate::None)
 }
 
-/// `upsert_cache_and_mark_dirty` plus, when `relation_change` is given, the matching
-/// insert/delete on the `relations` table — in the same transaction.
-///
-/// Without this the `relations` table only caught up at the next process's boot sweep, so every
-/// in-process reader (`qdev relate`'s own cycle pre-check, `query_entity`, `render_graph_dot`)
-/// saw pre-write state, and two relation operations in one process would validate the second
-/// against a graph that ignored the first.
-///
-/// Also the site that keeps a *kind change* repairable: when `entity.kind` differs from the kind
-/// the cache holds for this id, the previous kind's detail rows are deleted in the same
-/// transaction, through hydration's own kind->table mapping. Hydration cannot do it afterwards —
-/// its repair compares against the cached kind, which this upsert has already replaced — so
-/// without it the orphan survives every sweep and only `sync --rebuild` removes it.
+/// Upserts an updated entity into the SQLite cache with an optional single relation change.
 pub fn upsert_cache_with_relation(
     cache_db_path: &Path,
     entity: &EntityRecord,
     relation_change: Option<&RelationRowChange>,
+) -> Result<(), QdevError> {
+    let update = match relation_change {
+        Some(change) => RelationCacheUpdate::Single(change),
+        None => RelationCacheUpdate::None,
+    };
+    upsert_cache_with_relation_update(cache_db_path, entity, update)
+}
+
+/// Upserts an updated entity into the SQLite cache replacing all outgoing relation rows.
+pub fn upsert_cache_with_full_relations(
+    cache_db_path: &Path,
+    entity: &EntityRecord,
+    full_relations: Option<&BTreeMap<String, Vec<String>>>,
+) -> Result<(), QdevError> {
+    let update = match full_relations {
+        Some(map) => RelationCacheUpdate::Full(map),
+        None => RelationCacheUpdate::None,
+    };
+    upsert_cache_with_relation_update(cache_db_path, entity, update)
+}
+
+/// Core implementation for upserting an entity and applying relation changes in one transaction.
+pub fn upsert_cache_with_relation_update(
+    cache_db_path: &Path,
+    entity: &EntityRecord,
+    relation_update: RelationCacheUpdate<'_>,
 ) -> Result<(), QdevError> {
     let store = crate::store::SqliteStore::open(cache_db_path)?;
 
@@ -1108,16 +1128,8 @@ pub fn upsert_cache_with_relation(
             None => (None, None),
         };
 
-        // 0. Drop any row still claiming this file under a different id, the way hydration does
-        // (`sqlite.rs`, "in-place id edit"). `ON CONFLICT(id)` alone cannot see that collision,
-        // so an id edit — `qdev validate --fix-ids` is the only writer that makes one — left two
-        // `entities` rows pointing at one file, one of them naming an id the file no longer
-        // declares.
-        //
-        // Deliberately narrower than hydration's cascade: `relations` rows are left alone.
-        // `--fix-ids` redirects inbound edges through `qdev relate`'s own write path *after* the
-        // renumber, so deleting `relations WHERE target_id = <old id>` here would delete the
-        // edges it is about to redirect and lose them silently.
+        // 0. Drop any stale row claiming this path under a different id. Narrower than hydration:
+        // relations rows are retained so --fix-ids can redirect inbound edges without losing them.
         let stale_path_ids: Vec<String> = {
             let mut stmt = tx
                 .prepare("SELECT id FROM entities WHERE source_path = ?1 AND id <> ?2;")
@@ -1153,19 +1165,8 @@ pub fn upsert_cache_with_relation(
             delete_entity_row_shallow(&tx, stale_id)?;
         }
 
-        // 0b. A write may change an entity's *kind*. The `ON CONFLICT(id)` update below
-        // replaces the cached kind in place, which is the whole reason hydration's repair
-        // (`clear_owned_child_rows`) cannot reach this case: it asks the `entities` table what
-        // the previous kind was, and by the time any later sweep looks, the write has already
-        // stored the new one, so the comparison finds equality and drops nothing. The previous
-        // kind's detail row then outlives every sweep and only `sync --rebuild` removes it —
-        // and it is user-visible, because `get_entity` and `list_entities` LEFT JOIN `stories`.
-        //
-        // The write path is the only place that still holds both halves, so it answers here,
-        // in the same transaction, through the shared kind->table mapping. Note this drops only
-        // the *previous* kind's rows: materializing the new kind's detail row stays hydration's
-        // job on the sweep the dirty marker below already forces, the same one-pass lag every
-        // other non-story field has.
+        // 0b. If entity kind changed, delete the previous kind's detail rows in the same transaction
+        // so orphaned rows don't survive subsequent sweeps.
         let prev_kind: Option<String> = tx
             .query_row(
                 "SELECT kind FROM entities WHERE id = ?1;",
@@ -1269,32 +1270,78 @@ ON CONFLICT(id) DO UPDATE SET
             }
         }
 
-        // 3. Apply the relation edge, if this write is a relate/unrelate.
-        if let Some(change) = relation_change {
-            if change.add {
-                tx.execute(
-                    r#"
+        // 3. Apply relation updates, if requested.
+        match relation_update {
+            RelationCacheUpdate::None => {}
+            RelationCacheUpdate::Single(change) => {
+                if change.add {
+                    tx.execute(
+                        r#"
 INSERT INTO relations (source_id, relation, target_id)
 VALUES (?1, ?2, ?3)
 ON CONFLICT(source_id, relation, target_id) DO NOTHING;
 "#,
-                    rusqlite::params![change.source_id, change.relation, change.target_id],
-                )
-            } else {
-                tx.execute(
-                    "DELETE FROM relations WHERE source_id = ?1 AND relation = ?2 AND target_id = ?3;",
-                    rusqlite::params![change.source_id, change.relation, change.target_id],
-                )
+                        rusqlite::params![change.source_id, change.relation, change.target_id],
+                    )
+                } else {
+                    tx.execute(
+                        "DELETE FROM relations WHERE source_id = ?1 AND relation = ?2 AND target_id = ?3;",
+                        rusqlite::params![change.source_id, change.relation, change.target_id],
+                    )
+                }
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!(
+                            "Failed to apply relation '{}' --[{}]--> '{}': {}",
+                            change.source_id, change.relation, change.target_id, e
+                        ),
+                    )
+                })?;
             }
-            .map_err(|e| {
-                QdevError::infrastructure_failure(
-                    "sqlite_error",
-                    format!(
-                        "Failed to apply relation '{}' --[{}]--> '{}': {}",
-                        change.source_id, change.relation, change.target_id, e
-                    ),
+            RelationCacheUpdate::Full(map) => {
+                tx.execute(
+                    "DELETE FROM relations WHERE source_id = ?1;",
+                    rusqlite::params![entity.id],
                 )
-            })?;
+                .map_err(|e| {
+                    QdevError::infrastructure_failure(
+                        "sqlite_error",
+                        format!("Failed to clear relation rows for '{}': {}", entity.id, e),
+                    )
+                })?;
+
+                let mut insert_stmt = tx
+                    .prepare(
+                        r#"
+INSERT INTO relations (source_id, relation, target_id)
+VALUES (?1, ?2, ?3)
+ON CONFLICT(source_id, relation, target_id) DO NOTHING;
+"#,
+                    )
+                    .map_err(|e| {
+                        QdevError::infrastructure_failure(
+                            "sqlite_error",
+                            format!("Failed to prepare relation insert statement: {}", e),
+                        )
+                    })?;
+
+                for (relation, targets) in map {
+                    for target in targets {
+                        insert_stmt
+                            .execute(rusqlite::params![entity.id, relation, target])
+                            .map_err(|e| {
+                                QdevError::infrastructure_failure(
+                                    "sqlite_error",
+                                    format!(
+                                        "Failed to insert relation '{}' --[{}]--> '{}': {}",
+                                        entity.id, relation, target, e
+                                    ),
+                                )
+                            })?;
+                    }
+                }
+            }
         }
 
         // 4. Mark row as dirty in dirty_entities
@@ -1664,13 +1711,8 @@ fn recase_hex_id(candidate: &str) -> String {
 }
 
 pub fn id_carried_by_filename(file_name: &str) -> Option<String> {
-    // The extension is matched case-insensitively, like hydration's own walk — and now like
-    // [`filename_carries_id`] too, so occupancy and resolution give one answer on this axis
-    // instead of two. Requiring lowercase here left a hole in the intersection of two matrix
-    // rows — a `.MD` file whose frontmatter will not parse was in neither half of the union, so
-    // allocation handed out its id and `create_story` then refused with `file_exists` for an id
-    // the user never chose. Widening resolution to match (2026-09-11) removed the remaining
-    // asymmetry rather than this one: nothing about *which ids a workspace owns* changed.
+    // Matches extensions case-insensitively, consistent with hydration and filename_carries_id,
+    // avoiding allocation holes for unparseable uppercase .MD files.
     let (stem, ext) = file_name.rsplit_once('.')?;
     if !ext.eq_ignore_ascii_case("md") {
         return None;
@@ -2003,6 +2045,60 @@ pub struct EntityUpdateResult {
     pub updated_frontmatter: serde_json::Value,
 }
 
+/// Converts a YAML relations mapping into a relation name -> target IDs map.
+pub fn relation_map_from_yaml(value: &serde_yaml::Value) -> Option<BTreeMap<String, Vec<String>>> {
+    let serde_yaml::Value::Mapping(map) = value else {
+        return None;
+    };
+    let mut relations = BTreeMap::new();
+    for (relation, targets) in map {
+        let relation = relation.as_str()?.to_string();
+        let serde_yaml::Value::Sequence(targets) = targets else {
+            return None;
+        };
+        let targets = targets
+            .iter()
+            .map(|target| target.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()?;
+        relations.insert(relation, targets);
+    }
+    Some(relations)
+}
+
+/// Validates a proposed relations map under the write lock against the cached graph.
+#[allow(clippy::disallowed_methods)] // Relation write-gate must inspect the complete retained graph.
+fn validate_relations_under_lock(
+    cache_db_path: &Path,
+    source_id: &str,
+    source_kind: EntityKind,
+    proposed_relations: &BTreeMap<String, Vec<String>>,
+) -> Result<(), QdevError> {
+    if !cache_db_path.is_file() {
+        return Ok(());
+    }
+    let store = crate::store::SqliteStore::open(cache_db_path)?;
+    let mut entities = store
+        .list_entities(&crate::store::EntityFilter::default())?
+        .into_iter()
+        .map(|entity| (entity.id, entity.kind))
+        .collect::<Vec<_>>();
+    if !entities.iter().any(|(id, _)| id == source_id) {
+        entities.push((source_id.to_string(), source_kind));
+    }
+    let relations = store
+        .list_relations()?
+        .into_iter()
+        .map(|relation| (relation.source_id, relation.relation, relation.target_id))
+        .collect::<Vec<_>>();
+    crate::dag::validate_proposed_relation_map(
+        source_id,
+        source_kind,
+        proposed_relations,
+        &entities,
+        &relations,
+    )
+}
+
 /// High-level write path engine orchestrating locking, patching, atomic writes, and cache sync.
 pub fn apply_entity_update(options: &EntityUpdateOptions) -> Result<EntityUpdateResult, QdevError> {
     apply_entity_update_checked(options, |_fresh_content: &str| Ok(())).map(|(res, _)| res)
@@ -2120,10 +2216,31 @@ where
         patched_content = replace_markdown_section(&patched_content, &heading, &new_body)?;
     }
 
-    // 6. Validate updated frontmatter against JSON Schema, against the kind hydration will
+    // 6. Resolve kind from patched content and validate proposed relations under the write lock
+    let kind = kind_for_write(&file_path, &patched_content, kind);
+    let cache_db_path = options
+        .workspace_root
+        .join(cache_dir_rel)
+        .join("cache.sqlite");
+    let relations_field = options
+        .custom_fields
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "relations");
+    let proposed_relations = if let Some((_, val)) = relations_field {
+        if let Some(map) = relation_map_from_yaml(val) {
+            validate_relations_under_lock(&cache_db_path, &id, kind, &map)?;
+            Some(map)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // 6b. Validate updated frontmatter against JSON Schema, against the kind hydration will
     // resolve for this file once it is written (frontmatter `kind:` first) — not the kind the
     // filename lookup happened to use, so this write and the next sweep agree.
-    let kind = kind_for_write(&file_path, &patched_content, kind);
     validate_frontmatter(kind, &patched_content).map_err(|errs| {
         QdevError::logical_failure(
             "schema_validation_failed",
@@ -2201,11 +2318,7 @@ where
         },
     };
 
-    let cache_db_path = options
-        .workspace_root
-        .join(cache_dir_rel)
-        .join("cache.sqlite");
-    upsert_cache_and_mark_dirty(&cache_db_path, &record)?;
+    upsert_cache_with_full_relations(&cache_db_path, &record, proposed_relations.as_ref())?;
 
     if kind == EntityKind::DeferredWork && cache_db_path.is_file() {
         let origin = updated_frontmatter
@@ -2654,13 +2767,8 @@ pub fn create_story(options: &StoryCreateOptions) -> Result<StoryCreateResult, Q
         target_modules,
     };
 
-    // Only upsert into a cache that already exists. In a real workspace it always does — boot
-    // runs `ensure_cache` before any command — so the "queryable without a sweep" guarantee is
-    // unaffected. Outside a workspace, `upsert_cache_and_mark_dirty` would *create* a 16-table,
-    // unstamped `cache.sqlite` in a directory that is not a workspace, which a later `qdev init`
-    // reads as a v0 cache and migrates: it would drop and rebuild the rows this write had just
-    // put there, for a file nothing had asked for. The file on disk is the source of truth; the
-    // next boot hydrates it.
+    // Only upsert into an existing cache. Bare directories without a workspace avoid creating
+    // unstamped SQLite databases that subsequent init commands would drop and migrate.
     let cache_db_path = options
         .workspace_root
         .join(cache_dir_rel)
@@ -2776,6 +2884,9 @@ pub struct RelationChangeOptions {
     /// `true` adds `target_id` to `relation`'s target list (`relate`); `false` removes it
     /// (`unrelate`).
     pub add: bool,
+    /// When `true`, skip lock-protected relation map validation. Used by repair routines
+    /// (such as `--fix-ids`) that redirect relations during an intermediate renumbering state.
+    pub skip_validation: bool,
     /// Optimistic concurrency control, compared before any outcome is reported: a stale
     /// expectation is a `version_mismatch` conflict whether the requested change would have
     /// altered the file or turned out to be an idempotent no-op.
@@ -2914,13 +3025,8 @@ pub fn apply_relation_change(
     // edge exited 0 and confirmed a version nothing had compared.
     check_if_version(options.if_version, declared_version)?;
 
-    // 4. Merge into the existing relations map: read it, mutate only the one relation's target
-    // list, and write the whole map back — never construct a fresh map that drops other keys.
-    //
-    // An unexpected shape is refused rather than defaulted away. This function reconstructs and
-    // overwrites the whole `relations:` block, so falling back to an empty map (or silently
-    // skipping non-string entries) would rewrite the file with the existing edges deleted and
-    // report success — the same silent-drop class as swallowing the YAML parse error above.
+    // 4. Merge into existing relations map, mutating only the specified target list.
+    // Unexpected shapes are refused to avoid silently dropping existing edges on rewrite.
     let mut relations_obj: serde_yaml::Mapping = match old_frontmatter_yaml.get("relations") {
         None | Some(serde_yaml::Value::Null) => serde_yaml::Mapping::new(),
         Some(serde_yaml::Value::Mapping(map)) => map.clone(),
@@ -3035,6 +3141,17 @@ pub fn apply_relation_change(
     // map computed above, which already carries every relation and target the file had before,
     // in its original key order.
     let relations_yaml = serde_yaml::Value::Mapping(relations_obj);
+    let proposed_relations = relation_map_from_yaml(&relations_yaml);
+
+    let cache_db_path = options
+        .workspace_root
+        .join(cache_dir_rel)
+        .join("cache.sqlite");
+    if options.add && !options.skip_validation {
+        if let Some(ref map) = proposed_relations {
+            validate_relations_under_lock(&cache_db_path, &id, kind, map)?;
+        }
+    }
 
     let patch_opts = FrontmatterPatchOptions {
         status: None,
@@ -3121,18 +3238,8 @@ pub fn apply_relation_change(
         .workspace_root
         .join(cache_dir_rel)
         .join("cache.sqlite");
-    // The relation edge lands in the cache with the entity row, not at the next boot sweep, so
-    // anything reading the graph later in this same process sees the edge this write created.
-    upsert_cache_with_relation(
-        &cache_db_path,
-        &record,
-        Some(&RelationRowChange {
-            source_id: canonical_id.clone(),
-            relation: options.relation.clone(),
-            target_id: options.target_id.clone(),
-            add: options.add,
-        }),
-    )?;
+    // The relations land in the cache atomically with the entity row in the same transaction.
+    upsert_cache_with_full_relations(&cache_db_path, &record, proposed_relations.as_ref())?;
 
     let relations_out = updated_frontmatter
         .get("relations")

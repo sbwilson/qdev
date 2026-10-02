@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "gate": "test",
+  "story": "E5S3",
+  "commit": "b0808ea",
+  "status": "pass",
+  "exit_code": 0,
+  "duration_ms": 40651,
+  "metric": null,
+  "summary": "test result: ok. 800 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.09s",
+  "output_sha256": "3c280e2158e63ebdfdb7a420839ff4a0d74b764b5a9f9e35c934658d0cb3b19d",
+  "run_by": {
+    "type": "human",
+    "id": "simon"
+  },
+  "ran_at": "2026-10-02T07:53:04Z",
+  "verifies": [],
+  "skipped_locally": false
+}

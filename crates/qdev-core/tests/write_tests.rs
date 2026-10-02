@@ -586,6 +586,7 @@ updated_by:
         relation: "depends_on".to_string(),
         target_id: "E12S5".to_string(),
         add: true,
+        skip_validation: false,
         if_version: Some(1),
         author: Author::new("human", "simon"),
     })
@@ -1734,14 +1735,8 @@ fn test_a_conventional_file_in_another_kinds_directory_is_told_about_the_kind() 
     );
 }
 
-// ---------------------------------------------------------------------------
-// Kind changes through the write path (spec-1-26)
-// ---------------------------------------------------------------------------
-//
-// The defect: the `entities` upsert replaced the cached kind in place and left the previous
-// kind's detail row behind. Hydration's repair compares the *cached* kind against the new one,
-// so after a qdev write the two already agree and the orphan survives every sweep — only
-// `sync --rebuild` removed it, and `get`/`list` LEFT JOIN `stories`, so it was user-visible.
+// Kind changes through the write path: the entities upsert replaces the cached kind in place
+// and deletes the previous kind's detail row in the same transaction to prevent orphan rows.
 
 /// The six kinds that own a detail table, and the tables each one owns. Named here rather than
 /// derived, so the matrix below is a statement about the schema and not a restatement of the
@@ -2326,5 +2321,184 @@ fn test_a_refused_kind_flip_leaves_the_previous_kinds_detail_row_alone() {
         .unwrap(),
         "story",
         "a refused flip must not change the cached kind either"
+    );
+}
+
+#[test]
+fn test_apply_entity_update_transactionally_updates_relation_cache_rows() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    fs::write(
+        root.join("qdev.toml"),
+        "[project]\nname = \"RelationTest\"\n",
+    )
+    .unwrap();
+    let stories_dir = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+
+    for id in ["E1S1", "E1S2", "E1S3"] {
+        fs::write(
+            stories_dir.join(format!("{id}.md")),
+            format!(
+                "---\nid: {id}\ntitle: Story {id}\nstatus: draft\nversion: 1\nowners: [\"simon\"]\ncreated_by:\n  type: human\n  id: simon\nupdated_by:\n  type: human\n  id: simon\n---\n\n## Acceptance Criteria\n- AC.\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    qdev_core::store::ensure_cache(root, &qdev_core::StorageConfig::default()).unwrap();
+    let db = root.join(".qdev/cache/cache.sqlite");
+
+    // 1. Update E1S1 to depend on E1S2
+    let mut relations_map = serde_yaml::Mapping::new();
+    relations_map.insert(
+        serde_yaml::Value::String("depends_on".to_string()),
+        serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("E1S2".to_string())]),
+    );
+
+    let res = apply_entity_update(&EntityUpdateOptions {
+        workspace_root: root.to_path_buf(),
+        storage: None,
+        entity_kind: Some(EntityKind::Story),
+        entity_id: "E1S1".to_string(),
+        status: None,
+        title: None,
+        custom_fields: vec![(
+            "relations".to_string(),
+            serde_yaml::Value::Mapping(relations_map),
+        )],
+        section: None,
+        section_file: None,
+        if_version: Some(1),
+        author: Author::new("human", "simon"),
+    })
+    .unwrap();
+    assert_eq!(res.new_version, 2);
+
+    // Verify cache has the relation row without any boot sweep or sync
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let edges: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT relation, target_id FROM relations WHERE source_id = 'E1S1';")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(edges, vec![("depends_on".to_string(), "E1S2".to_string())]);
+
+    // 2. Refuse an update that would introduce a cycle: E1S2 depends_on E1S1
+    let mut cycle_map = serde_yaml::Mapping::new();
+    cycle_map.insert(
+        serde_yaml::Value::String("depends_on".to_string()),
+        serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("E1S1".to_string())]),
+    );
+
+    let err = apply_entity_update(&EntityUpdateOptions {
+        workspace_root: root.to_path_buf(),
+        storage: None,
+        entity_kind: Some(EntityKind::Story),
+        entity_id: "E1S2".to_string(),
+        status: None,
+        title: None,
+        custom_fields: vec![(
+            "relations".to_string(),
+            serde_yaml::Value::Mapping(cycle_map),
+        )],
+        section: None,
+        section_file: None,
+        if_version: Some(1),
+        author: Author::new("human", "simon"),
+    })
+    .unwrap_err();
+    assert_eq!(err.code(), "dependency_cycle");
+}
+
+#[test]
+fn test_concurrent_relations_prevent_cycle_and_dirty_cache() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    fs::write(
+        root.join("qdev.toml"),
+        "[project]\nname = \"ConcurrentRelateTest\"\n",
+    )
+    .unwrap();
+    let stories_dir = root.join("docs/specs/stories");
+    fs::create_dir_all(&stories_dir).unwrap();
+
+    for id in ["E1S1", "E1S2"] {
+        fs::write(
+            stories_dir.join(format!("{id}.md")),
+            format!(
+                "---\nid: {id}\ntitle: Story {id}\nstatus: draft\nversion: 1\nowners: [\"simon\"]\ncreated_by:\n  type: human\n  id: simon\nupdated_by:\n  type: human\n  id: simon\n---\n\n## Acceptance Criteria\n- AC.\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    qdev_core::store::ensure_cache(root, &qdev_core::StorageConfig::default()).unwrap();
+    let db = root.join(".qdev/cache/cache.sqlite");
+
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+
+    let root_a = root.to_path_buf();
+    let barrier_a = Arc::clone(&barrier);
+    let handle_a = thread::spawn(move || {
+        barrier_a.wait();
+        apply_relation_change(&RelationChangeOptions {
+            workspace_root: root_a,
+            storage: None,
+            entity_kind: Some(EntityKind::Story),
+            entity_id: "E1S1".to_string(),
+            relation: "depends_on".to_string(),
+            target_id: "E1S2".to_string(),
+            add: true,
+            skip_validation: false,
+            if_version: None,
+            author: Author::new("human", "writer_a"),
+        })
+    });
+
+    let root_b = root.to_path_buf();
+    let barrier_b = Arc::clone(&barrier);
+    let handle_b = thread::spawn(move || {
+        barrier_b.wait();
+        apply_relation_change(&RelationChangeOptions {
+            workspace_root: root_b,
+            storage: None,
+            entity_kind: Some(EntityKind::Story),
+            entity_id: "E1S2".to_string(),
+            relation: "depends_on".to_string(),
+            target_id: "E1S1".to_string(),
+            add: true,
+            skip_validation: false,
+            if_version: None,
+            author: Author::new("human", "writer_b"),
+        })
+    });
+
+    let res_a = handle_a.join().unwrap();
+    let res_b = handle_b.join().unwrap();
+
+    // Exactly one must succeed and the other must be refused for closing a cycle
+    let (succeeded, failed) = match (res_a, res_b) {
+        (Ok(a), Err(b)) => (a, b),
+        (Err(a), Ok(b)) => (b, a),
+        (Ok(_), Ok(_)) => panic!("both concurrent writers succeeded in closing a cycle!"),
+        (Err(e1), Err(e2)) => panic!("both concurrent writers failed: {:?}, {:?}", e1, e2),
+    };
+
+    assert!(succeeded.changed);
+    assert_eq!(failed.code(), "dependency_cycle");
+
+    // Cache must contain exactly 1 relation row
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM relations;", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "only the successful write's relation row may exist"
     );
 }

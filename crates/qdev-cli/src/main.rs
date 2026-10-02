@@ -2,7 +2,6 @@ mod cli;
 mod handlers;
 mod output;
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::io::IsTerminal;
 use std::panic;
@@ -1622,55 +1621,6 @@ fn handle_update(
         return ExitCode::UsageError;
     }
 
-    // `relations` replaces the whole map, so validate that final map before the generic writer
-    // obtains its lock or can touch the file/cache/version.  Invalid YAML shapes remain the
-    // generic writer's schema-validation responsibility; a well-formed relation map uses the
-    // same proposed-graph gate as `relate`.
-    if let Some((_, relations_value)) = custom_fields
-        .iter()
-        .rev()
-        .find(|(key, _)| key == "relations")
-    {
-        if let Some(proposed_relations) = relation_map_from_yaml(relations_value) {
-            let store = match open_query_store(&root, annotated_config) {
-                Ok(store) => store,
-                Err(e) => {
-                    let _ = output.emit_error(&e);
-                    return e.exit_code();
-                }
-            };
-            let source = match store.get_entity(&entity_id) {
-                Ok(Some(source)) => source,
-                Ok(None) => {
-                    let err =
-                        QdevError::usage_error(format!("Source entity '{}' not found", entity_id));
-                    let _ = output.emit_error(&err);
-                    return ExitCode::UsageError;
-                }
-                Err(e) => {
-                    let _ = output.emit_error(&e);
-                    return e.exit_code();
-                }
-            };
-            let proposed_source_kind = custom_fields
-                .iter()
-                .rev()
-                .find(|(key, _)| key == "kind")
-                .and_then(|(_, value)| value.as_str())
-                .and_then(|kind| qdev_core::EntityKind::from_str_loose(kind).ok())
-                .unwrap_or(source.kind);
-            if let Err(e) = validate_proposed_relation_map(
-                &store,
-                &source,
-                proposed_source_kind,
-                &proposed_relations,
-            ) {
-                let _ = output.emit_error(&e);
-                return e.exit_code();
-            }
-        }
-    }
-
     // Resolve active author attribution through the shared resolver — see `resolve_author`.
     let author = match resolve_author(
         update_args.author_type.as_deref(),
@@ -2057,56 +2007,6 @@ fn validate_relation_name(relation: &str) -> Result<(), QdevError> {
     )))
 }
 
-/// Converts a syntactically usable YAML relation map for the command gate.  Invalid shapes are
-/// deliberately returned as `None`: the generic update writer retains ownership of its existing
-/// schema-validation error contract for arbitrary `--field` values.
-fn relation_map_from_yaml(value: &serde_yaml::Value) -> Option<BTreeMap<String, Vec<String>>> {
-    let serde_yaml::Value::Mapping(map) = value else {
-        return None;
-    };
-    let mut relations = BTreeMap::new();
-    for (relation, targets) in map {
-        let relation = relation.as_str()?.to_string();
-        let serde_yaml::Value::Sequence(targets) = targets else {
-            return None;
-        };
-        let targets = targets
-            .iter()
-            .map(|target| target.as_str().map(str::to_string))
-            .collect::<Option<Vec<_>>>()?;
-        relations.insert(relation, targets);
-    }
-    Some(relations)
-}
-
-/// Reads the cache into the pure core proposed-graph gate.  Keeping store access here leaves
-/// the gate reusable for future callers and gives `relate` and whole-map replacement one rule.
-#[allow(clippy::disallowed_methods)] // Relation write-gate must inspect the complete retained graph.
-fn validate_proposed_relation_map(
-    store: &qdev_core::SqliteStore,
-    source: &qdev_core::EntityRecord,
-    source_kind: qdev_core::EntityKind,
-    proposed_relations: &BTreeMap<String, Vec<String>>,
-) -> Result<(), QdevError> {
-    let entities = store
-        .list_entities(&qdev_core::EntityFilter::default())?
-        .into_iter()
-        .map(|entity| (entity.id, entity.kind))
-        .collect::<Vec<_>>();
-    let relations = store
-        .list_relations()?
-        .into_iter()
-        .map(|relation| (relation.source_id, relation.relation, relation.target_id))
-        .collect::<Vec<_>>();
-    qdev_core::validate_proposed_relation_map(
-        &source.id,
-        source_kind,
-        proposed_relations,
-        &entities,
-        &relations,
-    )
-}
-
 #[allow(clippy::disallowed_methods)] // Relation write-gate intentionally reads the retained source row.
 fn handle_relate(
     relate_args: &cli::RelateArgs,
@@ -2132,7 +2032,6 @@ fn handle_relate(
         }
     };
 
-    // Resolve the source before building the complete proposed map for the shared relation gate.
     let source = match store.get_entity(&relate_args.source_id) {
         Ok(Some(e)) => e,
         Ok(None) => {
@@ -2150,31 +2049,6 @@ fn handle_relate(
     };
 
     let target_id = relate_args.target_id.clone();
-    let mut proposed_relations = store.get_relations_for_source(&source.id).map(|rows| {
-        let mut map = BTreeMap::<String, Vec<String>>::new();
-        for row in rows {
-            map.entry(row.relation).or_default().push(row.target_id);
-        }
-        map
-    });
-    let proposed_relations = match proposed_relations.as_mut() {
-        Ok(relations) => {
-            let targets = relations.entry(relate_args.relation.clone()).or_default();
-            if !targets.iter().any(|target| target == &target_id) {
-                targets.push(target_id.clone());
-            }
-            relations
-        }
-        Err(e) => {
-            let _ = output.emit_error(e);
-            return e.exit_code();
-        }
-    };
-    if let Err(e) = validate_proposed_relation_map(&store, &source, source.kind, proposed_relations)
-    {
-        let _ = output.emit_error(&e);
-        return e.exit_code();
-    }
 
     let author = match resolve_author(
         relate_args.author_type.as_deref(),
@@ -2221,6 +2095,7 @@ fn handle_relate(
         relation: relate_args.relation.clone(),
         target_id: target_id.clone(),
         add: true,
+        skip_validation: false,
         if_version,
         author: author.clone(),
     };
@@ -2338,6 +2213,7 @@ fn handle_unrelate(
         relation: unrelate_args.relation.clone(),
         target_id: unrelate_args.target_id.clone(),
         add: false,
+        skip_validation: false,
         if_version,
         author: author.clone(),
     };
@@ -3610,6 +3486,7 @@ fn rewrite_relations_to(
             relation: rel.relation.clone(),
             target_id: target.to_string(),
             add,
+            skip_validation: true,
             if_version: None,
             author: author.clone(),
         };
