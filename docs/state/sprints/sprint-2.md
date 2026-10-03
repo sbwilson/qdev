@@ -1,8 +1,8 @@
 ---
 id: sprint-2
 title: Safety & Storage Hardening
-status: active
-version: 2
+status: completed
+version: 3
 started_at: 2026-10-02
 assignments:
   - story: E5S3
@@ -17,6 +17,7 @@ created_by:
 updated_by:
   type: human
   id: simon
+completed_at: 2026-10-03
 ---
 
 # Sprint 2: Safety & Storage Hardening
