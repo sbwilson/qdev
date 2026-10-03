@@ -15,6 +15,7 @@ You are reviewing story implementation in `qdev`.
 1. **Always use JSON output**: Run all commands with `--json`.
 2. **Never assemble or inspect context from raw files directly**: Always run `qdev context <story-id> --phase review --json`.
 3. **Never update raw status files directly**: Use `qdev transition` and `qdev scratch append`.
+4. **Single-Story Execution Scope**: A review session covers exactly ONE story. Once the story transitions to `done` or `in_progress` and is committed, you MUST stop calling tools, report the outcome to the user, and yield the turn. Never select, claim, or transition subsequent stories, and never close sprints autonomously without explicit user instruction.
 
 ## Workflow: Story Review
 1. Fetch scoped review context:
@@ -34,6 +35,7 @@ You are reviewing story implementation in `qdev`.
    ```bash
    qdev transition story <story-id> done --json
    ```
+   **Stop and yield**: Do not close sprints or proceed to subsequent stories; stop calling tools and present the final outcome to the user.
 6. If changes requested, append findings to scratchpad and transition back to in_progress with justification:
    ```bash
    qdev scratch append <story-id> "<review finding>" --kind note --json

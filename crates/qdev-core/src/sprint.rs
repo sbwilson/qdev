@@ -558,6 +558,25 @@ pub struct SprintCloseResult {
 /// identifiers are strictly immutable.
 pub fn close_sprint(options: &SprintCloseOptions) -> Result<SprintCloseResult, QdevError> {
     options.author.validate()?;
+
+    // [E5-SAFETY] Sprint closure is restricted to human authors.
+    if options.author.author_type != "human" {
+        let attribution = crate::errors::RejectionAttribution::new(
+            "Sprint closure is restricted to human authors",
+        )
+        .with_policy("human_author_required");
+
+        return Err(QdevError::policy_refusal(
+            "human_required",
+            "Sprint closure is restricted to human authors",
+        )
+        .with_details(serde_json::json!({
+            "sprint": options.sprint,
+            "author_type": options.author.author_type,
+        }))
+        .with_attribution(attribution));
+    }
+
     let status = options.status.trim();
     if !matches!(status, "completed" | "paused" | "abandoned") {
         return Err(QdevError::usage_error_with_code(

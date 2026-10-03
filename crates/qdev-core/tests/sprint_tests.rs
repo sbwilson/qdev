@@ -626,7 +626,7 @@ fn test_close_sprint_carry_over() {
     assert!(sprint6_content.contains("story: E12S4"));
     assert!(sprint6_content.contains("carried_from: 5"));
 
-    // Done story E12S5 was NOT carried over to sprint 6
+    // [E12S5] Done story was NOT carried over to sprint 6
     assert!(!sprint6_content.contains("story: E12S5"));
 
     // Verify SQLite sprint_assignments for sprint 6
@@ -644,6 +644,47 @@ fn test_close_sprint_carry_over() {
     let e12s5_after = fs::read_to_string(root.join("docs/specs/stories/E12S5.md")).unwrap();
     assert_eq!(e12s4_before, e12s4_after);
     assert_eq!(e12s5_before, e12s5_after);
+}
+
+#[test]
+fn test_close_sprint_refuses_agent_author() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_test_workspace(root);
+
+    let db_path = root.join(".qdev/cache/cache.sqlite");
+    let store = SqliteStore::open(&db_path).unwrap();
+    let storage = StorageConfig::default();
+    let human = test_author();
+    let agent = Author::new("agent", "autonomous-agent");
+
+    open_sprint(&SprintOpenOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        title: "Sprint 1",
+        release: None,
+        author: &human,
+    })
+    .unwrap();
+
+    let close_opts = SprintCloseOptions {
+        workspace_root: root,
+        storage: &storage,
+        store: &store,
+        sprint: 1,
+        carry_over_target: None,
+        author: &agent,
+        gates: None,
+        integration_branch: None,
+        status: "completed",
+        reason: None,
+    };
+
+    let err = close_sprint(&close_opts).unwrap_err();
+    assert_eq!(err.code(), "human_required");
+    assert_eq!(err.exit_code(), ExitCode::PolicyRefusal);
 }
 
 #[test]

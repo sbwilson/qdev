@@ -815,6 +815,53 @@ updated_by:
 }
 
 #[test]
+fn test_transition_to_done_refuses_agent_author() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    write_story_file(
+        tmp.path(),
+        "E12S1",
+        r#"---
+id: E12S1
+title: Story 1
+status: review
+version: 2
+appetite: small
+target_modules: ["bridge"]
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    let engine = TransitionEngine::new();
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S1".to_string(),
+        target_status: "done".to_string(),
+        justification: None,
+        author: Author::new("agent", "claude"),
+        if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
+    };
+
+    let err = engine.transition(&opts).unwrap_err();
+    assert_eq!(err.code(), "human_required");
+    assert_eq!(err.exit_code(), ExitCode::PolicyRefusal);
+}
+
+#[test]
 fn test_transition_pre_and_post_hooks() {
     let tmp = TempDir::new().unwrap();
     setup_story_workspace(tmp.path());

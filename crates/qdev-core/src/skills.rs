@@ -944,6 +944,7 @@ You are implementing a story in `qdev`.
 3. **Never modify raw spec/status files directly**: Record all progress through `qdev scratch append` and `qdev transition`.
 4. **Never bypass preflight, lease claims, or transition-bound gates**: Preflight and claim must precede edits, and gates must pass before requesting review.
 5. **Always quote cited IDs on refusals**: When reporting a refusal or failure to the human, always quote cited IDs (`constraint_id`, `gate_id`, `policy`, `blocking_ids`, or `holder`).
+6. **Single-Story Execution Scope**: A development session implements exactly ONE requested story. Once the story transitions to `review` and is committed, you MUST stop calling tools, report the outcome to the user, and yield the turn. Never select, claim, or implement subsequent stories without explicit user instruction.
 
 ## Workflow: Story Implementation
 1. Run preflight to verify clean tree, working tree scope, and branch freshness:
@@ -974,6 +975,7 @@ You are implementing a story in `qdev`.
    ```bash
    qdev transition story <story-id> review --json
    ```
+   **Stop and yield**: Do not proceed to another story or claim subsequent leases; stop calling tools and present the completed review status to the user.
 8. Handle Refusals:
    On any refusal or error from preflight, claim, gates, or transition, quote cited IDs (`constraint_id`, `gate_id`, `policy`, `blocking_ids`, `holder`).
 
@@ -998,6 +1000,7 @@ You are reviewing story implementation in `qdev`.
 1. **Always use JSON output**: Run all commands with `--json`.
 2. **Never assemble or inspect context from raw files directly**: Always run `qdev context <story-id> --phase review --json`.
 3. **Never update raw status files directly**: Use `qdev transition` and `qdev scratch append`.
+4. **Single-Story Execution Scope**: A review session covers exactly ONE story. Once the story transitions to `done` or `in_progress` and is committed, you MUST stop calling tools, report the outcome to the user, and yield the turn. Never select, claim, or transition subsequent stories, and never close sprints autonomously without explicit user instruction.
 
 ## Workflow: Story Review
 1. Fetch scoped review context:
@@ -1017,6 +1020,7 @@ You are reviewing story implementation in `qdev`.
    ```bash
    qdev transition story <story-id> done --json
    ```
+   **Stop and yield**: Do not close sprints or proceed to subsequent stories; stop calling tools and present the final outcome to the user.
 6. If changes requested, append findings to scratchpad and transition back to in_progress with justification:
    ```bash
    qdev scratch append <story-id> "<review finding>" --kind note --json

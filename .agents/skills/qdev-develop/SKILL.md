@@ -17,6 +17,7 @@ You are implementing a story in `qdev`.
 3. **Never modify raw spec/status files directly**: Record all progress through `qdev scratch append` and `qdev transition`.
 4. **Never bypass preflight, lease claims, or transition-bound gates**: Preflight and claim must precede edits, and gates must pass before requesting review.
 5. **Always quote cited IDs on refusals**: When reporting a refusal or failure to the human, always quote cited IDs (`constraint_id`, `gate_id`, `policy`, `blocking_ids`, or `holder`).
+6. **Single-Story Execution Scope**: A development session implements exactly ONE requested story. Once the story transitions to `review` and is committed, you MUST stop calling tools, report the outcome to the user, and yield the turn. Never select, claim, or implement subsequent stories without explicit user instruction.
 
 ## Workflow: Story Implementation
 1. Run preflight to verify clean tree, working tree scope, and branch freshness:
@@ -47,6 +48,7 @@ You are implementing a story in `qdev`.
    ```bash
    qdev transition story <story-id> review --json
    ```
+   **Stop and yield**: Do not proceed to another story or claim subsequent leases; stop calling tools and present the completed review status to the user.
 8. Handle Refusals:
    On any refusal or error from preflight, claim, gates, or transition, quote cited IDs (`constraint_id`, `gate_id`, `policy`, `blocking_ids`, `holder`).
 

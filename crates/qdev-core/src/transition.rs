@@ -961,6 +961,25 @@ impl TransitionEngine {
             justification,
         )?;
 
+        // [E5-SAFETY] Accepting a story into terminal 'done' status is restricted to human authors.
+        if target_state == StoryState::Done && options.author.author_type != "human" {
+            let attribution = crate::errors::RejectionAttribution::new(
+                "Accepting a story into terminal 'done' status is restricted to human authors",
+            )
+            .with_policy("human_author_required");
+
+            return Err(QdevError::policy_refusal(
+                "human_required",
+                "Transitioning a story to 'done' is restricted to human authors",
+            )
+            .with_details(serde_json::json!({
+                "story_id": id,
+                "target_status": target_state.as_str(),
+                "author_type": options.author.author_type,
+            }))
+            .with_attribution(attribution));
+        }
+
         // 4. Execute pre_transition hooks synchronously in order; the first error aborts
         //    before any mutation.
         let gate_skip_justification = Arc::new(Mutex::new(None));
