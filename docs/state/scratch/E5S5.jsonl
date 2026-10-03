@@ -1,0 +1,2 @@
+{"seq":1,"at":"2026-10-03T05:25:20Z","author":{"type":"human","id":"simon"},"kind":"note","text":"Beginning implementation of post-transition hook contract clarification and chore hygiene gate"}
+{"seq":2,"at":"2026-10-03T05:34:41Z","author":{"type":"human","id":"simon"},"kind":"note","text":"Implemented post-transition hook error clarification, chore comment hygiene gate, and conformance tests; all review gates passed"}

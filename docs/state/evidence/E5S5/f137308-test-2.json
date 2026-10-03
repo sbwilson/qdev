@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "gate": "test",
+  "story": "E5S5",
+  "commit": "f137308",
+  "status": "fail",
+  "exit_code": 101,
+  "duration_ms": 30682,
+  "metric": null,
+  "summary": "warning: unable to access '/Users/sim/.gitignore': Operation not permitted\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nTo /var/folders/sr/5g0r7pn51qldxb6fztmwg_qh0000gn/T/.tmpidVEwL/origin.git\n * [new branch]      develop -> develop\nTo /var/folders/sr/5g0r7pn51qldxb6fztmwg_qh0000gn/T/.tmpQZyhVN/origin.git\n * [new branch]      develop -> develop\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nTo /var/folders/sr/5g0r7pn51qldxb6fztmwg_qh0000gn/T/.tmp3HVnpq/origin.git\n * [new branch]      develop -> develop\nTo /var/folders/sr/5g0r7pn51qldxb6fztmwg_qh0000gn/T/.tmp1zbVSU/origin.git\n * [new branch]      develop -> develop\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nSwitched to branch 'develop'\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nTo /var/folders/sr/5g0r7pn51qldxb6fztmwg_qh0000gn/T/.tmp3HVnpq/origin.git\n   6df75dc..90871b9  develop -> develop\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nTo /var/folders/sr/5g0r7pn51qldxb6fztmwg_qh0000gn/T/.tmpZSo239/origin.git\n * [new branch]      develop -> develop\nTo /var/folders/sr/5g0r7pn51qldxb6fztmwg_qh0000gn/T/.tmpGJA9fT/origin.git\n * [new branch]      develop -> develop\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nTo /var/folders/sr/5g0r7pn51qldxb6fztmwg_qh0000gn/T/.tmp3HVnpq/origin.git\n - [deleted]         develop\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nSwitched to branch 'main'\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nwarning: unable to access '/Users/sim/.gitignore': Operation not permitted\nerror: test failed, to rerun pass `-p qdev-cli --test suite`",
+  "output_sha256": "891d50b57883a2ba3f612f9693f3b3c9c83ebf961563dd12796f5e458d443dc0",
+  "run_by": {
+    "type": "human",
+    "id": "simon"
+  },
+  "ran_at": "2026-10-03T05:35:18Z",
+  "verifies": [],
+  "skipped_locally": false
+}

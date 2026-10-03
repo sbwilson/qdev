@@ -16,9 +16,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::StorageConfig;
+use crate::config::{load_config, Config, StorageConfig};
 use crate::decision::{log_decision, DecisionInput};
 use crate::errors::QdevError;
+use crate::hygiene::{check_hygiene, HygieneCheckOptions};
 use crate::init::qdev_dir;
 use crate::validate::glob_match;
 use crate::write::{acquire_workspace_write_lock, current_iso8601, write_file_atomic, Author};
@@ -89,6 +90,7 @@ pub struct CommitChoreInput<'a> {
     pub storage: Option<&'a StorageConfig>,
     pub author: Author,
     pub strict: bool,
+    pub config: Option<&'a Config>,
 }
 
 /// Inputs to [`close_chore`] and [`abort_chore`], which share everything but the outcome.
@@ -477,6 +479,53 @@ pub fn commit_chore(input: &CommitChoreInput) -> Result<ChoreCommitResult, QdevE
                 record.paths.join(", ")
             ),
         ));
+    }
+
+    // [E5S5] Enforce comment hygiene on allowlisted paths before committing.
+    let effective_config = match input.config {
+        Some(cfg) => cfg.clone(),
+        None => load_config(root).map(|a| a.config).unwrap_or_default(),
+    };
+
+    if effective_config.hygiene.enabled {
+        let mut existing_paths: Vec<String> = Vec::new();
+        for p in &included {
+            let candidate = root.join(p);
+            if candidate.is_file() {
+                existing_paths.push(p.clone());
+            }
+        }
+        if !existing_paths.is_empty() {
+            let hygiene_options = HygieneCheckOptions {
+                diff: false,
+                paths: existing_paths,
+            };
+            let hygiene_outcome = check_hygiene(root, &effective_config, &hygiene_options)?;
+            if !hygiene_outcome.findings.is_empty() {
+                let count = hygiene_outcome.findings.len();
+                let summary = hygiene_outcome
+                    .findings
+                    .iter()
+                    .map(|f| format!("{}:{} [{}] {}", f.file, f.line, f.rule_id, f.excerpt))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let attribution = crate::errors::RejectionAttribution::new(
+                    "Chore execution modified files with comment hygiene violations",
+                )
+                .with_policy("hygiene");
+                return Err(QdevError::logical_failure(
+                    "hygiene_failed",
+                    format!(
+                        "Chore commit rejected due to {} comment hygiene violation(s): {}",
+                        count, summary
+                    ),
+                )
+                .with_details(serde_json::json!({
+                    "findings": hygiene_outcome.findings,
+                }))
+                .with_attribution(attribution));
+            }
+        }
     }
 
     // The ruling is written before the commit so the commit can carry it (D-5). If a previous

@@ -452,7 +452,7 @@ fn test_transition_ready_to_in_progress_blocked() {
     let tmp = TempDir::new().unwrap();
     setup_story_workspace(tmp.path());
 
-    // Dependency story E12S1 in ready (not done)
+    // [E12S1] Dependency in ready (not done)
     populate_cache_for_story(tmp.path(), "E12S1", "ready");
 
     write_story_file(
@@ -513,7 +513,7 @@ fn test_transition_ready_to_in_progress_unblocked() {
     let tmp = TempDir::new().unwrap();
     setup_story_workspace(tmp.path());
 
-    // Dependency story E12S1 is done
+    // [E12S1] Dependency is done
     populate_cache_for_story(tmp.path(), "E12S1", "done");
 
     write_story_file(
@@ -884,6 +884,209 @@ updated_by:
 
     assert_eq!(*pre_called.lock().unwrap(), vec!["pre:E12S1:review"]);
     assert_eq!(*post_called.lock().unwrap(), vec!["post:E12S1:v2"]);
+}
+
+#[test]
+fn test_post_transition_hook_runs_after_closes_dw_and_story_commit() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    write_dw_file(
+        tmp.path(),
+        "DW-7f3a",
+        r#"---
+id: DW-7f3a
+title: "Cleanup buffer allocation"
+status: open
+version: 1
+origin_story_id: E12S1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Description
+Deferral description.
+"#,
+    );
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: Story 4
+status: review
+version: 2
+appetite: small
+target_modules: ["bridge"]
+relations:
+  closes_dw:
+    - DW-7f3a
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    let executed = Arc::new(Mutex::new(false));
+    let hook_root = tmp.path().to_path_buf();
+    let hook_executed = executed.clone();
+
+    let mut engine = TransitionEngine::new();
+    engine.add_post_hook(
+        move |ctx: &TransitionContext, res: &qdev_core::EntityUpdateResult| {
+            // [E5S5] Conformance: verify DW is already closed and story is committed.
+            assert_eq!(ctx.story_id, "E12S4");
+            assert_eq!(ctx.from_state, StoryState::Review);
+            assert_eq!(ctx.to_state, StoryState::Done);
+            assert_eq!(res.new_version, 3);
+
+            let dw_content =
+                fs::read_to_string(hook_root.join("docs/state/dw/DW-7f3a.md")).unwrap();
+            assert!(dw_content.contains("status: done"));
+            assert!(dw_content.contains("resolution: E12S4"));
+
+            let story_content =
+                fs::read_to_string(hook_root.join("docs/specs/stories/E12S4.md")).unwrap();
+            assert!(story_content.contains("status: done"));
+            assert!(story_content.contains("version: 3"));
+
+            *hook_executed.lock().unwrap() = true;
+            Ok(())
+        },
+    );
+
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "done".to_string(),
+        justification: None,
+        author: Author::new("human", "simon"),
+        if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
+    };
+
+    let payload = engine.transition(&opts).unwrap();
+    assert_eq!(payload.id, "E12S4");
+    assert_eq!(payload.to_status, "done");
+    assert_eq!(payload.closed_dw, vec!["DW-7f3a".to_string()]);
+    assert!(*executed.lock().unwrap());
+}
+
+#[test]
+fn test_post_transition_hook_failure_reports_committed_state_and_preserves_disk() {
+    let tmp = TempDir::new().unwrap();
+    setup_story_workspace(tmp.path());
+
+    write_dw_file(
+        tmp.path(),
+        "DW-7f3a",
+        r#"---
+id: DW-7f3a
+title: "Cleanup buffer allocation"
+status: open
+version: 1
+origin_story_id: E12S1
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Description
+Deferral description.
+"#,
+    );
+
+    write_story_file(
+        tmp.path(),
+        "E12S4",
+        r#"---
+id: E12S4
+title: Story 4
+status: review
+version: 2
+appetite: small
+target_modules: ["bridge"]
+relations:
+  closes_dw:
+    - DW-7f3a
+created_by:
+  type: human
+  id: simon
+updated_by:
+  type: human
+  id: simon
+---
+
+## Acceptance Criteria
+- AC
+"#,
+    );
+
+    let mut engine = TransitionEngine::new();
+    engine.add_post_hook(
+        |_ctx: &TransitionContext, _res: &qdev_core::EntityUpdateResult| {
+            // [E5S5] Simulate post-transition hook failure after committed disk update.
+            Err(QdevError::logical_failure(
+                "external_notification_failed",
+                "webhook failed to notify channel",
+            ))
+        },
+    );
+
+    let opts = TransitionOptions {
+        workspace_root: tmp.path().to_path_buf(),
+        storage: None,
+        entity_kind: "story".to_string(),
+        story_id: "E12S4".to_string(),
+        target_status: "done".to_string(),
+        justification: None,
+        author: Author::new("human", "simon"),
+        if_version: None,
+        skip_gates: false,
+        interactivity: Interactivity::Interactive,
+    };
+
+    let err = engine.transition(&opts).unwrap_err();
+    assert_eq!(err.code(), "post_transition_hook_failed");
+    assert_eq!(err.exit_code(), ExitCode::LogicalFailure);
+
+    // [E5S5] Error details pinpoint committed version, closed DWs, and underlying error.
+    let details = err.details().expect("details must be present");
+    assert_eq!(details["story_id"], "E12S4");
+    assert_eq!(details["target_state"], "done");
+    assert_eq!(details["committed_version"], 3);
+    assert_eq!(details["closed_dw"], serde_json::json!(["DW-7f3a"]));
+    assert!(details["underlying_error"]
+        .as_str()
+        .unwrap()
+        .contains("webhook failed to notify channel"));
+
+    // [E5S5] Verify disk state was preserved: DW is closed and story is done at version 3.
+    let dw_content = fs::read_to_string(tmp.path().join("docs/state/dw/DW-7f3a.md")).unwrap();
+    assert!(dw_content.contains("status: done"));
+    assert!(dw_content.contains("resolution: E12S4"));
+
+    let story_content = fs::read_to_string(tmp.path().join("docs/specs/stories/E12S4.md")).unwrap();
+    assert!(story_content.contains("status: done"));
+    assert!(story_content.contains("version: 3"));
 }
 
 #[test]

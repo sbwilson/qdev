@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "gate": "qdev-hygiene",
+  "story": "E5S5",
+  "commit": "f137308",
+  "status": "pass",
+  "exit_code": 0,
+  "duration_ms": 117,
+  "metric": null,
+  "summary": "hygiene check passed: 0 findings",
+  "output_sha256": "9c30cc3a8a520fceec03605a596d319a209fdb6fa8e63a70017fb2a77bc0d947",
+  "run_by": {
+    "type": "human",
+    "id": "simon"
+  },
+  "ran_at": "2026-10-03T05:36:57Z",
+  "verifies": [],
+  "skipped_locally": false
+}

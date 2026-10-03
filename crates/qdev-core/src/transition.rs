@@ -1025,7 +1025,7 @@ impl TransitionEngine {
             )
         })?;
 
-        // 7. Auto-release the story's lease on a terminal target (Story 2.3) AFTER commit succeeds.
+        // 7. Auto-release the story's lease on a terminal target [E2S3] AFTER commit succeeds.
         if target_state.is_terminal() {
             let _ = crate::lease::auto_release_lease_with_storage(
                 &options.workspace_root,
@@ -1118,7 +1118,25 @@ impl TransitionEngine {
         };
 
         for hook in &self.post_hooks {
-            hook.run(&post_ctx, &update_res)?;
+            if let Err(e) = hook.run(&post_ctx, &update_res) {
+                return Err(QdevError::logical_failure(
+                    "post_transition_hook_failed",
+                    format!(
+                        "Post-transition hook failed after story {} was committed to state '{}' (version {}): {}",
+                        id,
+                        target_state.as_str(),
+                        update_res.new_version,
+                        e
+                    ),
+                )
+                .with_details(serde_json::json!({
+                    "story_id": id,
+                    "target_state": target_state.as_str(),
+                    "committed_version": update_res.new_version,
+                    "closed_dw": closed_dw,
+                    "underlying_error": e.to_string(),
+                })));
+            }
         }
 
         Ok(TransitionPayload {

@@ -312,6 +312,7 @@ pub fn handle_chore_commit(
         storage: Some(&annotated_config.config.storage),
         author,
         strict: commit_args.strict,
+        config: Some(&annotated_config.config),
     };
 
     let result = match qdev_core::commit_chore(&input) {

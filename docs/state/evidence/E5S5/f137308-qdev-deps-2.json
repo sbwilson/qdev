@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "gate": "qdev-deps",
+  "story": "E5S5",
+  "commit": "f137308",
+  "status": "pass",
+  "exit_code": 0,
+  "duration_ms": 231,
+  "metric": null,
+  "summary": "dependency check passed: zero undeclared imports or layer inversions",
+  "output_sha256": "2021c1cc5321d367b3eb4f2badd2d15df7ac03e05864e4826ae183dc43a1f194",
+  "run_by": {
+    "type": "human",
+    "id": "simon"
+  },
+  "ran_at": "2026-10-03T05:36:57Z",
+  "verifies": [],
+  "skipped_locally": false
+}

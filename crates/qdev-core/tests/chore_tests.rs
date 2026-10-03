@@ -1,4 +1,4 @@
-//! Unit tests for the Story 2.10 chore module: allowlist derivation, glob selection over real
+//! Unit tests for the [E2S10] chore module: allowlist derivation, glob selection over real
 //! `git status` output, the `DEC-` record, the decided edge cases (D-1 … D-5), and the ways a
 //! chore that never gets committed can still be settled.
 
@@ -79,6 +79,7 @@ fn commit(root: &Path, strict: bool) -> Result<qdev_core::ChoreCommitResult, qde
         storage: Some(&StorageConfig::default()),
         author: author(),
         strict,
+        config: None,
     })
 }
 
@@ -820,4 +821,51 @@ fn records_follow_the_configured_cache_dir() {
         .unwrap()
         .iter()
         .all(|r| r.id != record.id));
+}
+
+#[test]
+fn test_chore_commit_rejects_hygiene_violation() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    setup_workspace(root);
+
+    start(root, "Fix service bug", &["src/**"]);
+    fs::write(
+        root.join("src/main.rs"),
+        "// Story 1: Narrative memoir banner violation\nfn main() {}\n",
+    )
+    .unwrap();
+
+    let err = commit(root, false).unwrap_err();
+    assert_eq!(err.code(), "hygiene_failed");
+    assert_eq!(err.exit_code(), qdev_core::ExitCode::LogicalFailure);
+
+    // [E5S5] Chore remains open on hygiene failure so it can be corrected and retried.
+    let chore = find_open_chore(root, None)
+        .unwrap()
+        .expect("chore remains open");
+    assert_eq!(chore.status, "open");
+    assert!(chore.commit.is_none());
+    assert!(chore.decision_id.is_none());
+}
+
+#[test]
+fn test_chore_commit_accepts_clean_comments() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    setup_workspace(root);
+
+    start(root, "Add clean service", &["src/**"]);
+    fs::write(
+        root.join("src/main.rs"),
+        "// [E5S5] Clean compact bracket citation comment\nfn main() {}\n",
+    )
+    .unwrap();
+
+    let res = commit(root, false).expect("clean comments commit successfully");
+    assert!(res.committed);
+    assert_eq!(res.included, vec!["src/main.rs"]);
+
+    let chore = find_open_chore(root, None).unwrap();
+    assert!(chore.is_none());
 }
