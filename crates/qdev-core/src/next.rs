@@ -1,4 +1,4 @@
-//! Deterministic `qdev next` selection (Story 2.11).
+//! Deterministic `qdev next` selection [E2S11].
 //!
 //! Pure over store/lease/identity inputs: [`select_next`] only reads — no lease is created or
 //! broken, no entity or cache row is written, no decision record is logged. Candidates are the
@@ -17,14 +17,14 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::errors::QdevError;
 use crate::governance::{is_user_owner, normalize_team_name};
-use crate::lease::{get_lease, StoryLease};
+use crate::lease::{get_lease_with_storage, StoryLease};
 use crate::schema::{extract_frontmatter, EntityKind};
 use crate::sprint::sprint_entity_id;
 use crate::store::{EntityRecord, SprintRecord, Store};
 use crate::write::Author;
 
 /// Story statuses a candidate may be selected in. `done`, `review`, `superseded`, and
-/// `abandoned` stories are never picked; readiness gating is Epic 3's concern, so `draft`,
+/// `abandoned` stories are never picked; readiness gating is [E3]'s concern, so `draft`,
 /// `ready`, and `in-progress` are all eligible.
 const ELIGIBLE_STATUSES: [&str; 3] = ["draft", "ready", "in-progress"];
 
@@ -456,7 +456,7 @@ pub fn select_next(options: &NextOptions) -> Result<NextSelection, QdevError> {
         // story leased by this worktree, by this identity, stays eligible — finish what you
         // started. A lease on disk is an active lease (no TTL).
         let mut own_lease: Option<StoryLease> = None;
-        if let Some(lease) = get_lease(root, story_id) {
+        if let Some(lease) = get_lease_with_storage(root, story_id, Some(&options.config.storage)) {
             let here = {
                 let lease_path = Path::new(&lease.worktree_path);
                 let canon_lease = lease_path.canonicalize().ok();

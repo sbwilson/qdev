@@ -27,8 +27,15 @@ pub fn handle_doctor(
         // 1. Rewrite git hook shims if in a git repository
         if qdev_core::resolve_hooks_dir(&root).is_ok() {
             if let Err(e) = qdev_core::install_hooks(&root) {
-                let _ = output.emit_error(&e);
-                return e.exit_code();
+                if e.code() == "permission_denied" {
+                    let _ = output.emit_text(&format!(
+                        "Warning: Git hook installation skipped: {}\n",
+                        e.message()
+                    ));
+                } else {
+                    let _ = output.emit_error(&e);
+                    return e.exit_code();
+                }
             }
         }
 

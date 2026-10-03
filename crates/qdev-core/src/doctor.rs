@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::ser::SerializeMap;
 use serde::Serialize;
 
-use crate::config::{Config, LeasesConfig};
+use crate::config::{Config, LeasesConfig, StorageConfig};
 use crate::errors::QdevError;
 use crate::store::sqlite::CACHE_SCHEMA_VERSION;
 use crate::store::{EntityFilter, Store};
@@ -255,13 +255,19 @@ impl DoctorSection for ValidationDoctorSection {
 pub struct LeasesDoctorSection {
     workspace_root: PathBuf,
     config: LeasesConfig,
+    storage: Option<StorageConfig>,
 }
 
 impl LeasesDoctorSection {
-    pub fn new(workspace_root: PathBuf, config: LeasesConfig) -> Self {
+    pub fn new(
+        workspace_root: PathBuf,
+        config: LeasesConfig,
+        storage: Option<StorageConfig>,
+    ) -> Self {
         Self {
             workspace_root,
             config,
+            storage,
         }
     }
 }
@@ -272,7 +278,7 @@ impl DoctorSection for LeasesDoctorSection {
     }
 
     fn run(&self, _store: &dyn Store) -> Result<DoctorSectionReport, QdevError> {
-        match crate::lease::list_leases(&self.workspace_root) {
+        match crate::lease::list_leases_with_storage(&self.workspace_root, self.storage.as_ref()) {
             Ok(leases) => {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -887,6 +893,7 @@ pub fn default_doctor_sections(
         Box::new(LeasesDoctorSection::new(
             workspace_root.to_path_buf(),
             config.leases.clone(),
+            Some(config.storage.clone()),
         )),
         Box::new(HooksDoctorSection::new(workspace_root.to_path_buf())),
         Box::new(SkillsDoctorSection::new(workspace_root.to_path_buf())),

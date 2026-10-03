@@ -3,7 +3,8 @@ use std::path::Path;
 
 use qdev_core::config::LeasesConfig;
 use qdev_core::lease::{
-    claim_story, discover_git_common_dir, find_active_lease, get_lease, release_story,
+    claim_story, discover_git_common_dir, find_active_lease, find_workspace_leases, get_lease,
+    release_story,
 };
 use qdev_core::store::sqlite::SqliteStore;
 use qdev_core::transition::{TransitionEngine, TransitionOptions};
@@ -167,19 +168,19 @@ fn test_find_active_lease_single_and_multiple() {
     write_story(root, "E12S2", "Story 2", "in-progress");
 
     // Empty workspace
-    let err = find_active_lease(root).unwrap_err();
+    let err = find_active_lease(root, None).unwrap_err();
     assert_eq!(err.exit_code(), ExitCode::LogicalFailure);
     assert_eq!(err.code(), "no_active_lease");
 
     // 1 lease
     let author = Author::new("human", "simon");
     claim_story(root, "E12S1", &author, None, None).unwrap();
-    let active = find_active_lease(root).unwrap();
+    let active = find_active_lease(root, None).unwrap();
     assert_eq!(active.story_id, "E12S1");
 
     // 2 leases
     claim_story(root, "E12S2", &author, None, None).unwrap();
-    let err = find_active_lease(root).unwrap_err();
+    let err = find_active_lease(root, None).unwrap_err();
     assert_eq!(err.exit_code(), ExitCode::UsageError);
 }
 
@@ -327,7 +328,7 @@ fn test_linked_worktree_lease_discovery() {
     )
     .unwrap();
 
-    // Claim story E12S4 in main_repo by simon
+    // Claim [E12S4] in main_repo by simon
     let author_simon = Author::new("human", "simon");
     claim_story(&main_repo, "E12S4", &author_simon, None, None).unwrap();
 
@@ -378,6 +379,7 @@ fn test_doctor_leases_section_reports_active_and_stale() {
     let doctor_section = qdev_core::doctor::LeasesDoctorSection::new(
         root.to_path_buf(),
         LeasesConfig { stale_age_days: 3 },
+        None,
     );
 
     let store = SqliteStore::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
@@ -396,4 +398,47 @@ fn test_doctor_leases_section_reports_active_and_stale() {
     assert_eq!(stale_list.len(), 1);
     assert_eq!(stale_list[0]["story_id"], "E12S2");
     assert_eq!(stale_list[0]["holder"], "bob");
+}
+
+#[test]
+fn test_custom_storage_leases_discovery_and_release() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let storage = qdev_core::config::StorageConfig {
+        cache_dir: "custom/cache".to_string(),
+        specs_dir: "docs/specs".to_string(),
+        state_dir: "docs/state".to_string(),
+    };
+
+    write_story(root, "E12S1", "Story 1", "in-progress");
+    let author = Author::new("human", "simon");
+
+    claim_story(root, "E12S1", &author, Some(&storage), None).unwrap();
+
+    let expected_lease_dir = root.join("custom").join("leases");
+    assert!(expected_lease_dir.join("E12S1.json").is_file());
+
+    let active = find_active_lease(root, Some(&storage)).unwrap();
+    assert_eq!(active.story_id, "E12S1");
+
+    let all = find_workspace_leases(root, Some(&storage)).unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].story_id, "E12S1");
+
+    let doctor_section = qdev_core::doctor::LeasesDoctorSection::new(
+        root.to_path_buf(),
+        LeasesConfig { stale_age_days: 3 },
+        Some(storage.clone()),
+    );
+    let store = SqliteStore::open(root.join(".qdev/cache/cache.sqlite")).unwrap();
+    let report = doctor_section.run(&store).unwrap();
+    let fields: std::collections::HashMap<String, serde_json::Value> =
+        report.fields.into_iter().collect();
+    assert_eq!(fields["active_count"], 1);
+
+    release_story(root, "E12S1", &author, false, None, Some(&storage), None).unwrap();
+    let empty_err = find_active_lease(root, Some(&storage)).unwrap_err();
+    assert_eq!(empty_err.code(), "no_active_lease");
 }

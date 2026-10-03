@@ -248,3 +248,35 @@ fn test_run_pre_commit_secret_blocks() {
     let err = run_pre_commit(root, &config, &[], None).unwrap_err();
     assert_eq!(err.code(), "secret_detected");
 }
+
+#[test]
+fn test_install_hooks_permission_denied_returns_actionable_error() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    init_git_repo(root);
+
+    let hooks_dir = root.join(".git").join("hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&hooks_dir).unwrap().permissions();
+        perms.set_mode(0o444);
+        fs::set_permissions(&hooks_dir, perms).unwrap();
+    }
+
+    let err = install_hooks(root).unwrap_err();
+    assert_eq!(err.code(), "permission_denied");
+    assert!(err
+        .message()
+        .contains("permission denied or restricted by sandbox isolation"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&hooks_dir).unwrap().permissions();
+        perms.set_mode(0o755);
+        let _ = fs::set_permissions(&hooks_dir, perms);
+    }
+}

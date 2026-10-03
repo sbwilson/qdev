@@ -132,14 +132,31 @@ pub struct HookInstallReport {
     pub preserved_legacy: Vec<String>,
 }
 
+fn is_permission_denied(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::PermissionDenied
+        || err.raw_os_error() == Some(1)
+        || err.raw_os_error() == Some(13)
+}
+
 /// Writes or updates all expected Git hook shims, preserving non-qdev hooks by chaining.
 pub fn install_hooks(workspace_root: &Path) -> Result<HookInstallReport, QdevError> {
     let hooks_dir = resolve_hooks_dir(workspace_root)?;
     fs::create_dir_all(&hooks_dir).map_err(|e| {
-        QdevError::infrastructure_failure(
-            "io_error",
-            format!("Failed to create hooks directory: {}", e),
-        )
+        if is_permission_denied(&e) {
+            QdevError::infrastructure_failure(
+                "permission_denied",
+                format!(
+                    "Failed to create git hooks directory '{}': permission denied or restricted by sandbox isolation. \
+                     To install git hooks, ensure write access or run outside sandbox isolation.",
+                    hooks_dir.display()
+                ),
+            )
+        } else {
+            QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to create hooks directory: {}", e),
+            )
+        }
     })?;
 
     let mut installed_hooks = Vec::new();
@@ -158,10 +175,21 @@ pub fn install_hooks(workspace_root: &Path) -> Result<HookInstallReport, QdevErr
                 let legacy_path = hooks_dir.join(format!("{}.legacy", hook));
                 if !legacy_path.exists() {
                     fs::rename(&hook_path, &legacy_path).map_err(|e| {
-                        QdevError::infrastructure_failure(
-                            "io_error",
-                            format!("Failed to rename legacy hook '{}': {}", hook, e),
-                        )
+                        if is_permission_denied(&e) {
+                            QdevError::infrastructure_failure(
+                                "permission_denied",
+                                format!(
+                                    "Failed to rename legacy hook '{}': permission denied or restricted by sandbox isolation. \
+                                     To install git hooks, ensure write access or run outside sandbox isolation.",
+                                    hook
+                                ),
+                            )
+                        } else {
+                            QdevError::infrastructure_failure(
+                                "io_error",
+                                format!("Failed to rename legacy hook '{}': {}", hook, e),
+                            )
+                        }
                     })?;
                     preserved_legacy.push(hook.to_string());
                 }
@@ -184,20 +212,42 @@ pub fn install_hooks(workspace_root: &Path) -> Result<HookInstallReport, QdevErr
 fn write_shim(hook_path: &Path, hook: &str) -> Result<(), QdevError> {
     let content = shim_content(hook);
     fs::write(hook_path, content.as_bytes()).map_err(|e| {
-        QdevError::infrastructure_failure(
-            "io_error",
-            format!("Failed to write hook shim '{}': {}", hook_path.display(), e),
-        )
+        if is_permission_denied(&e) {
+            QdevError::infrastructure_failure(
+                "permission_denied",
+                format!(
+                    "Failed to write hook shim '{}': permission denied or restricted by sandbox isolation. \
+                     To install git hooks, ensure write access or run outside sandbox isolation.",
+                    hook_path.display()
+                ),
+            )
+        } else {
+            QdevError::infrastructure_failure(
+                "io_error",
+                format!("Failed to write hook shim '{}': {}", hook_path.display(), e),
+            )
+        }
     })?;
     set_executable(hook_path).map_err(|e| {
-        QdevError::infrastructure_failure(
-            "io_error",
-            format!(
-                "Failed to set permissions on '{}': {}",
-                hook_path.display(),
-                e
-            ),
-        )
+        if is_permission_denied(&e) {
+            QdevError::infrastructure_failure(
+                "permission_denied",
+                format!(
+                    "Failed to set permissions on '{}': permission denied or restricted by sandbox isolation. \
+                     To install git hooks, ensure write access or run outside sandbox isolation.",
+                    hook_path.display()
+                ),
+            )
+        } else {
+            QdevError::infrastructure_failure(
+                "io_error",
+                format!(
+                    "Failed to set permissions on '{}': {}",
+                    hook_path.display(),
+                    e
+                ),
+            )
+        }
     })?;
     Ok(())
 }

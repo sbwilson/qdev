@@ -147,7 +147,7 @@ pub fn handle_release(
         }
         id
     } else {
-        match qdev_core::find_active_lease(&root) {
+        match qdev_core::find_active_lease(&root, Some(&annotated_config.config.storage)) {
             Ok(lease) => lease.story_id,
             Err(e) => {
                 let _ = output.emit_error(&e);

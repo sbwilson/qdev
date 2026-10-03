@@ -1148,3 +1148,39 @@ fn test_doctor_fix_corrupt_cache_with_yes_rebuilds_cache() {
     assert_eq!(cache_sec["schema_status"], "ok");
     assert_eq!(cache_sec["entity_count"], 1);
 }
+
+#[test]
+fn test_doctor_fix_handles_read_only_hooks_gracefully() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    setup_workspace(root);
+
+    let hooks_dir = root.join(".git/hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&hooks_dir).unwrap().permissions();
+        perms.set_mode(0o444);
+        fs::set_permissions(&hooks_dir, perms).unwrap();
+    }
+
+    let mut cmd = Command::cargo_bin("qdev").unwrap();
+    let assert = cmd
+        .current_dir(root)
+        .args(["doctor", "--fix", "--yes", "--non-interactive"])
+        .assert()
+        .success();
+
+    let text = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(text.contains("Warning: Git hook installation skipped"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&hooks_dir).unwrap().permissions();
+        perms.set_mode(0o755);
+        let _ = fs::set_permissions(&hooks_dir, perms);
+    }
+}

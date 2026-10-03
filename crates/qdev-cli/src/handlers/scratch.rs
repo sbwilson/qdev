@@ -85,13 +85,14 @@ pub fn handle_scratch_append(
     };
 
     // 5. Check lease authorization
-    let workspace_leases = match qdev_core::find_workspace_leases(&root) {
-        Ok(l) => l,
-        Err(e) => {
-            let _ = output.emit_error(&e);
-            return e.exit_code();
-        }
-    };
+    let workspace_leases =
+        match qdev_core::find_workspace_leases(&root, Some(&annotated_config.config.storage)) {
+            Ok(l) => l,
+            Err(e) => {
+                let _ = output.emit_error(&e);
+                return e.exit_code();
+            }
+        };
 
     let has_active_lease = workspace_leases
         .iter()

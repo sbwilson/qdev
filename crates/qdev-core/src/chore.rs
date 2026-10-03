@@ -1,4 +1,4 @@
-//! Path-allowlisted chores per Story 2.10.
+//! Path-allowlisted chores [E2S10].
 //!
 //! A *chore* is a trivial change that belongs to no story: `qdev chore start` records a title and
 //! the path globs the change is confined to, and `qdev chore commit` stages and commits **only**
@@ -244,7 +244,7 @@ pub fn start_chore(input: &StartChoreInput) -> Result<ChoreRecord, QdevError> {
 
     // Every lease in this worktree blocks a new chore, so all of them are named — picking one
     // out of a set would point at a story this worktree may not even be working on.
-    let leases = crate::lease::find_workspace_leases(root)?;
+    let leases = crate::lease::find_workspace_leases(root, input.storage)?;
     if !input.alongside && !leases.is_empty() {
         let named: Vec<String> = leases
             .iter()

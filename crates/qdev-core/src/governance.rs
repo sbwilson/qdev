@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{Config, StorageConfig};
 use crate::errors::QdevError;
 use crate::id::Identifier;
-use crate::lease::{find_workspace_leases, get_lease, StoryLease};
+use crate::lease::{find_workspace_leases, get_lease_with_storage, StoryLease};
 use crate::schema::{extract_frontmatter, validate_frontmatter, EntityKind};
 use crate::store::{EntityRecord, Store};
 use crate::write::{
@@ -295,7 +295,8 @@ pub fn classify_mutation(
     config: &Config,
     opt_store: Option<&dyn Store>,
 ) -> Result<ScopeClassification, QdevError> {
-    let workspace_leases = find_workspace_leases(workspace_root).unwrap_or_default();
+    let workspace_leases =
+        find_workspace_leases(workspace_root, Some(&config.storage)).unwrap_or_default();
     let target_owners =
         extract_entity_owners(workspace_root, target_id, Some(&config.storage), opt_store);
     let user_teams = resolve_user_teams(author, config, Some(workspace_root));
@@ -350,7 +351,9 @@ pub fn classify_mutation(
         } else {
             target_id
         };
-        if let Some(other_lease) = get_lease(workspace_root, story_to_check) {
+        if let Some(other_lease) =
+            get_lease_with_storage(workspace_root, story_to_check, Some(&config.storage))
+        {
             (true, Some(other_lease))
         } else {
             (false, None)

@@ -342,13 +342,8 @@ pub fn list_leases_with_storage(
     Ok(map.into_values().collect())
 }
 
-/// Lists active leases present in the current workspace directory (`.qdev/leases`).
-pub fn find_workspace_leases(workspace_root: &Path) -> Result<Vec<StoryLease>, QdevError> {
-    find_workspace_leases_with_storage(workspace_root, None)
-}
-
 /// Lists active leases present in the current workspace directory, respecting StorageConfig.
-pub fn find_workspace_leases_with_storage(
+pub fn find_workspace_leases(
     workspace_root: &Path,
     storage: Option<&StorageConfig>,
 ) -> Result<Vec<StoryLease>, QdevError> {
@@ -380,18 +375,21 @@ pub fn find_workspace_leases_with_storage(
     Ok(leases)
 }
 
-/// Finds the single active lease held in the current workspace.
-/// Returns exit 1 `no_active_lease` if no lease is held, or exit 2 `usage_error` if multiple are held.
-pub fn find_active_lease(workspace_root: &Path) -> Result<StoryLease, QdevError> {
-    find_active_lease_with_storage(workspace_root, None)
+/// Compatibility alias for [`find_workspace_leases`].
+pub fn find_workspace_leases_with_storage(
+    workspace_root: &Path,
+    storage: Option<&StorageConfig>,
+) -> Result<Vec<StoryLease>, QdevError> {
+    find_workspace_leases(workspace_root, storage)
 }
 
 /// Finds the single active lease held in the current workspace, respecting StorageConfig.
-pub fn find_active_lease_with_storage(
+/// Returns exit 1 `no_active_lease` if no lease is held, or exit 2 `usage_error` if multiple are held.
+pub fn find_active_lease(
     workspace_root: &Path,
     storage: Option<&StorageConfig>,
 ) -> Result<StoryLease, QdevError> {
-    let leases = find_workspace_leases_with_storage(workspace_root, storage)?;
+    let leases = find_workspace_leases(workspace_root, storage)?;
     if leases.is_empty() {
         return Err(QdevError::logical_failure(
             "no_active_lease",
@@ -404,6 +402,14 @@ pub fn find_active_lease_with_storage(
         ));
     }
     Ok(leases.into_iter().next().unwrap())
+}
+
+/// Compatibility alias for [`find_active_lease`].
+pub fn find_active_lease_with_storage(
+    workspace_root: &Path,
+    storage: Option<&StorageConfig>,
+) -> Result<StoryLease, QdevError> {
+    find_active_lease(workspace_root, storage)
 }
 
 /// Claims a lease for an unleased story.
@@ -664,9 +670,8 @@ pub fn release_story(
         let _ = fs::remove_file(&shared_file);
     }
 
-    let other_local = Path::new(&existing.worktree_path)
-        .join(".qdev/leases")
-        .join(format!("{}.json", trimmed_id));
+    let other_local =
+        lease_dir(Path::new(&existing.worktree_path), storage).join(format!("{}.json", trimmed_id));
     if other_local.exists() && other_local != local_file {
         let _ = fs::remove_file(&other_local);
     }
@@ -721,8 +726,7 @@ pub fn auto_release_lease_with_storage(
             }
         }
 
-        let other_local = Path::new(&existing.worktree_path)
-            .join(".qdev/leases")
+        let other_local = lease_dir(Path::new(&existing.worktree_path), storage)
             .join(format!("{}.json", trimmed_id));
         if other_local.exists() && other_local != local_file {
             let _ = fs::remove_file(&other_local);
